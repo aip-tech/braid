@@ -121,6 +121,123 @@ describe("runManager", () => {
 	}, 10000);
 });
 
+describe("runManager plugin support", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+	const PLUGIN_FIXTURES = join(FIXTURES, "plugins");
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-plugin-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	async function fetchWithToken(
+		pidfile: { controlPort: number; controlToken: string },
+		path: string,
+	): Promise<Response> {
+		return fetch(`http://127.0.0.1:${pidfile.controlPort}${path}`, {
+			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+		});
+	}
+
+	it("records controlPort/controlToken in the pidfile and serves the core /api/status route", async () => {
+		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		expect(typeof pidfile.controlPort).toBe("number");
+		expect(typeof pidfile.controlToken).toBe("string");
+		expect(pidfile.controlToken.length).toBeGreaterThan(0);
+
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		const res = await fetchWithToken(pidfile, "/api/status");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Array<{ name: string; alive: boolean }>;
+		const expected = statusFromPidfile(pidfilePath)
+			.map((w) => ({ name: w.name, alive: w.alive }))
+			.sort((a, b) => a.name.localeCompare(b.name));
+		expect(
+			body
+				.map((w) => ({ name: w.name, alive: w.alive }))
+				.sort((a, b) => a.name.localeCompare(b.name)),
+		).toEqual(expected);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("registers an external plugin's route and delivers it a processStart event before any could be missed", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			plugins: [join(PLUGIN_FIXTURES, "ok-plugin.js")],
+			configPath: join(tmpDir, "braid.config.ts"),
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		const res = await fetchWithToken(pidfile, "/ok");
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe("ok");
+
+		await waitFor(() =>
+			writeSpy.mock.calls.some((call) =>
+				String(call[0]).includes("[plugin:ok] saw processStart"),
+			),
+		);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("isolates a throwing external plugin: the manager, its other routes, and its workers keep working", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			plugins: [
+				join(PLUGIN_FIXTURES, "throwing-plugin.js"),
+				join(PLUGIN_FIXTURES, "ok-plugin.js"),
+			],
+			configPath: join(tmpDir, "braid.config.ts"),
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		const okRes = await fetchWithToken(pidfile, "/ok");
+		expect(okRes.status).toBe(200);
+		const statusRes = await fetchWithToken(pidfile, "/api/status");
+		expect(statusRes.status).toBe(200);
+		expect(
+			writeSpy.mock.calls.some((call) =>
+				String(call[0]).includes("[plugin:throwing] failed to register: boom"),
+			),
+		).toBe(true);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+});
+
 describe("pidfile helpers with no pidfile present", () => {
 	const missingPath = join(tmpdir(), "braid-test-missing", "run.json");
 

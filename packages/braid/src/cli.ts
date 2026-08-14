@@ -8,7 +8,7 @@ import {
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
-import type { ProcessConfig } from "./types.js";
+import type { BraidConfig, ProcessConfig } from "./types.js";
 
 export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
 export const DEFAULT_PIDFILE_PATH = join(".braid", "run.json");
@@ -29,20 +29,44 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	return { command, configPath: resolve(cwd, configPath) };
 }
 
-export async function loadConfig(configPath: string): Promise<ProcessConfig[]> {
+const CONFIG_SHAPE_ERROR = (configPath: string): string =>
+	`braid config at ${configPath} must default-export a non-empty array or a { processes } object`;
+
+/**
+ * Normalizes a config file's default export to a BraidConfig. A bare
+ * ProcessConfig[] (today's format) becomes { processes: [...] } with no
+ * plugins; the object form additionally allows a `plugins` array.
+ */
+export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	if (!existsSync(configPath)) {
 		throw new Error(`braid config not found at ${configPath}`);
 	}
 	const mod = (await import(pathToFileURL(configPath).href)) as {
 		default?: unknown;
 	};
-	const config = mod.default;
-	if (!Array.isArray(config) || config.length === 0) {
-		throw new Error(
-			`braid config at ${configPath} must default-export a non-empty array`,
-		);
+	const exported = mod.default;
+
+	if (Array.isArray(exported)) {
+		if (exported.length === 0) {
+			throw new Error(CONFIG_SHAPE_ERROR(configPath));
+		}
+		return { processes: exported as ProcessConfig[] };
 	}
-	return config as ProcessConfig[];
+
+	if (exported && typeof exported === "object") {
+		const { processes, plugins } = exported as Partial<BraidConfig>;
+		if (!Array.isArray(processes) || processes.length === 0) {
+			throw new Error(CONFIG_SHAPE_ERROR(configPath));
+		}
+		if (plugins !== undefined && !Array.isArray(plugins)) {
+			throw new Error(
+				`braid config at ${configPath}'s "plugins" must be an array`,
+			);
+		}
+		return { processes: processes as ProcessConfig[], plugins };
+	}
+
+	throw new Error(CONFIG_SHAPE_ERROR(configPath));
 }
 
 export async function runCli(argv: string[], cwd: string): Promise<number> {
@@ -58,8 +82,11 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				);
 				return 1;
 			}
-			const configs = await loadConfig(configPath);
-			return runManager(configs, pidfilePath);
+			const config = await loadConfig(configPath);
+			return runManager(config.processes, pidfilePath, {
+				plugins: config.plugins,
+				configPath,
+			});
 		}
 		case "stop": {
 			const stopped = await stopFromPidfile(pidfilePath);

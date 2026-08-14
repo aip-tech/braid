@@ -2,6 +2,7 @@ node_modules
 dist
 coverage
 .nyc_output
+.claude
 
 # OS
 .DS_Store

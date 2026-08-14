@@ -129,15 +129,44 @@ describe("loadConfig", () => {
 		await expect(loadConfig(configPath)).rejects.toThrow(/non-empty array/);
 	});
 
-	it("loads a valid TypeScript config's default export", async () => {
+	it("loads a valid TypeScript config's default export (bare array form)", async () => {
 		const configPath = join(tmpDir, "valid.config.ts");
 		writeFileSync(
 			configPath,
 			`const config = [{ name: "one", command: "node", args: ["${join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\")}"] }];\nexport default config;\n`,
 		);
 		const config = await loadConfig(configPath);
-		expect(config).toHaveLength(1);
-		expect(config[0].name).toBe("one");
+		expect(config.processes).toHaveLength(1);
+		expect(config.processes[0].name).toBe("one");
+		expect(config.plugins).toBeUndefined();
+	});
+
+	it("loads the { processes, plugins } object form", async () => {
+		const configPath = join(tmpDir, "valid.config.ts");
+		writeFileSync(
+			configPath,
+			`const config = { processes: [{ name: "one", command: "node", args: ["${join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\")}"] }], plugins: ["some-plugin"] };\nexport default config;\n`,
+		);
+		const config = await loadConfig(configPath);
+		expect(config.processes).toHaveLength(1);
+		expect(config.plugins).toEqual(["some-plugin"]);
+	});
+
+	it("throws when the object form's processes is missing or empty", async () => {
+		const configPath = join(tmpDir, "no-processes.config.ts");
+		writeFileSync(configPath, "export default { processes: [] };\n");
+		await expect(loadConfig(configPath)).rejects.toThrow(/non-empty array/);
+	});
+
+	it("throws when the object form's plugins isn't an array", async () => {
+		const configPath = join(tmpDir, "bad-plugins.config.ts");
+		writeFileSync(
+			configPath,
+			'export default { processes: [{ name: "one", command: "node" }], plugins: "nope" };\n',
+		);
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/"plugins" must be an array/,
+		);
 	});
 });
 

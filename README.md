@@ -4,7 +4,7 @@ Runs multiple long-lived processes as one unit: tracks their PIDs in a pidfile, 
 
 Built as a replacement for ad hoc `concurrently`/shell-script setups in monorepo `dev` scripts, where you want more than "run these commands in parallel": PID tracking you can query or kill from a separate terminal, restart-on-change for only the processes that need it, and a crash in one process taking the whole stack down together instead of leaving orphaned siblings running.
 
-> **Status**: early-stage development. Core process management (PID tracking, nodemon-driven restarts, kill-everything-on-crash) works and is tested, the CLI is a real compiled `bin` with no TypeScript required to run it, and CI covers typecheck/lint/test/build. Published on npm as `@aip-tech/braid` — a web dashboard for start/stop/status is on the roadmap.
+> **Status**: early-stage development. Core process management (PID tracking, nodemon-driven restarts, kill-everything-on-crash) works and is tested, the CLI is a real compiled `bin` with no TypeScript required to run it, and CI covers typecheck/lint/test/build. `start` also runs an internal, token-guarded plugin API — no plugins ship yet, but a web dashboard plugin is on the roadmap. Published on npm as `@aip-tech/braid`.
 
 For install instructions, config format, and CLI usage of the actual npm package, see **[packages/braid/README.md](packages/braid/README.md)**. This root README covers the workspace/monorepo itself.
 
