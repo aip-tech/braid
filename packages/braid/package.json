@@ -7,7 +7,7 @@
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"bin": {
-		"braid": "./dist/cli.js"
+		"braid": "dist/cli.js"
 	},
 	"files": [
 		"dist"
