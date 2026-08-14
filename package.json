@@ -1,0 +1,27 @@
+{
+	"name": "braid-monorepo",
+	"private": true,
+	"version": "0.1.0",
+	"packageManager": "pnpm@11.16.0",
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"dev": "pnpm --filter ./packages/example run dev",
+		"dev:stop": "pnpm --filter ./packages/example run dev:stop",
+		"dev:status": "pnpm --filter ./packages/example run dev:status",
+		"format": "pnpm -r run format",
+		"lint": "pnpm -r run lint",
+		"check": "pnpm -r run check",
+		"test": "pnpm -r run test",
+		"coverage": "pnpm -r run coverage"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.0",
+		"@types/node": "^26.0.0",
+		"@vitest/coverage-istanbul": "^4.1.10",
+		"tsx": "^4.22.4",
+		"typescript": "^6.0.3",
+		"vitest": "4.1.10"
+	}
+}

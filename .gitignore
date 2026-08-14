@@ -1,0 +1,21 @@
+node_modules
+dist
+coverage
+.nyc_output
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editors
+.vscode/
+.idea/
+
+# TypeScript
+*.tsbuildinfo
+
+# braid's own pidfile, when run against this repo
+.process-manager/
