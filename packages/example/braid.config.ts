@@ -1,4 +1,4 @@
-import type { ProcessConfig } from "braid";
+import type { ProcessConfig } from "@aip-tech/braid";
 
 const config: ProcessConfig[] = [
 	{

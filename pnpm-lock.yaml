@@ -38,7 +38,7 @@ importers:
 
   packages/example:
     dependencies:
-      braid:
+      '@aip-tech/braid':
         specifier: workspace:*
         version: link:../braid
 

@@ -4,14 +4,14 @@ Runs multiple long-lived processes as one unit: tracks their PIDs in a pidfile, 
 
 Built as a replacement for ad hoc `concurrently`/shell-script setups in monorepo `dev` scripts, where you want more than "run these commands in parallel": PID tracking you can query or kill from a separate terminal, restart-on-change for only the processes that need it, and a crash in one process taking the whole stack down together instead of leaving orphaned siblings running.
 
-> **Status**: early, extracted from an internal monorepo. Not yet published to npm.
+> **Status**: early-stage development. Core process management (PID tracking, nodemon-driven restarts, kill-everything-on-crash) works and is tested, but the feature set is still growing — a CLI `bin`/build step, a proper npm publish, and a web dashboard for start/stop/status are all on the roadmap. Not yet published to npm.
 
 ## Config
 
 A config file default-exports an array of `ProcessConfig` (see [`src/types.ts`](./src/types.ts)):
 
 ```ts
-import type { ProcessConfig } from "braid";
+import type { ProcessConfig } from "@aip-tech/braid";
 
 const config: ProcessConfig[] = [
 	{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },

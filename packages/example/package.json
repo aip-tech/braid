@@ -1,5 +1,5 @@
 {
-	"name": "braid-example",
+	"name": "@aip-tech/braid-example",
 	"version": "0.0.0",
 	"private": true,
 	"description": "Live test bed for braid: starts a couple of toy processes via the workspace-local braid source.",
@@ -13,6 +13,6 @@
 		"check": "biome check --write"
 	},
 	"dependencies": {
-		"braid": "workspace:*"
+		"@aip-tech/braid": "workspace:*"
 	}
 }

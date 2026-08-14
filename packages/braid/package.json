@@ -1,11 +1,14 @@
 {
-	"name": "braid",
+	"name": "@aip-tech/braid",
 	"version": "0.1.0",
 	"description": "Runs multiple long-lived processes as one unit — PID tracking, nodemon-driven restarts, and kill-everything-on-crash.",
 	"license": "MIT",
 	"type": "module",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
+	"publishConfig": {
+		"access": "public"
+	},
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/aip-tech/braid.git"
