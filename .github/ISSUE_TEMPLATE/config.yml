@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/aip-tech/braid/security/policy
+    about: Please report security vulnerabilities privately rather than as a public issue — see SECURITY.md.

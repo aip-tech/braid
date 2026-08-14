@@ -1,12 +1,75 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_PIDFILE_PATH, loadConfig, parseArgs, runCli } from "./cli.js";
+import {
+	DEFAULT_PIDFILE_PATH,
+	isMainModule,
+	loadConfig,
+	parseArgs,
+	runCli,
+} from "./cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__");
+
+describe("isMainModule", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-is-main-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("returns false when argv1 is undefined", () => {
+		expect(isMainModule(undefined, "file:///anything")).toBe(false);
+	});
+
+	it("returns false when argv1 doesn't resolve to a real file", () => {
+		expect(isMainModule(join(tmpDir, "missing.js"), "file:///anything")).toBe(
+			false,
+		);
+	});
+
+	// import.meta.url for a real loaded module always reports the canonical (realpath'd) location,
+	// which on macOS differs from a freshly-built tmpdir path (/var/folders/... -> /private/var/...)
+	// - so tests build the expected moduleUrl via realpathSync too, matching what Node actually does.
+	it("matches when argv1 is the same real file as moduleUrl", () => {
+		const realFile = join(tmpDir, "cli.js");
+		writeFileSync(realFile, "");
+		const moduleUrl = pathToFileURL(realpathSync(realFile)).href;
+		expect(isMainModule(realFile, moduleUrl)).toBe(true);
+	});
+
+	it("matches when argv1 is a symlink to moduleUrl's real file (the installed-bin case)", () => {
+		const realFile = join(tmpDir, "real-cli.js");
+		const symlinkPath = join(tmpDir, "braid");
+		writeFileSync(realFile, "");
+		symlinkSync(realFile, symlinkPath);
+
+		const moduleUrl = pathToFileURL(realpathSync(realFile)).href;
+		expect(isMainModule(symlinkPath, moduleUrl)).toBe(true);
+	});
+
+	it("returns false when argv1 resolves to a different file than moduleUrl", () => {
+		const realFile = join(tmpDir, "cli.js");
+		const otherFile = join(tmpDir, "other.js");
+		writeFileSync(realFile, "");
+		writeFileSync(otherFile, "");
+		expect(isMainModule(otherFile, pathToFileURL(realFile).href)).toBe(false);
+	});
+});
 
 async function waitFor(
 	predicate: () => boolean,

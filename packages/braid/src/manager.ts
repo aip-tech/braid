@@ -16,8 +16,15 @@ import type {
 	WorkerStatusMessage,
 } from "./types.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const WORKER_PATH = join(__dirname, "worker.ts");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+// Compiled output (dist/manager.js) sits next to a compiled dist/worker.js; running straight from
+// source (dev, tests) sits next to worker.ts and needs tsx's loader to fork() it directly.
+const RUNNING_FROM_SOURCE = __filename.endsWith(".ts");
+const WORKER_PATH = join(
+	__dirname,
+	RUNNING_FROM_SOURCE ? "worker.ts" : "worker.js",
+);
 
 function readPidfile(pidfilePath: string): Pidfile | undefined {
 	if (!existsSync(pidfilePath)) return undefined;
@@ -98,7 +105,7 @@ export async function runManager(
 	const running = findRunningPidfile(pidfilePath);
 	if (running) {
 		throw new Error(
-			`process manager already running (pid ${running.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
+			`braid already running (pid ${running.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
 		);
 	}
 
@@ -138,9 +145,11 @@ export async function runManager(
 				...config.env,
 				BRAID_CONFIG: JSON.stringify(config),
 			},
-			// Guarantees TS support in the forked worker regardless of whether the manager itself was
-			// launched via the `tsx` CLI (dev) or plain node (tests) - see spec's open question on this.
-			execArgv: [...process.execArgv, "--import", "tsx"],
+			// Only the source (.ts) worker needs tsx's loader; the compiled worker.js is plain JS a
+			// published package's consumers can run with no TypeScript tooling installed at all.
+			execArgv: RUNNING_FROM_SOURCE
+				? [...process.execArgv, "--import", "tsx"]
+				: process.execArgv,
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		});
 		children.set(config.name, child);

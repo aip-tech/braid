@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+#!/usr/bin/env node
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -53,7 +54,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			const alreadyRunning = findRunningPidfile(pidfilePath);
 			if (alreadyRunning) {
 				console.error(
-					`process manager already running (pid ${alreadyRunning.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
+					`braid already running (pid ${alreadyRunning.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
 				);
 				return 1;
 			}
@@ -83,14 +84,29 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			return 0;
 		}
 		default: {
-			console.error("Usage: sos-run <start|stop|status> [--config <path>]");
+			console.error("Usage: braid <start|stop|status> [--config <path>]");
 			return 1;
 		}
 	}
 }
 
+// Compares realpaths, not raw paths: when invoked through a package manager's bin symlink (the
+// normal case for an installed CLI), process.argv[1] is the symlink path but import.meta.url
+// reports the resolved target, so a naive comparison never matches and the CLI silently no-ops.
+export function isMainModule(
+	argv1: string | undefined,
+	moduleUrl: string,
+): boolean {
+	if (!argv1) return false;
+	try {
+		return moduleUrl === pathToFileURL(realpathSync(argv1)).href;
+	} catch {
+		return false;
+	}
+}
+
 /* istanbul ignore next -- thin process entrypoint, exercised via runCli's own tests instead */
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (isMainModule(process.argv[1], import.meta.url)) {
 	runCli(process.argv.slice(2), process.cwd())
 		.then((code) => {
 			process.exitCode = code;
