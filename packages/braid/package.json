@@ -1,6 +1,6 @@
 {
 	"name": "@aip-tech/braid",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Runs multiple long-lived processes as one unit — PID tracking, nodemon-driven restarts, and kill-everything-on-crash.",
 	"license": "MIT",
 	"type": "module",
