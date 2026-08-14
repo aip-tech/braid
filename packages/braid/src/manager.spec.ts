@@ -49,7 +49,7 @@ describe("runManager", () => {
 	let pidfilePath: string;
 
 	beforeEach(() => {
-		tmpDir = mkdtempSync(join(tmpdir(), "process-manager-test-"));
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-test-"));
 		pidfilePath = join(tmpDir, "run.json");
 	});
 
@@ -122,11 +122,7 @@ describe("runManager", () => {
 });
 
 describe("pidfile helpers with no pidfile present", () => {
-	const missingPath = join(
-		tmpdir(),
-		"process-manager-test-missing",
-		"run.json",
-	);
+	const missingPath = join(tmpdir(), "braid-test-missing", "run.json");
 
 	it("findRunningPidfile returns undefined", () => {
 		expect(findRunningPidfile(missingPath)).toBeUndefined();

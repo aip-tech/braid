@@ -18,4 +18,4 @@ npm-debug.log*
 *.tsbuildinfo
 
 # braid's own pidfile, when run against this repo
-.process-manager/
+.braid/

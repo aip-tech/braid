@@ -9,8 +9,8 @@ import {
 } from "./manager.js";
 import type { ProcessConfig } from "./types.js";
 
-export const DEFAULT_CONFIG_FILENAME = "process-manager.config.ts";
-export const DEFAULT_PIDFILE_PATH = join(".process-manager", "run.json");
+export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
+export const DEFAULT_PIDFILE_PATH = join(".braid", "run.json");
 
 export type ParsedArgs = { command: string | undefined; configPath: string };
 
@@ -30,7 +30,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 
 export async function loadConfig(configPath: string): Promise<ProcessConfig[]> {
 	if (!existsSync(configPath)) {
-		throw new Error(`process-manager config not found at ${configPath}`);
+		throw new Error(`braid config not found at ${configPath}`);
 	}
 	const mod = (await import(pathToFileURL(configPath).href)) as {
 		default?: unknown;
@@ -38,7 +38,7 @@ export async function loadConfig(configPath: string): Promise<ProcessConfig[]> {
 	const config = mod.default;
 	if (!Array.isArray(config) || config.length === 0) {
 		throw new Error(
-			`process-manager config at ${configPath} must default-export a non-empty array`,
+			`braid config at ${configPath} must default-export a non-empty array`,
 		);
 	}
 	return config as ProcessConfig[];

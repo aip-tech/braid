@@ -136,7 +136,7 @@ export async function runManager(
 			env: {
 				...process.env,
 				...config.env,
-				PROCESS_MANAGER_CONFIG: JSON.stringify(config),
+				BRAID_CONFIG: JSON.stringify(config),
 			},
 			// Guarantees TS support in the forked worker regardless of whether the manager itself was
 			// launched via the `tsx` CLI (dev) or plain node (tests) - see spec's open question on this.
@@ -154,7 +154,7 @@ export async function runManager(
 		child.on("message", (message: WorkerStatusMessage) => {
 			if (message.type === "crash" && !shuttingDown) {
 				process.stderr.write(
-					`[process-manager] "${config.name}" crashed, stopping all processes\n`,
+					`[braid] "${config.name}" crashed, stopping all processes\n`,
 				);
 				void shutdown(1);
 			}
@@ -162,7 +162,7 @@ export async function runManager(
 		child.on("error", (error) => {
 			if (!shuttingDown) {
 				process.stderr.write(
-					`[process-manager] "${config.name}" failed to start: ${error.message}\n`,
+					`[braid] "${config.name}" failed to start: ${error.message}\n`,
 				);
 				void shutdown(1);
 			}

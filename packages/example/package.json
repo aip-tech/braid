@@ -5,9 +5,9 @@
 	"description": "Live test bed for braid: starts a couple of toy processes via the workspace-local braid source.",
 	"type": "module",
 	"scripts": {
-		"dev": "tsx ../braid/src/cli.ts start --config braid.config.ts",
-		"dev:stop": "tsx ../braid/src/cli.ts stop --config braid.config.ts",
-		"dev:status": "tsx ../braid/src/cli.ts status --config braid.config.ts",
+		"dev": "tsx ../braid/src/cli.ts start",
+		"dev:stop": "tsx ../braid/src/cli.ts stop",
+		"dev:status": "tsx ../braid/src/cli.ts status",
 		"format": "biome format --write",
 		"lint": "biome lint --write",
 		"check": "biome check --write"

@@ -22,10 +22,10 @@ async function waitFor(
 }
 
 describe("parseArgs", () => {
-	it("defaults to process-manager.config.ts resolved against cwd", () => {
+	it("defaults to braid.config.ts resolved against cwd", () => {
 		const { command, configPath } = parseArgs(["start"], "/repo");
 		expect(command).toBe("start");
-		expect(configPath).toBe(join("/repo", "process-manager.config.ts"));
+		expect(configPath).toBe(join("/repo", "braid.config.ts"));
 	});
 
 	it("honors an explicit --config path", () => {
@@ -47,7 +47,7 @@ describe("loadConfig", () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = mkdtempSync(join(tmpdir(), "process-manager-cli-test-"));
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-cli-test-"));
 	});
 
 	afterEach(() => {
@@ -83,8 +83,8 @@ describe("runCli", () => {
 	let configPath: string;
 
 	beforeEach(() => {
-		tmpDir = mkdtempSync(join(tmpdir(), "process-manager-cli-run-"));
-		configPath = join(tmpDir, "process-manager.config.ts");
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-cli-run-"));
+		configPath = join(tmpDir, "braid.config.ts");
 		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
 		writeFileSync(
 			configPath,

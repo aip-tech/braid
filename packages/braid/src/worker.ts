@@ -4,11 +4,9 @@ import { linePrefixer } from "./prefix.js";
 import type { ProcessConfig, WorkerStatusMessage } from "./types.js";
 
 function loadConfig(): ProcessConfig {
-	const raw = process.env.PROCESS_MANAGER_CONFIG;
+	const raw = process.env.BRAID_CONFIG;
 	if (!raw) {
-		throw new Error(
-			"process-manager worker started without PROCESS_MANAGER_CONFIG",
-		);
+		throw new Error("braid worker started without BRAID_CONFIG");
 	}
 	return JSON.parse(raw) as ProcessConfig;
 }
@@ -84,6 +82,6 @@ export function runWorker(config: ProcessConfig): void {
 
 // Exercised via manager.spec.ts through a real forked process, not unit-tested directly.
 /* istanbul ignore next */
-if (process.env.PROCESS_MANAGER_CONFIG) {
+if (process.env.BRAID_CONFIG) {
 	runWorker(loadConfig());
 }
