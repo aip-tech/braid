@@ -1,6 +1,6 @@
 {
 	"name": "@aip-tech/braid",
-	"version": "0.2.1",
+	"version": "0.2.3",
 	"description": "Runs multiple long-lived processes as one unit as a background daemon — PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.",
 	"license": "MIT",
 	"type": "module",
@@ -18,7 +18,8 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/aip-tech/braid.git"
+		"url": "git+https://github.com/aip-tech/braid.git",
+		"directory": "packages/braid"
 	},
 	"keywords": [
 		"process-manager",

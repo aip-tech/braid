@@ -24,6 +24,7 @@
 			<a href="#install">Install</a>
 			<a href="#config">Config</a>
 			<a href="#cli">CLI</a>
+			<a href="#dependent-restarts">Dependent restarts</a>
 			<a href="#logs">Logs</a>
 			<a href="#plugins">Plugins</a>
 		</nav>
@@ -47,6 +48,7 @@ export default defineConfig({
 });</code></pre>
 				<ul>
 					<li><code>watch</code>: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.</li>
+					<li><code>dependsOn</code>: <code>{ processes, run? }</code>, restart this process whenever any of <code>processes</code> restarts, see <a href="#dependent-restarts">Dependent restarts</a>.</li>
 					<li><code>plugins</code>: external plugins to load, by package name/path (or a <code>[name, options]</code> tuple).</li>
 					<li><code>logs</code>: <code>{ dir, maxSizeBytes }</code>, see <a href="#logs">Logs</a>.</li>
 				</ul>
@@ -63,6 +65,31 @@ npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
 npx @aip-tech/braid stop                     # kill everything
 npx @aip-tech/braid start --config ./other.config.ts</code></pre>
 				<p>Or just <code>braid ...</code> if installed as a dependency and run via a package.json script.</p>
+			</section>
+
+			<section id="dependent-restarts">
+				<h2>Dependent restarts</h2>
+				<p>
+					A process can restart whenever another one does, e.g. a client that needs to
+					regenerate its GraphQL SDK once the API it talks to restarts:
+				</p>
+				<pre><code class="language-typescript">{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
+{
+	name: "client",
+	command: "pnpm",
+	args: ["--filter", "./client", "run", "dev"],
+	dependsOn: {
+		processes: ["api"],
+		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
+	},
+},</code></pre>
+				<p>
+					When <code>api</code> restarts: <code>client</code> stops, <code>run</code> executes
+					(retried on failure, since the dependency may still be starting back up), then
+					<code>client</code> restarts. Left stopped with a logged reason if <code>run</code>
+					never succeeds. A <code>dependsOn</code> chain that loops back on its own trigger is
+					rejected at startup.
+				</p>
 			</section>
 
 			<section id="logs">

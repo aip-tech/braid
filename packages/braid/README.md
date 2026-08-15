@@ -26,6 +26,7 @@ export default defineConfig({
 ```
 
 - `watch`: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.
+- `dependsOn`: `{ processes, run? }` — restart this process whenever any of `processes` restarts, optionally running a command first (e.g. codegen) and waiting for it to finish. See [Dependent restarts](#dependent-restarts).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes }` — see [Logs](#logs).
 
@@ -43,7 +44,24 @@ npx @aip-tech/braid stop                     # kill everything
 npx @aip-tech/braid start --config ./other.config.ts
 ```
 
-Or just `braid ...` if installed as a dependency and run via a package.json script — see [`packages/example`](../example).
+## Dependent restarts
+
+A process can restart whenever another one does — e.g. a client that needs to regenerate its GraphQL SDK once the API it talks to restarts:
+
+```ts
+{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
+{
+	name: "client",
+	command: "pnpm",
+	args: ["--filter", "./client", "run", "dev"],
+	dependsOn: {
+		processes: ["api"],
+		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
+	},
+},
+```
+
+When `api` restarts: `client` stops, `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since the dependency may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
 
 ## Logs
 

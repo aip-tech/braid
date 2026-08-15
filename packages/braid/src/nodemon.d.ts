@@ -3,6 +3,8 @@
 declare module "nodemon" {
 	type NodemonSettings = {
 		exec?: string;
+		/** The script nodemon should run with `node` directly, as an alternative to `exec`. */
+		script?: string;
 		args?: string[];
 		watch?: string[];
 		ext?: string;

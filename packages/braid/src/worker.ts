@@ -34,9 +34,16 @@ export function runWorker(config: ProcessConfig): void {
 	);
 
 	if (config.watch && config.watch.length > 0) {
+		// nodemon's programmatic API silently no-ops (no start/restart/crash event, ever) when
+		// `exec` is exactly "node" with no separate `script` - it assumes that shape means the
+		// caller forgot to pass a script. Route through `script` instead in that one case so
+		// `command: "node", args: [script, ...]` (a very natural config) actually restarts.
+		const runsPlainNode =
+			config.command === "node" && (config.args?.length ?? 0) > 0;
 		const monitor = nodemon({
-			exec: config.command,
-			args: config.args,
+			...(runsPlainNode
+				? { script: config.args?.[0], args: config.args?.slice(1) }
+				: { exec: config.command, args: config.args }),
 			watch: config.watch,
 			ext: config.ext ?? "ts,js,json",
 			env: config.env,
@@ -53,8 +60,12 @@ export function runWorker(config: ProcessConfig): void {
 				this.stderr.on("data", (chunk: Buffer) => stderrPrefixer.write(chunk));
 			},
 		);
-		monitor.on("crash", () => send({ type: "crash", code: null }, () => {}));
-		monitor.on("restart", () => send({ type: "restart" }, () => {}));
+		monitor.on("crash", () =>
+			send({ source: "braid-worker", type: "crash", code: null }, () => {}),
+		);
+		monitor.on("restart", () =>
+			send({ source: "braid-worker", type: "restart" }, () => {}),
+		);
 		monitor.on("quit", () => {
 			stdoutPrefixer.flush();
 			stderrPrefixer.flush();
@@ -74,7 +85,7 @@ export function runWorker(config: ProcessConfig): void {
 		stderrPrefixer.flush();
 		const exit = () => process.exit(code ?? 0);
 		if (code !== 0 && signal === null) {
-			send({ type: "crash", code }, exit);
+			send({ source: "braid-worker", type: "crash", code }, exit);
 		} else {
 			exit();
 		}

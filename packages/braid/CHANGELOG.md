@@ -5,7 +5,29 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
-## [Unreleased]
+## [0.2.3] - 2026-08-15
+
+### Added
+
+- `dependsOn` on a `ProcessConfig`: restart a process whenever another one
+  restarts, optionally running a command first (e.g. codegen) and
+  retrying it until the dependency is back up. Left stopped with a
+  logged reason if the hook never succeeds. A `dependsOn` graph that
+  loops back on itself is rejected at startup.
+
+### Fixed
+
+- A `watch`ed process configured as `command: "node"` now actually
+  restarts on file changes - nodemon's programmatic API silently no-ops
+  on that exact shape without a separate `script` field.
+- Worker→manager restart/crash messages are now tagged: nodemon
+  auto-forwards its own lookalike internal events over the same IPC
+  channel when forked, which could double-fire a restart and clobber a
+  log's just-rotated backup.
+- `package.json`'s `repository` now sets `directory: "packages/braid"`,
+  so npm resolves this README's relative links (`CHANGELOG.md`,
+  `src/types.ts`) against the right subdirectory instead of the repo
+  root.
 
 ## [0.2.1] - 2026-08-15
 

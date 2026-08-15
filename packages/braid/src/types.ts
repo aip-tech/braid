@@ -20,11 +20,41 @@ export type ProcessConfig = {
 	 * @default "ts,js,json"
 	 */
 	ext?: string;
+	/**
+	 * Restart this process whenever any of these other configured processes restarts (a
+	 * nodemon-triggered `watch` restart, or one cascaded from its own `dependsOn`). Referencing
+	 * an unknown process name, or a chain that loops back on itself, is rejected at startup.
+	 */
+	dependsOn?: {
+		/** Names of other processes in this same config; any of their restarts triggers this one. */
+		processes: string[];
+		/**
+		 * Command run after a dependency restarts and before this process restarts - e.g. a
+		 * codegen script that needs the dependency (an API server) back up and serving first.
+		 * Retried on non-zero exit since the dependency may still be starting back up.
+		 */
+		run?: {
+			command: string;
+			args?: string[];
+			cwd?: string;
+			/** @default 5 */
+			retries?: number;
+			/** Delay between retries, in ms. @default 1000 */
+			retryDelayMs?: number;
+		};
+	};
 };
 
+/**
+ * `source` distinguishes braid's own worker->manager IPC protocol from nodemon's own: nodemon
+ * monkey-patches its internal event bus to auto-forward every internal event (`restart`, `crash`,
+ * `start`, `log`, ...) over the same `process.send` channel whenever it detects it's running
+ * under `fork()` - some of those collide in shape with this protocol (e.g. nodemon's own
+ * `{ type: "restart", data: [...] }`), so a message missing this marker must be ignored.
+ */
 export type WorkerStatusMessage =
-	| { type: "crash"; code: number | null }
-	| { type: "restart" };
+	| { source: "braid-worker"; type: "crash"; code: number | null }
+	| { source: "braid-worker"; type: "restart" };
 
 export type PidfileWorker = { name: string; pid: number; startedAt: string };
 

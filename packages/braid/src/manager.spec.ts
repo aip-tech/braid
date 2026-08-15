@@ -4,6 +4,7 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -52,6 +53,55 @@ function exitFailConfig(name: string): ProcessConfig {
 
 function chattyConfig(name: string): ProcessConfig {
 	return { name, command: "node", args: [join(FIXTURES, "chatty.js")] };
+}
+
+/**
+ * A keep-alive process restarted by nodemon whenever `watchFilePath` changes. Routed through
+ * `sh -c` rather than `command: "node"` directly: nodemon's programmatic API silently no-ops
+ * when its `exec` is exactly "node" with no separate `script` field (lib/nodemon.js's own usage
+ * check), which would make every watch/restart in this suite a silent do-nothing.
+ */
+function watchedConfig(name: string, watchFilePath: string): ProcessConfig {
+	return {
+		name,
+		command: "sh",
+		args: ["-c", `node ${JSON.stringify(join(FIXTURES, "keep-alive.js"))}`],
+		watch: [watchFilePath],
+		ext: "trigger",
+	};
+}
+
+type DependsOnRun = NonNullable<NonNullable<ProcessConfig["dependsOn"]>["run"]>;
+
+function dependentConfig(
+	name: string,
+	processes: string[],
+	run?: DependsOnRun,
+): ProcessConfig {
+	return {
+		...keepAliveConfig(name),
+		dependsOn: { processes, run },
+	};
+}
+
+function pidfileWorker(
+	pidfilePath: string,
+	name: string,
+): { name: string; pid: number } | undefined {
+	const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+	return pidfile.workers.find(
+		(worker: { name: string }) => worker.name === name,
+	);
+}
+
+/**
+ * Writes a fresh value to nodemon's watched file to trigger a real restart. nodemon's own file
+ * watcher takes a moment to attach after start, so writing right away can go unnoticed - a short
+ * settle delay first makes sure it's actually watching by the time this write happens.
+ */
+async function triggerWatchedRestart(watchFilePath: string): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 800));
+	writeFileSync(watchFilePath, String(Date.now()));
 }
 
 /** Mirrors chatty.js's own line-generation exactly, so the expected byte count is computed, not guessed. */
@@ -140,6 +190,77 @@ describe("runManager", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 10000);
+});
+
+describe("runManager watch", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-watch-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it('restarts a plain `command: "node"` process via nodemon when its watched path changes', async () => {
+		// Regression test for two bugs at once:
+		// 1. nodemon's programmatic API silently no-ops (no restart, ever - and no error either)
+		//    when `exec` is exactly "node" with no separate `script` field, which is exactly what
+		//    `command: "node", args: [scriptPath]` produced before worker.ts special-cased this
+		//    shape to use `script` instead.
+		// 2. nodemon auto-forwards its own internal events (including its own lookalike "restart")
+		//    over the same IPC channel braid's worker->manager protocol uses, which - before that
+		//    protocol was tagged and manager.ts started ignoring untagged messages - fired a second,
+		//    spurious `processRestart` per real restart and clobbered the just-rotated log backup
+		//    with an empty file. The pid assertions below fail if either regresses.
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const configs = [
+			{
+				name: "api",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+				watch: [watchFile],
+				ext: "trigger",
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		const logPath = join(tmpDir, "logs", "api.log");
+		const rotatedLogPath = `${logPath}.1`;
+
+		await waitFor(
+			() =>
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes("started"),
+		);
+
+		await triggerWatchedRestart(watchFile);
+
+		// The log is rotated on a nodemon-triggered restart (see the logger core plugin), so the
+		// original "started <pid>" line ends up in the rotated backup and a new one lands active.
+		await waitFor(
+			() =>
+				existsSync(rotatedLogPath) &&
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes("started"),
+			{ timeoutMs: 10000 },
+		);
+		const originalPid = readFileSync(rotatedLogPath, "utf8").match(
+			/started (\d+)/,
+		)?.[1];
+		const restartedPid = readFileSync(logPath, "utf8").match(
+			/started (\d+)/,
+		)?.[1];
+		expect(originalPid).toBeDefined();
+		expect(restartedPid).toBeDefined();
+		expect(restartedPid).not.toBe(originalPid);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
 });
 
 describe("runManager log rotation", () => {
@@ -302,6 +423,223 @@ describe("runManager plugin support", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 10000);
+});
+
+describe("runManager dependsOn", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-depends-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("rejects a circular dependsOn before spawning anything", async () => {
+		const configs = [dependentConfig("a", ["b"]), dependentConfig("b", ["a"])];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/circular restart dependency/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("rejects a dependsOn.processes entry naming an unconfigured process", async () => {
+		const configs = [dependentConfig("client", ["missing-api"])];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/depends on unknown process "missing-api"/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("stops a dependent, runs its hook, and restarts it once its dependency restarts via a nodemon watch", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const markerFile = join(tmpDir, "generated.log");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [join(FIXTURES, "generate-hook.js"), markerFile],
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		// A real nodemon-driven restart of "api", not a simulated one.
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return (
+					client !== undefined &&
+					client.pid !== clientBefore?.pid &&
+					isPidAlive(client.pid)
+				);
+			},
+			{ timeoutMs: 10000 },
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("retries a failing hook until it succeeds, then restarts the dependent", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const counterFile = join(tmpDir, "attempts.txt");
+		const markerFile = join(tmpDir, "generated.log");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [
+					join(FIXTURES, "flaky-hook.js"),
+					counterFile,
+					markerFile,
+					"2", // fails twice, then succeeds
+				],
+				retries: 5,
+				retryDelayMs: 50,
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return (
+					client !== undefined &&
+					client.pid !== clientBefore?.pid &&
+					isPidAlive(client.pid)
+				);
+			},
+			{ timeoutMs: 10000 },
+		);
+		expect(readFileSync(counterFile, "utf8")).toBe("2");
+		expect(existsSync(markerFile)).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("leaves the dependent stopped, and logs why, when its hook keeps failing past its retries", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [join(FIXTURES, "always-fail-hook.js")],
+				retries: 1,
+				retryDelayMs: 20,
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() => !isPidAlive(clientBefore?.pid as number), {
+			timeoutMs: 10000,
+		});
+		await waitFor(
+			() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						'"client": dependency hook "node" kept failing',
+					),
+				),
+			{ timeoutMs: 10000 },
+		);
+
+		// Gave up after retrying - the dependent was not respawned.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(isPidAlive(clientBefore?.pid as number)).toBe(false);
+		const clientAfter = pidfileWorker(pidfilePath, "client");
+		expect(clientAfter?.pid).toBe(clientBefore?.pid);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("leaves the dependent stopped when its hook command doesn't exist at all", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "braid-test-command-that-does-not-exist",
+				retries: 1,
+				retryDelayMs: 20,
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() => !isPidAlive(clientBefore?.pid as number), {
+			timeoutMs: 10000,
+		});
+		await waitFor(
+			() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						'"client": dependency hook "braid-test-command-that-does-not-exist" kept failing',
+					),
+				),
+			{ timeoutMs: 10000 },
+		);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
 });
 
 describe("pidfile helpers with no pidfile present", () => {
