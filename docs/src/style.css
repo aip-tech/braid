@@ -6,6 +6,10 @@
 	--border: #e2e2e2;
 	--code-bg: #f5f5f5;
 	--accent: #0969da;
+	--accent-soft: #eaf2ff;
+	--card-bg: #fafafa;
+	--radius: 10px;
+	--shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.05);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -16,6 +20,9 @@
 		--border: #2c2f36;
 		--code-bg: #1d2025;
 		--accent: #6cb6ff;
+		--accent-soft: #1b2733;
+		--card-bg: #191c21;
+		--shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.35);
 	}
 }
 
@@ -24,59 +31,406 @@
 }
 
 body {
-	margin: 0 auto;
-	max-width: 46rem;
-	padding: 3rem 1.5rem 4rem;
+	margin: 0;
 	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 	color: var(--fg);
 	background: var(--bg);
 	line-height: 1.6;
 }
 
-header h1 {
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	margin-bottom: 0.25rem;
-}
+/* ---------- Top nav (shared across every page) ---------- */
 
-.tagline {
-	color: var(--muted);
-	margin-top: 0;
-}
-
-nav {
-	display: flex;
-	gap: 1.25rem;
-	flex-wrap: wrap;
-	margin: 2rem 0;
-	padding: 0.75rem 0;
-	border-top: 1px solid var(--border);
+#topnav {
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	background: var(--bg);
 	border-bottom: 1px solid var(--border);
 }
 
-nav a {
+.topnav-inner {
+	position: relative;
+	max-width: 72rem;
+	margin: 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.85rem 1.5rem;
+	gap: 1rem;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-weight: 600;
+	font-size: 1.05rem;
+	color: var(--fg);
+	text-decoration: none;
+	flex: none;
+}
+
+.brand svg {
+	width: 20px;
+	height: 20px;
+	color: var(--accent);
+}
+
+.menu-toggle {
+	display: none;
+	background: none;
+	border: none;
+	color: var(--fg);
+	cursor: pointer;
+	padding: 0.25rem;
+}
+
+.menu-toggle svg {
+	width: 22px;
+	height: 22px;
+	display: block;
+}
+
+.topnav-links {
+	display: flex;
+	align-items: center;
+	gap: 1.5rem;
+}
+
+.topnav-links a {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
 	color: var(--muted);
+	text-decoration: none;
+	font-size: 0.92rem;
+	white-space: nowrap;
+}
+
+.topnav-links a.active,
+.topnav-links a:hover {
+	color: var(--accent);
+}
+
+.topnav-links .icon-link svg {
+	width: 16px;
+	height: 16px;
+}
+
+@media (max-width: 720px) {
+	.menu-toggle {
+		display: block;
+	}
+
+	.topnav-links {
+		display: none;
+		position: absolute;
+		top: 100%;
+		left: 0;
+		right: 0;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 1rem;
+		padding: 1.25rem 1.5rem;
+		background: var(--bg);
+		border-bottom: 1px solid var(--border);
+	}
+
+	.topnav-links.open {
+		display: flex;
+	}
+}
+
+/* ---------- Landing page ---------- */
+
+.hero {
+	max-width: 46rem;
+	margin: 0 auto;
+	padding: 4.5rem 1.5rem 3rem;
+	text-align: center;
+}
+
+.eyebrow {
+	color: var(--accent);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.85rem;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	margin: 0 0 0.75rem;
+}
+
+.hero h1 {
+	font-size: 2.5rem;
+	line-height: 1.15;
+	margin: 0 0 1rem;
+}
+
+.hero-tagline {
+	color: var(--muted);
+	font-size: 1.1rem;
+	max-width: 38rem;
+	margin: 0 auto 2rem;
+}
+
+.hero-actions {
+	display: flex;
+	gap: 0.75rem;
+	justify-content: center;
+	flex-wrap: wrap;
+	margin-bottom: 2rem;
+}
+
+.btn {
+	padding: 0.65rem 1.3rem;
+	border-radius: 8px;
+	font-size: 0.95rem;
+	font-weight: 500;
+	text-decoration: none;
+}
+
+.btn-primary {
+	background: var(--accent);
+	color: var(--bg);
+}
+
+.btn-secondary {
+	border: 1px solid var(--border);
+	color: var(--fg);
+}
+
+.hero-install {
+	max-width: 22rem;
+	margin: 0 auto;
+	text-align: center;
+}
+
+.cards {
+	max-width: 72rem;
+	margin: 0 auto;
+	padding: 1rem 1.5rem 5rem;
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 1.25rem;
+}
+
+@media (max-width: 900px) {
+	.cards {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 600px) {
+	.cards {
+		grid-template-columns: 1fr;
+	}
+}
+
+.card {
+	background: var(--card-bg);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 1.5rem;
+	box-shadow: var(--shadow);
+}
+
+.card-icon {
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 8px;
+	background: var(--accent-soft);
+	color: var(--accent);
+	margin-bottom: 1rem;
+}
+
+.card-icon svg {
+	width: 20px;
+	height: 20px;
+}
+
+.card h3 {
+	margin: 0 0 0.5rem;
+	font-size: 1.05rem;
+}
+
+.card p {
+	margin: 0;
+	color: var(--muted);
+	font-size: 0.92rem;
+}
+
+/* ---------- Docs pages (sidebar + content) ---------- */
+
+.docs-shell {
+	max-width: 72rem;
+	margin: 0 auto;
+	padding: 2rem 1.5rem 5rem;
+	display: flex;
+	align-items: flex-start;
+	gap: 2.5rem;
+}
+
+#sidebar {
+	position: sticky;
+	top: 4.75rem;
+	flex: 0 0 210px;
+}
+
+.sidebar-nav {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.sidebar-nav a {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	padding: 0.5rem 0.75rem;
+	border-radius: 8px;
+	color: var(--muted);
+	text-decoration: none;
+	font-size: 0.92rem;
+}
+
+.sidebar-nav a svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+.sidebar-nav a:hover {
+	color: var(--fg);
+}
+
+.sidebar-nav a.active {
+	background: var(--accent-soft);
+	color: var(--accent);
+	font-weight: 500;
+}
+
+.docs-main {
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: 42rem;
+}
+
+.docs-main h1 {
+	font-size: 1.9rem;
+	margin: 0 0 0.5rem;
+}
+
+.lede {
+	color: var(--muted);
+	font-size: 1.05rem;
+	margin: 0 0 2rem;
+}
+
+.docs-main section {
+	margin-bottom: 2.5rem;
+}
+
+.docs-main h2 {
+	font-size: 1.2rem;
+	border-bottom: 1px solid var(--border);
+	padding-bottom: 0.4rem;
+	margin-top: 0;
+}
+
+.jump-to {
+	list-style: none;
+	padding: 0;
+	margin: 0 0 2.5rem;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1.25rem;
+}
+
+.jump-to a {
+	color: var(--accent);
 	text-decoration: none;
 	font-size: 0.9rem;
 }
 
-.links a {
+.jump-to a:hover {
+	text-decoration: underline;
+}
+
+.next-links {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.6rem;
+}
+
+.next-links a {
 	color: var(--accent);
+	font-weight: 500;
+	text-decoration: none;
 }
 
-nav a.active,
-nav a:hover {
-	color: var(--accent);
+.next-links a:hover {
+	text-decoration: underline;
 }
 
-section {
-	margin-bottom: 2.5rem;
+.event-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.88rem;
+	margin: 1rem 0 1.5rem;
 }
 
-h2 {
-	font-size: 1.15rem;
+.event-table th,
+.event-table td {
+	text-align: left;
+	padding: 0.5rem 0.75rem;
 	border-bottom: 1px solid var(--border);
-	padding-bottom: 0.4rem;
+	vertical-align: top;
 }
+
+.event-table th {
+	color: var(--muted);
+	font-weight: 600;
+	font-size: 0.8rem;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+@media (max-width: 860px) {
+	.docs-shell {
+		flex-direction: column;
+		gap: 1.5rem;
+	}
+
+	#sidebar {
+		position: static;
+		width: 100%;
+		flex: none;
+	}
+
+	.sidebar-nav {
+		flex-direction: row;
+		overflow-x: auto;
+		gap: 0.4rem;
+		padding-bottom: 0.5rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.sidebar-nav a {
+		white-space: nowrap;
+	}
+
+	.docs-main {
+		max-width: 100%;
+	}
+}
+
+/* ---------- Shared: code, footer ---------- */
 
 code {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -87,9 +441,10 @@ code {
 }
 
 pre {
+	position: relative;
 	border: 1px solid var(--border);
 	border-radius: 8px;
-	overflow: hidden;
+	overflow: auto;
 }
 
 pre code {
@@ -97,9 +452,56 @@ pre code {
 	padding: 0;
 }
 
+.copy-btn {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 30px;
+	height: 30px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--bg);
+	color: var(--muted);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s ease;
+}
+
+.copy-btn svg {
+	width: 15px;
+	height: 15px;
+}
+
+pre:hover .copy-btn,
+.copy-btn:focus-visible,
+.copy-btn.copied {
+	opacity: 1;
+}
+
+.copy-btn:hover {
+	color: var(--fg);
+	border-color: var(--accent);
+}
+
+.copy-btn.copied {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+
 footer {
+	max-width: 72rem;
+	margin: 0 auto;
+	padding: 2rem 1.5rem 3rem;
 	color: var(--muted);
 	font-size: 0.85rem;
 	border-top: 1px solid var(--border);
-	padding-top: 1rem;
+	text-align: center;
+}
+
+footer a:any-link {
+	color: var(--accent);
 }

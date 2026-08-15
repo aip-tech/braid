@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Getting Started &middot; braid</title>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="getting-started">
+		<div id="topnav"></div>
+
+		<div class="docs-shell">
+			<aside id="sidebar"></aside>
+
+			<main class="docs-main">
+				<h1>Getting Started</h1>
+				<p class="lede">
+					Install braid, write a config listing the processes your project runs
+					side by side, and start them all as one background daemon.
+				</p>
+
+				<section id="install">
+					<h2>Install</h2>
+					<pre><code class="language-bash">npm install @aip-tech/braid</code></pre>
+				</section>
+
+				<section id="first-config">
+					<h2>Write a config</h2>
+					<p><code>braid.config.ts</code>, next to your <code>package.json</code>:</p>
+					<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
+
+export default defineConfig({
+	processes: [
+		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
+		{ name: "client", command: "pnpm", args: ["--filter", "./client", "run", "dev"] },
+	],
+});</code></pre>
+					<p>
+						<code>defineConfig</code> gives you full editor autocomplete and fills in a
+						couple of defaults (like <code>logs.maxSizeBytes</code>) that don't depend
+						on where the CLI is invoked from. A bare array export also works, treated
+						as <code>{ processes: [...] }</code>.
+					</p>
+					<p>
+						See <a href="./config.html">Config</a> for the full field list &mdash;
+						<code>watch</code>, <code>dependsOn</code>, <code>onRestart</code>,
+						<code>readyPattern</code>, <code>logs</code>, and more.
+					</p>
+				</section>
+
+				<section id="run-it">
+					<h2>Run it</h2>
+					<pre><code class="language-bash">npx braid start     # starts every configured process as a background daemon
+npx braid status    # list each process's name/pid/alive state
+npx braid logs --follow
+npx braid stop       # kill everything</code></pre>
+					<p>
+						Or add a <code>package.json</code> script (<code>"dev": "braid start"</code>)
+						once <code>@aip-tech/braid</code> is an installed dependency, and just run
+						<code>pnpm dev</code>. See <a href="./cli.html">CLI</a> for every command
+						and flag.
+					</p>
+				</section>
+
+				<section id="next">
+					<h2>Next</h2>
+					<ul class="next-links">
+						<li><a href="./config.html">Config reference</a> &mdash; every <code>ProcessConfig</code> field, dependent restarts, readiness, and logs.</li>
+						<li><a href="./plugins.html">Plugins</a> &mdash; using plugins, and building your own.</li>
+					</ul>
+				</section>
+			</main>
+		</div>
+
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

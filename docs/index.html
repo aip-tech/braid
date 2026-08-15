@@ -4,117 +4,70 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>braid</title>
+		<meta
+			name="description"
+			content="Runs multiple long-lived processes as one unit, as a background daemon: PID tracking, dependent-process restarts, and persistent per-process logs."
+		/>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
-	<body>
-		<header>
-			<h1>braid</h1>
-			<p class="tagline">
-				Runs multiple long-lived processes as one unit, as a background daemon: PID tracking,
-				nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.
-			</p>
-			<p class="links">
-				<a href="https://www.npmjs.com/package/@aip-tech/braid">npm</a>
-				&middot;
-				<a href="https://github.com/aip-tech/braid">GitHub</a>
-			</p>
-		</header>
-
-		<nav>
-			<a href="#install">Install</a>
-			<a href="#config">Config</a>
-			<a href="#cli">CLI</a>
-			<a href="#dependent-restarts">Dependent restarts</a>
-			<a href="#logs">Logs</a>
-			<a href="#plugins">Plugins</a>
-		</nav>
+	<body data-page="home">
+		<div id="topnav"></div>
 
 		<main>
-			<section id="install">
-				<h2>Install</h2>
-				<pre><code class="language-bash">npm install @aip-tech/braid</code></pre>
-			</section>
-
-			<section id="config">
-				<h2>Config</h2>
-				<p><code>braid.config.ts</code>:</p>
-				<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
-
-export default defineConfig({
-	processes: [
-		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-		{ name: "client", command: "pnpm", args: ["--filter", "./client", "run", "dev"] },
-	],
-});</code></pre>
-				<ul>
-					<li><code>watch</code>: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.</li>
-					<li><code>dependsOn</code>: <code>{ processes, run? }</code>, restart this process whenever any of <code>processes</code> restarts, see <a href="#dependent-restarts">Dependent restarts</a>.</li>
-					<li><code>plugins</code>: external plugins to load, by package name/path (or a <code>[name, options]</code> tuple).</li>
-					<li><code>logs</code>: <code>{ dir, maxSizeBytes }</code>, see <a href="#logs">Logs</a>.</li>
-				</ul>
-				<p>Full field list and defaults live in <code>src/types.ts</code> (<code>ProcessConfig</code>, <code>BraidConfig</code>) in the braid package source.</p>
-			</section>
-
-			<section id="cli">
-				<h2>CLI</h2>
-				<pre><code class="language-bash">npx @aip-tech/braid start                    # start every configured process as a background daemon
-npx @aip-tech/braid status                   # list each process's name/pid/alive state
-npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
-npx @aip-tech/braid logs [name] --follow     # keep streaming new output
-npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
-npx @aip-tech/braid stop                     # kill everything
-npx @aip-tech/braid start --config ./other.config.ts</code></pre>
-				<p>Or just <code>braid ...</code> if installed as a dependency and run via a package.json script.</p>
-			</section>
-
-			<section id="dependent-restarts">
-				<h2>Dependent restarts</h2>
-				<p>
-					A process can restart whenever another one does, e.g. a client that needs to
-					regenerate its GraphQL SDK once the API it talks to restarts:
+			<section class="hero">
+				<p class="eyebrow">@aip-tech/braid</p>
+				<h1>Run your whole dev stack as one daemon</h1>
+				<p class="hero-tagline">
+					PID tracking, nodemon-driven restarts, dependent-process restarts, and
+					persistent per-process logs &mdash; one CLI, one config file.
 				</p>
-				<pre><code class="language-typescript">{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-{
-	name: "client",
-	command: "pnpm",
-	args: ["--filter", "./client", "run", "dev"],
-	dependsOn: {
-		processes: ["api"],
-		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
-	},
-},</code></pre>
-				<p>
-					When <code>api</code> restarts: <code>client</code> stops, <code>run</code> executes
-					(retried on failure, since the dependency may still be starting back up), then
-					<code>client</code> restarts. Left stopped with a logged reason if <code>run</code>
-					never succeeds. A <code>dependsOn</code> chain that loops back on its own trigger is
-					rejected at startup.
-				</p>
+				<div class="hero-actions">
+					<a class="btn btn-primary" href="/braid/docs/getting-started.html">Get started</a>
+					<a class="btn btn-secondary" href="https://github.com/aip-tech/braid">View on GitHub</a>
+				</div>
+				<pre class="hero-install"><code class="language-bash">npm install @aip-tech/braid</code></pre>
 			</section>
 
-			<section id="logs">
-				<h2>Logs</h2>
-				<p>
-					Each process gets a rotated log file at <code>.braid/logs/&lt;name&gt;.log</code>. Rotated
-					(one backup kept) on every <code>start</code>, on a nodemon-triggered restart, and past
-					<code>logs.maxSizeBytes</code> (default 5MB). Braid's own diagnostics (plugin failures,
-					crash notices) go to <code>.braid/daemon.log</code>.
-				</p>
-			</section>
-
-			<section id="plugins">
-				<h2>Plugins</h2>
-				<p>
-					<code>start</code> runs a loopback-only, token-guarded control server that plugins
-					register routes on. List a plugin by package name/path in <code>plugins</code> to load
-					it, see <code>PluginContext</code> in <code>src/types.ts</code>. No external plugins
-					ship yet.
-				</p>
+			<section class="cards">
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></div>
+					<h3>One daemon, every process</h3>
+					<p>Forks one child per configured process, tracks PIDs in a pidfile, and runs detached in the background &mdash; closing the terminal doesn't stop your stack.</p>
+				</div>
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M3 21v-5h5"/><path d="M21 3v5h-5"/></svg></div>
+					<h3>Dependent restarts</h3>
+					<p>A process can restart, run a hook, and wait for readiness whenever another one it depends on restarts &mdash; e.g. regenerating a GraphQL SDK once the API is back up.</p>
+				</div>
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/></svg></div>
+					<h3>Persistent logs</h3>
+					<p>Rotated per-process log files survive restarts and the terminal that started them. Tail one process, or every process interleaved, with <code>braid logs --follow</code>.</p>
+				</div>
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v3a6 6 0 0 1-12 0V8Z"/></svg></div>
+					<h3>Plugin architecture</h3>
+					<p>A loopback-only control server that plugins register routes, static files, and lifecycle listeners on &mdash; the same mechanism braid's own core features are built with.</p>
+				</div>
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg></div>
+					<h3>Kill-everything-on-crash</h3>
+					<p>Mirrors <code>concurrently --kill-others-on-fail</code> by default &mdash; one process crashing tears down the rest, so you never debug a half-alive stack.</p>
+				</div>
+				<div class="card">
+					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg></div>
+					<h3>One small CLI</h3>
+					<p><code>start</code>, <code>status</code>, <code>logs</code>, <code>stop</code> &mdash; a predictable command set instead of a dashboard you have to learn.</p>
+				</div>
 			</section>
 		</main>
 
 		<footer>
-			<p>See <a href="https://github.com/aip-tech/braid/blob/main/packages/braid/CHANGELOG.md">CHANGELOG.md</a> for release notes.</p>
+			<p>
+				MIT licensed. See
+				<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/CHANGELOG.md">CHANGELOG.md</a>
+				for release notes.
+			</p>
 		</footer>
 
 		<script type="module" src="/src/main.ts"></script>

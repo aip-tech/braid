@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>CLI &middot; braid</title>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="cli">
+		<div id="topnav"></div>
+
+		<div class="docs-shell">
+			<aside id="sidebar"></aside>
+
+			<main class="docs-main">
+				<h1>CLI</h1>
+				<p class="lede">
+					<code>start</code> reads <code>braid.config.ts</code> from the current
+					directory by default &mdash; pass <code>--config &lt;path&gt;</code> to point
+					elsewhere. Every other command just talks to the pidfile of whatever's already
+					running, so it doesn't need the config again.
+				</p>
+
+				<section id="start">
+					<h2><code>braid start</code></h2>
+					<p>
+						Forks every configured process, writes <code>.braid/run.json</code> (the
+						pidfile), and detaches as a background daemon &mdash; the CLI process exits
+						once every process has started; the daemon keeps running after.
+					</p>
+					<pre><code class="language-bash">braid start
+braid start --config ./other.config.ts</code></pre>
+					<p>Refuses to start if a pidfile from a still-running daemon already exists.</p>
+				</section>
+
+				<section id="status">
+					<h2><code>braid status</code></h2>
+					<p>Lists each configured process's name, PID, and whether it's currently alive.</p>
+					<pre><code class="language-bash">braid status</code></pre>
+				</section>
+
+				<section id="logs">
+					<h2><code>braid logs</code></h2>
+					<p>Prints a process's persisted, rotated log &mdash; or every process, interleaved, if no name is given.</p>
+					<pre><code class="language-bash">braid logs                    # every process, interleaved
+braid logs api                # just "api"
+braid logs api --follow       # keep streaming new output
+braid logs api --lines 50     # only the last 50 lines</code></pre>
+				</section>
+
+				<section id="stop">
+					<h2><code>braid stop</code></h2>
+					<p>Kills every process recorded in the pidfile (and their descendants), then removes it.</p>
+					<pre><code class="language-bash">braid stop</code></pre>
+				</section>
+
+				<section id="flags">
+					<h2>Flags</h2>
+					<ul>
+						<li><code>--config &lt;path&gt;</code> &mdash; <code>start</code> only; use a config file other than <code>./braid.config.ts</code>.</li>
+						<li><code>--follow</code> &mdash; <code>logs</code> only; keep the connection open and stream new output as it arrives.</li>
+						<li><code>--lines &lt;n&gt;</code> &mdash; <code>logs</code> only; only print the last <code>n</code> lines.</li>
+					</ul>
+				</section>
+			</main>
+		</div>
+
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

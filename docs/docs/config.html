@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Config &middot; braid</title>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="config">
+		<div id="topnav"></div>
+
+		<div class="docs-shell">
+			<aside id="sidebar"></aside>
+
+			<main class="docs-main">
+				<h1>Config</h1>
+				<p class="lede">
+					<code>braid.config.ts</code> default-exports a <code>{ processes, plugins?,
+					logs? }</code> object (or a bare <code>ProcessConfig[]</code>, treated the
+					same way). Full field list and defaults live in
+					<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/src/types.ts"><code>src/types.ts</code></a>.
+				</p>
+
+				<ul class="jump-to">
+					<li><a href="#basics">Basics</a></li>
+					<li><a href="#watch">Watching and restarting</a></li>
+					<li><a href="#dependent-restarts">Dependent restarts</a></li>
+					<li><a href="#post-restart-hooks">Post-restart hooks</a></li>
+					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
+					<li><a href="#logs">Logs</a></li>
+				</ul>
+
+				<section id="basics">
+					<h2>Basics</h2>
+					<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
+
+export default defineConfig({
+	processes: [
+		{
+			name: "api",
+			command: "pnpm",
+			args: ["--filter", "./api", "run", "dev"],
+			cwd: "api",
+			color: "blue",
+			env: { NODE_ENV: "development" },
+		},
+	],
+});</code></pre>
+					<ul>
+						<li><code>name</code> &mdash; unique; used for log prefixes, the pidfile, and status output.</li>
+						<li><code>command</code>/<code>args</code> &mdash; the process to run.</li>
+						<li><code>cwd</code> &mdash; resolved relative to wherever the CLI was invoked; defaults to that same directory.</li>
+						<li><code>env</code> &mdash; extra environment variables merged over <code>process.env</code>, for this process only.</li>
+						<li><code>color</code> &mdash; ANSI color name used for this process's log prefix.</li>
+					</ul>
+				</section>
+
+				<section id="watch">
+					<h2>Watching and restarting</h2>
+					<p>
+						Set <code>watch</code> to run a process under <a href="https://github.com/remy/nodemon">nodemon</a>,
+						restarting it whenever a matched path changes. Omit it for a command that manages its own reload
+						(a dev server with its own HMR, for instance).
+					</p>
+					<pre><code class="language-typescript">{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	watch: ["api/src"],
+	ext: "ts,graphql,json", // @default "ts,js,json" - comma-separated, only used when watch is set
+},</code></pre>
+				</section>
+
+				<section id="dependent-restarts">
+					<h2>Dependent restarts</h2>
+					<p>
+						A process can restart whenever another one does &mdash; e.g. a client that
+						needs to regenerate its GraphQL SDK once the API it talks to restarts:
+					</p>
+					<pre><code class="language-typescript">{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
+{
+	name: "client",
+	command: "pnpm",
+	args: ["--filter", "./client", "run", "dev"],
+	dependsOn: {
+		processes: ["api"],
+		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
+	},
+},</code></pre>
+					<p>
+						When <code>api</code> restarts: <code>client</code> stops once
+						<code>api</code> has actually re-spawned (not the instant nodemon decides
+						to restart it), <code>run</code> executes (retried on failure &mdash;
+						<code>retries</code>/<code>retryDelayMs</code>, default 5&times; / 1s
+						apart, since <code>api</code> may still be starting back up), then
+						<code>client</code> restarts. Left stopped with a logged reason if
+						<code>run</code> never succeeds. A <code>dependsOn</code> chain that loops
+						back on its own trigger is rejected at startup. Multiple processes can
+						depend on the same trigger &mdash; each cascades independently, in
+						parallel.
+					</p>
+				</section>
+
+				<section id="post-restart-hooks">
+					<h2>Post-restart hooks</h2>
+					<p>
+						For a shared workspace package other processes just read from (no process
+						of its own to restart), run a command directly after the process that
+						changed it restarts:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	watch: ["api/src"],
+	onRestart: { command: "pnpm", args: ["--filter", "./types", "run", "generate"] },
+},</code></pre>
+					<p>
+						Same shape and retry behavior as <code>dependsOn.run</code>, but scoped to
+						<code>api</code> restarting itself &mdash; no dependent process is stopped
+						or restarted. If <code>api</code> also has dependents (via
+						<code>dependsOn</code>), they're notified only once this hook succeeds, and
+						not at all if it never does.
+					</p>
+				</section>
+
+				<section id="waiting-for-readiness">
+					<h2>Waiting for readiness</h2>
+					<p>
+						Re-spawning a process isn't the same as it being ready &mdash; an API might
+						take a moment after restarting before it's actually serving.
+						<code>readyPattern</code> holds off <code>onRestart</code> and any
+						<code>dependsOn</code> cascades until a regex matches that process's own
+						stdout/stderr:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	watch: ["api/src"],
+	readyPattern: "Server listening",
+	readyTimeoutMs: 15000, // @default 10000
+},</code></pre>
+					<p>
+						Without <code>readyPattern</code>, dependents are held off only until
+						<code>api</code> has re-spawned (not exited/killed while restarting, but
+						not necessarily done starting up either) &mdash; a
+						<code>run</code>/<code>onRestart</code> hook's own retry is what bridges
+						the rest of that gap. If <code>readyPattern</code> never matches within
+						<code>readyTimeoutMs</code>, braid logs why (in <code>api</code>'s own log)
+						and proceeds anyway, rather than holding dependents off forever on a
+						misconfigured pattern.
+					</p>
+				</section>
+
+				<section id="logs">
+					<h2>Logs</h2>
+					<p>
+						Each process gets a rotated log file at <code>.braid/logs/&lt;name&gt;.log</code>.
+						Rotated (one backup kept) on every <code>start</code>, on a nodemon-triggered
+						restart, and past <code>logs.maxSizeBytes</code> (default 5MB, set at the
+						top level of the config, not per-process):
+					</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [ /* ... */ ],
+	logs: {
+		dir: ".braid/logs",   // @default ".braid/logs"
+		maxSizeBytes: 5242880, // @default 5MB
+	},
+});</code></pre>
+					<p>
+						Braid's own diagnostics (plugin failures, crash notices) go to
+						<code>.braid/daemon.log</code>; a <code>dependsOn</code>/<code>onRestart</code>
+						hook that keeps failing, or a <code>readyPattern</code> that never matches,
+						is also logged into the relevant process's own log &mdash; visible via
+						<code>braid logs</code>/<code>--follow</code>, not just <code>daemon.log</code>.
+					</p>
+				</section>
+			</main>
+		</div>
+
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>
