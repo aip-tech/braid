@@ -23,7 +23,9 @@ export type ProcessConfig = {
 	ext?: string;
 };
 
-export type WorkerStatusMessage = { type: "crash"; code: number | null };
+export type WorkerStatusMessage =
+	| { type: "crash"; code: number | null }
+	| { type: "restart" };
 
 export type PidfileWorker = { name: string; pid: number; startedAt: string };
 
@@ -52,6 +54,8 @@ export type PluginConfigEntry = string | [string, Record<string, unknown>];
 export type BraidConfig = {
 	processes: ProcessConfig[];
 	plugins?: PluginConfigEntry[];
+	/** Per-process log file settings, consumed by the core logger plugin. */
+	logs?: { dir?: string; maxSizeBytes?: number };
 };
 
 /**
@@ -68,7 +72,24 @@ export type PluginLifecycleEvent =
 			signal: NodeJS.Signals | null;
 	  }
 	| { type: "processCrash"; name: string; code: number | null }
+	| {
+			/** A nodemon-wrapped process restarted internally (a file change), not exited. */
+			type: "processRestart";
+			name: string;
+	  }
+	| {
+			/** Raw stdout/stderr bytes from a child, already line-prefixed by worker.ts. */
+			type: "processOutput";
+			name: string;
+			stream: "stdout" | "stderr";
+			chunk: Buffer;
+	  }
 	| { type: "daemonShutdown" };
+
+/** Sent from the daemon entrypoint back to the CLI over IPC once startup succeeds or fails. */
+export type DaemonHandshakeMessage =
+	| { type: "ready" }
+	| { type: "error"; message: string };
 
 export type RouteHandler = (
 	req: IncomingMessage,

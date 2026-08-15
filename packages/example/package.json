@@ -8,6 +8,7 @@
 		"dev": "braid start",
 		"dev:stop": "braid stop",
 		"dev:status": "braid status",
+		"dev:logs": "braid logs --follow",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write",
 		"lint": "biome lint --write",

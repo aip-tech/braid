@@ -1,6 +1,8 @@
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
@@ -17,6 +19,7 @@ import {
 	parseArgs,
 	runCli,
 } from "./cli.js";
+import { stopFromPidfile } from "./manager.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__");
@@ -104,6 +107,29 @@ describe("parseArgs", () => {
 			/requires a path/,
 		);
 	});
+
+	it("parses a positional process name and --follow/--lines for logs", () => {
+		const parsed = parseArgs(
+			["logs", "web", "--follow", "--lines", "50"],
+			"/repo",
+		);
+		expect(parsed.processName).toBe("web");
+		expect(parsed.follow).toBe(true);
+		expect(parsed.lines).toBe(50);
+	});
+
+	it("defaults follow to false and lines to undefined with no name given", () => {
+		const parsed = parseArgs(["logs"], "/repo");
+		expect(parsed.processName).toBeUndefined();
+		expect(parsed.follow).toBe(false);
+		expect(parsed.lines).toBeUndefined();
+	});
+
+	it("throws when --lines isn't a positive number", () => {
+		expect(() => parseArgs(["logs", "--lines", "nope"], "/repo")).toThrow(
+			/positive number/,
+		);
+	});
 });
 
 describe("loadConfig", () => {
@@ -184,7 +210,10 @@ describe("runCli", () => {
 		);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		// start daemonizes to a real detached process now - a mid-test assertion failure before a
+		// test's own explicit "stop" must not leak it running after the test file finishes.
+		await stopFromPidfile(join(tmpDir, DEFAULT_PIDFILE_PATH)).catch(() => {});
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -247,4 +276,109 @@ describe("runCli", () => {
 		await startPromise;
 		errorSpy.mockRestore();
 	}, 10000);
+
+	it("prints the daemon's pid on a successful start and leaves a daemon.log behind", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const code = await runCli(["start"], tmpDir);
+		expect(code).toBe(0);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				/braid: started \(pid \d+\)/.test(String(call[0])),
+			),
+		).toBe(true);
+		expect(existsSync(join(tmpDir, ".braid", "daemon.log"))).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("surfaces a useful error, including the daemon.log tail, when the daemon fails to start", async () => {
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		// Occupies the pidfile's own path with a directory, so runManager's writeFileSync(pidfilePath)
+		// throws inside the daemon after it's already forked - a realistic, non-contrived way to
+		// exercise the "daemon fails after forking, before signaling ready" handshake path.
+		mkdirSync(join(tmpDir, ".braid", "run.json"), { recursive: true });
+
+		const code = await runCli(["start"], tmpDir);
+		expect(code).toBe(1);
+		expect(
+			errorSpy.mock.calls.some((call) => String(call[0]).startsWith("braid:")),
+		).toBe(true);
+		const daemonLog = readFileSync(
+			join(tmpDir, ".braid", "daemon.log"),
+			"utf8",
+		);
+		expect(daemonLog).toContain("daemon failed to start");
+
+		errorSpy.mockRestore();
+	}, 10000);
+
+	describe("logs", () => {
+		it("reports nothing running when no daemon is running", async () => {
+			const logSpy = vi
+				.spyOn(console, "log")
+				.mockImplementation(() => undefined);
+			expect(await runCli(["logs"], tmpDir)).toBe(0);
+			expect(logSpy).toHaveBeenCalledWith("Nothing running.");
+			logSpy.mockRestore();
+		});
+
+		it("streams a running process's log, honors --lines and a name filter", async () => {
+			const writeSpy = vi
+				.spyOn(process.stdout, "write")
+				.mockImplementation(() => true);
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+			expect(await runCli(["start"], tmpDir)).toBe(0);
+			const logPath = join(tmpDir, ".braid", "logs", "solo.log");
+			await waitFor(
+				() => existsSync(logPath) && readFileSync(logPath, "utf8").length > 0,
+			);
+
+			expect(await runCli(["logs", "solo"], tmpDir)).toBe(0);
+			expect(
+				writeSpy.mock.calls.some((call) =>
+					Buffer.from(call[0]).toString().includes("[solo]"),
+				),
+			).toBe(true);
+
+			expect(await runCli(["logs", "solo", "--lines", "1"], tmpDir)).toBe(0);
+
+			// An unconfigured name 404s cleanly rather than streaming anything.
+			writeSpy.mockClear();
+			expect(await runCli(["logs", "nonexistent"], tmpDir)).toBe(1);
+
+			await stopFromPidfile(pidfilePath);
+			writeSpy.mockRestore();
+		}, 10000);
+
+		it.each([
+			"SIGINT",
+			"SIGTERM",
+		] as const)("exits cleanly on %s during --follow, instead of dying from the raw signal", async (signal) => {
+			const writeSpy = vi
+				.spyOn(process.stdout, "write")
+				.mockImplementation(() => true);
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+			expect(await runCli(["start"], tmpDir)).toBe(0);
+			const logsPromise = runCli(["logs", "solo", "--follow"], tmpDir);
+			// Give the follow request time to actually connect before interrupting it.
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			// process.emit (not process.kill): exercises the same registered listener a real
+			// signal would, without sending an actual OS signal to the whole test-runner process.
+			// Both signals matter: Ctrl-C sends SIGINT directly, but pnpm's own recursive/filtered
+			// script runner re-sends termination as SIGTERM rather than forwarding SIGINT verbatim.
+			process.emit(signal);
+
+			expect(await logsPromise).toBe(0);
+
+			await stopFromPidfile(pidfilePath);
+			writeSpy.mockRestore();
+		}, 10000);
+	});
 });

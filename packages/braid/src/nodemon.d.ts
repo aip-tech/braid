@@ -21,6 +21,7 @@ declare module "nodemon" {
 			listener: (this: NodemonReadableEmitter) => void,
 		): NodemonInstance;
 		on(event: "crash", listener: () => void): NodemonInstance;
+		on(event: "restart", listener: () => void): NodemonInstance;
 		on(event: "quit", listener: () => void): NodemonInstance;
 	};
 

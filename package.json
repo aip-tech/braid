@@ -10,6 +10,7 @@
 		"dev": "pnpm --filter ./packages/example run dev",
 		"dev:stop": "pnpm --filter ./packages/example run dev:stop",
 		"dev:status": "pnpm --filter ./packages/example run dev:status",
+		"dev:logs": "pnpm --filter ./packages/example run dev:logs",
 		"build": "pnpm --filter ./packages/braid run build",
 		"typecheck": "pnpm -r run typecheck",
 		"format": "pnpm -r run format",

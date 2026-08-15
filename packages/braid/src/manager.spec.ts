@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +50,20 @@ function exitFailConfig(name: string): ProcessConfig {
 	return { name, command: "node", args: [join(FIXTURES, "exit-fail.js")] };
 }
 
+function chattyConfig(name: string): ProcessConfig {
+	return { name, command: "node", args: [join(FIXTURES, "chatty.js")] };
+}
+
+/** Mirrors chatty.js's own line-generation exactly, so the expected byte count is computed, not guessed. */
+function expectedChattyBytes(prefix: string): number {
+	let total = 0;
+	for (let i = 0; i < 500; i++) {
+		const line = `chatty-line-${i}-${"x".repeat(40)}`;
+		total += prefix.length + line.length + 1; // prefix + content + newline
+	}
+	return total;
+}
+
 describe("runManager", () => {
 	let tmpDir: string;
 	let pidfilePath: string;
@@ -57,8 +77,7 @@ describe("runManager", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("forks every configured process, records their PIDs, and relays their prefixed output", async () => {
-		const writeSpy = vi.spyOn(process.stdout, "write");
+	it("forks every configured process, records their PIDs, and persists their prefixed output to per-process log files", async () => {
 		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
 
 		const managerPromise = runManager(configs, pidfilePath);
@@ -73,11 +92,15 @@ describe("runManager", () => {
 		await waitFor(() =>
 			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
 		);
-		await waitFor(() =>
-			writeSpy.mock.calls.some((call) => String(call[0]).includes("[one]")),
+		const oneLog = join(tmpDir, "logs", "one.log");
+		const twoLog = join(tmpDir, "logs", "two.log");
+		await waitFor(
+			() =>
+				existsSync(oneLog) && readFileSync(oneLog, "utf8").includes("[one]"),
 		);
-		await waitFor(() =>
-			writeSpy.mock.calls.some((call) => String(call[0]).includes("[two]")),
+		await waitFor(
+			() =>
+				existsSync(twoLog) && readFileSync(twoLog, "utf8").includes("[two]"),
 		);
 
 		expect(findRunningPidfile(pidfilePath)).toBeDefined();
@@ -93,8 +116,6 @@ describe("runManager", () => {
 		for (const worker of pidfile.workers) {
 			expect(isPidAlive(worker.pid)).toBe(false);
 		}
-
-		writeSpy.mockRestore();
 	}, 10000);
 
 	it("kills every other worker and returns a non-zero exit code when one process crashes", async () => {
@@ -115,6 +136,56 @@ describe("runManager", () => {
 		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
 			/already running/,
 		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+});
+
+describe("runManager log rotation", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-rotate-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("rotates a chatty process's log on crossing maxSizeBytes, preserving every byte across the two files", async () => {
+		const totalBytes = expectedChattyBytes("[noisy] ");
+		// Comfortably above half of totalBytes: guarantees exactly one rotation (the remaining bytes
+		// after resetting the counter can't climb back past the threshold a second time), so this is
+		// a clean regression test for the sync:true reopen fix - any lost or misfiled chunk from a
+		// reopen race would show up as rotated+active falling short of totalBytes.
+		const maxSizeBytes = Math.round(totalBytes * 0.65);
+
+		const configs = [chattyConfig("noisy")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			logs: { maxSizeBytes },
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const logPath = join(tmpDir, "logs", "noisy.log");
+		const rotatedPath = `${logPath}.1`;
+
+		await waitFor(() => {
+			const rotated = existsSync(rotatedPath) ? statSync(rotatedPath).size : 0;
+			const active = existsSync(logPath) ? statSync(logPath).size : 0;
+			return rotated + active >= totalBytes;
+		});
+
+		const rotatedSize = statSync(rotatedPath).size;
+		const activeSize = existsSync(logPath) ? statSync(logPath).size : 0;
+		expect(rotatedSize).toBeGreaterThan(0);
+		// >= totalBytes (the 500 chatty lines) with a small upper margin for chatty.js's one extra
+		// "started <pid>" line - tight enough to catch a lost/misfiled chunk (short of totalBytes) or
+		// gross duplication (far past it), without hardcoding the pid's exact digit count.
+		expect(rotatedSize + activeSize).toBeGreaterThanOrEqual(totalBytes);
+		expect(rotatedSize + activeSize).toBeLessThan(totalBytes + 50);
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;

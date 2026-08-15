@@ -54,6 +54,7 @@ export function runWorker(config: ProcessConfig): void {
 			},
 		);
 		monitor.on("crash", () => send({ type: "crash", code: null }, () => {}));
+		monitor.on("restart", () => send({ type: "restart" }, () => {}));
 		monitor.on("quit", () => {
 			stdoutPrefixer.flush();
 			stderrPrefixer.flush();

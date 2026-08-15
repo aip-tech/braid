@@ -1,32 +1,80 @@
 #!/usr/bin/env node
-import { existsSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { fork } from "node:child_process";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	findRunningPidfile,
-	runManager,
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
-import type { BraidConfig, ProcessConfig } from "./types.js";
+import { siblingModulePath, sourceExecArgv } from "./module-path.js";
+import type {
+	BraidConfig,
+	DaemonHandshakeMessage,
+	ProcessConfig,
+} from "./types.js";
+
+const DAEMON_PATH = siblingModulePath(import.meta.url, "daemon");
+// How long `start` waits for the detached daemon to confirm it's up before giving up (the daemon
+// itself keeps running either way - this only bounds how long the CLI invocation blocks).
+const DAEMON_READY_TIMEOUT_MS = 5000;
 
 export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
 export const DEFAULT_PIDFILE_PATH = join(".braid", "run.json");
 
-export type ParsedArgs = { command: string | undefined; configPath: string };
+export type ParsedArgs = {
+	command: string | undefined;
+	configPath: string;
+	/** Positional process name, used by `logs`. */
+	processName?: string;
+	follow: boolean;
+	lines?: number;
+};
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	const [command, ...rest] = argv;
 	let configPath = DEFAULT_CONFIG_FILENAME;
+	let processName: string | undefined;
+	let follow = false;
+	let lines: number | undefined;
+
 	for (let i = 0; i < rest.length; i++) {
-		if (rest[i] === "--config") {
+		const arg = rest[i];
+		if (arg === "--config") {
 			const value = rest[i + 1];
 			if (!value) throw new Error("--config requires a path");
 			configPath = value;
 			i++;
+		} else if (arg === "--follow") {
+			follow = true;
+		} else if (arg === "--lines") {
+			const value = rest[i + 1];
+			const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
+			if (!value || !Number.isFinite(parsed) || parsed <= 0) {
+				throw new Error("--lines requires a positive number");
+			}
+			lines = parsed;
+			i++;
+		} else if (!arg?.startsWith("--") && processName === undefined) {
+			processName = arg;
 		}
 	}
-	return { command, configPath: resolve(cwd, configPath) };
+	return {
+		command,
+		configPath: resolve(cwd, configPath),
+		processName,
+		follow,
+		lines,
+	};
 }
 
 const CONFIG_SHAPE_ERROR = (configPath: string): string =>
@@ -69,8 +117,111 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	throw new Error(CONFIG_SHAPE_ERROR(configPath));
 }
 
+type DaemonStartOutcome =
+	| { ok: true; pid: number }
+	| { ok: false; message: string };
+
+/**
+ * Forks daemon.ts detached, redirecting its stdout/stderr straight to daemon.log via an
+ * already-open fd (the standard Node idiom for a detached process whose output must persist after
+ * the spawning parent exits - no piping needed, the child gets its own reference to the same open
+ * file description), then races a ready/error IPC message against the child dying or a timeout.
+ */
+async function startDaemon(
+	config: BraidConfig,
+	configPath: string,
+	pidfilePath: string,
+	cwd: string,
+): Promise<DaemonStartOutcome> {
+	const braidDir = dirname(pidfilePath);
+	mkdirSync(braidDir, { recursive: true });
+	const daemonLogPath = join(braidDir, "daemon.log");
+	if (existsSync(daemonLogPath)) {
+		renameSync(daemonLogPath, `${daemonLogPath}.1`);
+	}
+	const daemonLogFd = openSync(daemonLogPath, "a");
+
+	const daemonInput = {
+		processes: config.processes,
+		plugins: config.plugins,
+		configPath,
+		logs: config.logs,
+		pidfilePath,
+	};
+
+	const child = fork(DAEMON_PATH, [], {
+		cwd,
+		detached: true,
+		stdio: ["ignore", daemonLogFd, daemonLogFd, "ipc"],
+		env: { ...process.env, BRAID_DAEMON_INPUT: JSON.stringify(daemonInput) },
+		// Not process.execArgv: if the CLI's own process itself happens to have been started with a
+		// bare "--import tsx" (e.g. invoked directly as `node --import tsx cli.ts`), blindly forwarding
+		// it here would race an unresolved "tsx" (which the child - running in a different cwd - can't
+		// necessarily resolve) against the properly pre-resolved one below.
+		execArgv: sourceExecArgv(import.meta.url),
+	});
+	closeSync(daemonLogFd);
+
+	const outcome = await new Promise<DaemonStartOutcome>((settle) => {
+		const timeout = setTimeout(() => {
+			settle({
+				ok: false,
+				message: `daemon (pid ${child.pid}) did not confirm startup within ${DAEMON_READY_TIMEOUT_MS}ms; check ${daemonLogPath}`,
+			});
+		}, DAEMON_READY_TIMEOUT_MS);
+		child.once("message", (message: DaemonHandshakeMessage) => {
+			clearTimeout(timeout);
+			settle(
+				message.type === "ready"
+					? { ok: true, pid: child.pid as number }
+					: { ok: false, message: message.message },
+			);
+		});
+		child.once("exit", (code) => {
+			clearTimeout(timeout);
+			settle({
+				ok: false,
+				message: `daemon exited before starting up (code ${code}); check ${daemonLogPath}`,
+			});
+		});
+		child.once("error", (error) => {
+			clearTimeout(timeout);
+			settle({
+				ok: false,
+				message: `failed to start daemon: ${error.message}`,
+			});
+		});
+	});
+
+	if (!outcome.ok) {
+		try {
+			const tail = readFileSync(daemonLogPath, "utf8")
+				.split("\n")
+				.slice(-20)
+				.join("\n")
+				.trim();
+			if (tail) console.error(tail);
+		} catch {
+			// daemon.log may not exist yet if the fork itself failed - nothing to show.
+		}
+		try {
+			child.disconnect();
+		} catch {
+			// already disconnected/exited
+		}
+		return outcome;
+	}
+
+	child.disconnect();
+	child.unref();
+	return outcome;
+}
+
 export async function runCli(argv: string[], cwd: string): Promise<number> {
-	const { command, configPath } = parseArgs(argv, cwd);
+	const { command, configPath, processName, follow, lines } = parseArgs(
+		argv,
+		cwd,
+	);
 	const pidfilePath = resolve(cwd, DEFAULT_PIDFILE_PATH);
 
 	switch (command) {
@@ -83,10 +234,57 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				return 1;
 			}
 			const config = await loadConfig(configPath);
-			return runManager(config.processes, pidfilePath, {
-				plugins: config.plugins,
-				configPath,
-			});
+			const outcome = await startDaemon(config, configPath, pidfilePath, cwd);
+			if (!outcome.ok) {
+				console.error(`braid: ${outcome.message}`);
+				return 1;
+			}
+			console.log(`braid: started (pid ${outcome.pid})`);
+			return 0;
+		}
+		case "logs": {
+			const running = findRunningPidfile(pidfilePath);
+			if (!running) {
+				console.log("Nothing running.");
+				return 0;
+			}
+			const url = new URL(`http://127.0.0.1:${running.controlPort}/api/logs`);
+			if (processName) url.searchParams.set("name", processName);
+			if (follow) url.searchParams.set("follow", "true");
+			if (lines !== undefined) url.searchParams.set("lines", String(lines));
+
+			// Registering handlers suppresses Node's default "die from the raw signal" behavior for
+			// both - without this, interrupting --follow exits via signal rather than a normal exit
+			// code, which e.g. pnpm reports as a script failure rather than a clean stop. Both signals
+			// matter: Ctrl-C sends SIGINT directly, but pnpm's own recursive/filtered script runner
+			// re-sends termination as SIGTERM to the nested script rather than always forwarding the
+			// original signal verbatim, so SIGINT-only handling isn't enough under `pnpm run`.
+			const controller = new AbortController();
+			const onSignal = () => controller.abort();
+			process.on("SIGINT", onSignal);
+			process.on("SIGTERM", onSignal);
+			try {
+				const response = await fetch(url, {
+					headers: { Authorization: `Bearer ${running.controlToken}` },
+					signal: controller.signal,
+				});
+				if (!response.ok) {
+					console.error(`braid: ${response.status} ${await response.text()}`);
+					return 1;
+				}
+				if (response.body) {
+					for await (const chunk of response.body) {
+						process.stdout.write(chunk);
+					}
+				}
+				return 0;
+			} catch (error) {
+				if (error instanceof Error && error.name === "AbortError") return 0;
+				throw error;
+			} finally {
+				process.off("SIGINT", onSignal);
+				process.off("SIGTERM", onSignal);
+			}
 		}
 		case "stop": {
 			const stopped = await stopFromPidfile(pidfilePath);
@@ -111,7 +309,9 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			return 0;
 		}
 		default: {
-			console.error("Usage: braid <start|stop|status> [--config <path>]");
+			console.error(
+				"Usage: braid <start|stop|status|logs [name]> [--config <path>] [--follow] [--lines <n>]",
+			);
 			return 1;
 		}
 	}

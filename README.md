@@ -1,10 +1,10 @@
 # braid
 
-Runs multiple long-lived processes as one unit: tracks their PIDs in a pidfile, restarts individual processes via [nodemon](https://github.com/remy/nodemon) when their watched files change, and kills every process together if one of them crashes or the manager itself is stopped.
+Runs multiple long-lived processes as one unit: tracks their PIDs in a pidfile, restarts individual processes via [nodemon](https://github.com/remy/nodemon) when their watched files change, and kills every process together if one of them crashes or the manager itself is stopped. `start` runs as a detached background daemon with persistent, rotated per-process log files.
 
-Built as a replacement for ad hoc `concurrently`/shell-script setups in monorepo `dev` scripts, where you want more than "run these commands in parallel": PID tracking you can query or kill from a separate terminal, restart-on-change for only the processes that need it, and a crash in one process taking the whole stack down together instead of leaving orphaned siblings running.
+Built as a replacement for ad hoc `concurrently`/shell-script setups in monorepo `dev` scripts, where you want more than "run these commands in parallel": PID tracking you can query or kill from a separate terminal, restart-on-change for only the processes that need it, a crash in one process taking the whole stack down together instead of leaving orphaned siblings running, and output that survives past the terminal that started it.
 
-> **Status**: early-stage development. Core process management (PID tracking, nodemon-driven restarts, kill-everything-on-crash) works and is tested, the CLI is a real compiled `bin` with no TypeScript required to run it, and CI covers typecheck/lint/test/build. `start` also runs an internal, token-guarded plugin API — no plugins ship yet, but a web dashboard plugin is on the roadmap. Published on npm as `@aip-tech/braid`.
+> **Status**: early-stage development. Core process management (PID tracking, nodemon-driven restarts, kill-everything-on-crash, daemonized `start` with persistent rotated logs and a `logs` command) works and is tested, the CLI is a real compiled `bin` with no TypeScript required to run it, and CI covers typecheck/lint/test/build. `start` also runs an internal, token-guarded plugin API — no external plugins ship yet, but a web dashboard plugin is on the roadmap. Published on npm as `@aip-tech/braid`.
 
 For install instructions, config format, and CLI usage of the actual npm package, see **[packages/braid/README.md](packages/braid/README.md)**. This root README covers the workspace/monorepo itself.
 
@@ -21,8 +21,9 @@ Requires Node 22+ and pnpm (`packageManager` is pinned in the root `package.json
 
 ```bash
 pnpm install        # also builds packages/braid (a root `prepare` script), so its bin exists
-pnpm dev            # starts packages/example's two processes via braid
+pnpm dev            # starts packages/example's two processes via braid (returns once they're up)
 pnpm dev:status
+pnpm dev:logs       # tail their persisted output live
 pnpm dev:stop
 ```
 

@@ -8,10 +8,10 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import treeKill from "tree-kill";
 import { createControlServer } from "./control-server.js";
 import { CORE_PLUGINS } from "./core-plugins/index.js";
+import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import { loadExternalPlugins } from "./plugin-loader.js";
 import {
 	createPluginContextFactory,
@@ -19,6 +19,7 @@ import {
 	safeEmit,
 } from "./plugin-runtime.js";
 import type {
+	BraidConfig,
 	Pidfile,
 	PidfileWorker,
 	PluginConfigEntry,
@@ -26,15 +27,7 @@ import type {
 	WorkerStatusMessage,
 } from "./types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-// Compiled output (dist/manager.js) sits next to a compiled dist/worker.js; running straight from
-// source (dev, tests) sits next to worker.ts and needs tsx's loader to fork() it directly.
-const RUNNING_FROM_SOURCE = __filename.endsWith(".ts");
-const WORKER_PATH = join(
-	__dirname,
-	RUNNING_FROM_SOURCE ? "worker.ts" : "worker.js",
-);
+const WORKER_PATH = siblingModulePath(import.meta.url, "worker");
 
 // How long shutdown() waits for daemonShutdown listeners before proceeding regardless -
 // a plugin gets a real chance to react to teardown, but a hung listener can't block it forever.
@@ -45,6 +38,10 @@ export type RunManagerOptions = {
 	plugins?: PluginConfigEntry[];
 	/** The config file plugin specifiers are resolved against. Required if `plugins` is non-empty. */
 	configPath?: string;
+	/** Per-process log file settings, forwarded to the core logger plugin. */
+	logs?: BraidConfig["logs"];
+	/** Called once every process has forked and the pidfile is written, before awaiting exit. */
+	onReady?: () => void;
 };
 
 function readPidfile(pidfilePath: string): Pidfile | undefined {
@@ -142,6 +139,7 @@ export async function runManager(
 	}
 
 	mkdirSync(dirname(pidfilePath), { recursive: true });
+	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
 
 	const children = new Map<string, ChildProcess>();
 	const pidfileWorkers: PidfileWorker[] = [];
@@ -163,8 +161,20 @@ export async function runManager(
 		emitter,
 	});
 
+	// Core plugins registered by name that need config get it looked up here, rather than every
+	// core plugin uniformly receiving the same options object regardless of relevance to it.
+	const corePluginOptions: Record<string, Record<string, unknown>> = {
+		"core:logger": {
+			dir: logsDir,
+			maxSizeBytes: options.logs?.maxSizeBytes,
+		},
+	};
 	for (const plugin of CORE_PLUGINS) {
-		await registerPlugin(plugin, contextFor(plugin.name));
+		await registerPlugin(
+			plugin,
+			contextFor(plugin.name),
+			corePluginOptions[plugin.name],
+		);
 	}
 	if (options.plugins && options.plugins.length > 0) {
 		// options.configPath is guaranteed set here by the guard above.
@@ -214,9 +224,10 @@ export async function runManager(
 			},
 			// Only the source (.ts) worker needs tsx's loader; the compiled worker.js is plain JS a
 			// published package's consumers can run with no TypeScript tooling installed at all.
-			execArgv: RUNNING_FROM_SOURCE
-				? [...process.execArgv, "--import", "tsx"]
-				: process.execArgv,
+			// Not process.execArgv: if this process itself was started with a bare "--import tsx",
+			// forwarding it would race an unresolved "tsx" (unreachable from a worker with a different
+			// cwd, e.g. via config.cwd) against the properly pre-resolved one sourceExecArgv returns.
+			execArgv: sourceExecArgv(import.meta.url),
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		});
 		children.set(config.name, child);
@@ -233,10 +244,33 @@ export async function runManager(
 			});
 		}
 
-		child.stdout?.on("data", (chunk: Buffer) => process.stdout.write(chunk));
-		child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+		// No terminal to relay to any more (start always daemonizes) - the core logger plugin is
+		// the one consumer that persists these to per-process rotated log files.
+		child.stdout?.on("data", (chunk: Buffer) => {
+			void safeEmit(emitter, "processOutput", {
+				type: "processOutput",
+				name: config.name,
+				stream: "stdout",
+				chunk,
+			});
+		});
+		child.stderr?.on("data", (chunk: Buffer) => {
+			void safeEmit(emitter, "processOutput", {
+				type: "processOutput",
+				name: config.name,
+				stream: "stderr",
+				chunk,
+			});
+		});
 
 		child.on("message", (message: WorkerStatusMessage) => {
+			if (message.type === "restart") {
+				void safeEmit(emitter, "processRestart", {
+					type: "processRestart",
+					name: config.name,
+				});
+				return;
+			}
 			if (message.type === "crash" && !shuttingDown) {
 				process.stderr.write(
 					`[braid] "${config.name}" crashed, stopping all processes\n`,
@@ -284,6 +318,7 @@ export async function runManager(
 		controlToken: controlServer.token,
 	};
 	writeFileSync(pidfilePath, JSON.stringify(pidfile, null, 2));
+	options.onReady?.();
 
 	process.on("SIGINT", onSignal);
 	process.on("SIGTERM", onSignal);
