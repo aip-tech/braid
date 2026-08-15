@@ -81,9 +81,7 @@ describe("createControlServer", () => {
 		expect(index.status).toBe(200);
 		expect(await index.text()).toBe("public");
 
-		// A URL-encoded traversal payload survives URL parsing as literal text (unlike a bare
-		// "../", which the URL constructor's own dot-segment removal already collapses before our
-		// code sees it) - this is the case the explicit resolve()+startsWith(root) guard exists for.
+		// Encoded traversal survives URL parsing as literal text, unlike a bare "../".
 		const traversal = await fetch(
 			`http://127.0.0.1:${port}/static/%2e%2e%2fsecret.txt`,
 			{ headers },
@@ -123,8 +121,7 @@ describe("createControlServer", () => {
 				path: "/ws?token=wrong",
 				headers: { Connection: "Upgrade", Upgrade: "websocket" },
 			});
-			// A destroyed socket surfaces to the client as a connection error, not a clean
-			// close - both count as "the upgrade was rejected" here.
+			// Both an error and a clean close count as "rejected" here.
 			req.on("upgrade", () => resolve(false));
 			req.on("error", () => resolve(true));
 			req.on("close", () => resolve(true));

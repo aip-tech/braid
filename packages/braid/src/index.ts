@@ -1,3 +1,4 @@
+export { DEFAULT_LOG_MAX_SIZE_BYTES, defineConfig } from "./config.js";
 export type { RunManagerOptions } from "./manager.js";
 export {
 	findRunningPidfile,

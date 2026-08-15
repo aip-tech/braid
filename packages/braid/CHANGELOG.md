@@ -7,6 +7,19 @@ version bump.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-15
+
+### Added
+
+- `defineConfig`, a type-safe config helper: full editor autocomplete on a
+  config's default export, and fills in `logs.maxSizeBytes` when omitted.
+- `@default` JSDoc on every `ProcessConfig`/`BraidConfig` field that has one.
+
+### Changed
+
+- READMEs trimmed to plain install/config/CLI instructions.
+- Code comments trimmed throughout to short, functional notes.
+
 ## [0.2.0] - 2026-08-15
 
 ### Added

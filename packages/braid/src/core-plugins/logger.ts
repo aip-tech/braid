@@ -2,17 +2,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
 import SonicBoom from "sonic-boom";
+import { DEFAULT_LOG_MAX_SIZE_BYTES } from "../config.js";
 import type { BraidPlugin } from "../types.js";
 
 type LoggerOptions = { dir?: string; maxSizeBytes?: number };
-
-const DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024;
-// sonic-boom's own in-memory backpressure ceiling: past this it drops writes (emitting 'drop')
-// instead of buffering unboundedly. Independent of, and much larger than, the file-size rotation
-// threshold above - this is a safety net against an OOM, not a rotation trigger.
+// sonic-boom's own backpressure ceiling - a safety net against unbounded buffering, not rotation.
 const MAX_BUFFERED_BYTES = 10 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 20_000;
-// Follower bucket key for the "all processes, interleaved" route (no ?name= given).
+// Follower bucket key for the "all processes, interleaved" route.
 const ALL_PROCESSES_KEY = "*";
 
 type Destination = {
@@ -40,17 +37,12 @@ function tailLines(content: string, lines: number): string {
 	return allLines.length ? `${allLines.slice(-lines).join("\n")}\n` : "";
 }
 
-/**
- * Core plugin owning per-process rotated log files and serving them back out over HTTP - both the
- * `braid logs` CLI command and (later) the web UI plugin read through the same /api/logs route,
- * rather than each having their own file-tailing implementation.
- */
 export const loggerPlugin: BraidPlugin = {
 	name: "core:logger",
 	register(ctx, rawOptions) {
 		const options = (rawOptions ?? {}) as LoggerOptions;
 		const dir = options.dir ?? join(process.cwd(), ".braid", "logs");
-		const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
+		const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_LOG_MAX_SIZE_BYTES;
 		mkdirSync(dir, { recursive: true });
 
 		const destinations = new Map<string, Destination>();
@@ -72,22 +64,16 @@ export const loggerPlugin: BraidPlugin = {
 			res.on("error", () => set.delete(res));
 		}
 
-		// Lazy: workers haven't forked yet when core plugins register (Phase 0's "register
-		// everything, then listen(), then fork" sequencing), so a destination is created the first
-		// time a name's output is actually seen, not up front.
+		// Created lazily on first output, not at register() time, since no process has forked yet.
 		function getOrCreateDestination(name: string): Destination {
 			const existing = destinations.get(name);
 			if (existing) return existing;
 			const filePath = join(dir, `${name}.log`);
-			// Rotate any leftover file from a previous run before this run's first write - this is
-			// what makes a fresh `braid start` get a clean log instead of one that appends forever.
 			rotateFileIfExists(filePath);
 			const stream = new SonicBoom({
 				dest: filePath,
 				append: true,
-				// sync:true is load-bearing, not just a perf knob: reopen() only swaps the fd before
-				// returning when sync, so the rename-then-reopen rotation sequence below is safe from
-				// a concurrent write landing on the stale (just-renamed-away) fd.
+				// Required for reopen() to be safe for rotation (fd swap completes before it returns).
 				sync: true,
 				maxLength: MAX_BUFFERED_BYTES,
 			});
@@ -128,11 +114,7 @@ export const loggerPlugin: BraidPlugin = {
 			rotateNow(event.name);
 		});
 
-		// Critical: without ending open followers here, control-server.ts's close() - which waits
-		// for every ACTIVE connection to finish (closeIdleConnections() only clears idle ones) -
-		// would hang forever on any open `braid logs --follow` connection, and shutdown() awaits
-		// controlServer.close(). This runs before that close() call (both are part of the same
-		// daemonShutdown/shutdown sequencing in manager.ts).
+		// Ending followers here matters: an open one would otherwise hang controlServer.close().
 		ctx.on("daemonShutdown", () => {
 			clearInterval(heartbeat);
 			for (const set of followers.values()) {
@@ -173,9 +155,7 @@ export const loggerPlugin: BraidPlugin = {
 			if (lines !== undefined) initial = tailLines(initial, lines);
 
 			res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-			// A follow response may have nothing to write for a while (or ever) - flush the headers
-			// now rather than let Node hold them until the first body write, so the client's fetch()
-			// promise resolves immediately instead of waiting on a chunk that may never come.
+			// Without this, Node holds the headers until the first body write, which may never come.
 			res.flushHeaders();
 			if (initial) res.write(initial);
 

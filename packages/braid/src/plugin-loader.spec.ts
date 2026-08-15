@@ -8,8 +8,7 @@ import type { PluginContext } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__", "plugins");
-// A synthetic config path used only to anchor relative-path resolution; it
-// doesn't need to exist on disk, only the fixtures it points at do.
+// Doesn't need to exist on disk - only anchors relative-path resolution.
 const FAKE_CONFIG_PATH = join(__dirname, "braid.config.ts");
 
 function stubContext(): PluginContext {
@@ -90,8 +89,6 @@ describe("loadExternalPlugins: local fixtures", () => {
 			),
 		).resolves.toBeUndefined();
 
-		// throwing-plugin's register() throws - registerPlugin (plugin-runtime.ts) catches
-		// it and reports it via ctx.log(), not a raw stderr write.
 		expect(contexts.get("throwing")?.log).toHaveBeenCalledWith(
 			expect.stringContaining("boom"),
 		);
@@ -189,9 +186,6 @@ describe("loadExternalPlugins: bare-specifier resolution from the config author'
 		);
 	});
 
-	// The case that broke a require.resolve()-based approach: an exports map with
-	// only an "import" condition, no "require"/"default" fallback - exactly the
-	// shape a Vite/tsc-built, "type": "module" plugin package will have.
 	it('resolves a pure-ESM package whose exports map has only an "import" condition', async () => {
 		writePackage("pure-esm-plugin", {
 			type: "module",

@@ -29,8 +29,7 @@ import type {
 
 const WORKER_PATH = siblingModulePath(import.meta.url, "worker");
 
-// How long shutdown() waits for daemonShutdown listeners before proceeding regardless -
-// a plugin gets a real chance to react to teardown, but a hung listener can't block it forever.
+// How long shutdown() waits for daemonShutdown listeners before proceeding regardless.
 const SHUTDOWN_EVENT_TIMEOUT_MS = 2000;
 
 export type RunManagerOptions = {
@@ -90,9 +89,7 @@ export async function stopFromPidfile(pidfilePath: string): Promise<string[]> {
 			stopped.push(worker.name);
 		}
 	}
-	// Guard against a manager process calling stopFromPidfile on itself (e.g. a library consumer
-	// running start/stop in the same process): tree-killing your own PID takes the whole calling
-	// process's tree down with it, which is never the intent of a "stop the other processes" call.
+	// Don't tree-kill our own PID if called from within the manager process itself.
 	if (pidfile.managerPid !== process.pid && isAlive(pidfile.managerPid)) {
 		await killPid(pidfile.managerPid);
 	}
@@ -112,14 +109,9 @@ export function statusFromPidfile(
 }
 
 /**
- * Forks one worker per config, tracks their PIDs in a pidfile, and mirrors concurrently's
- * `--kill-others-on-fail`: if any worker crashes, every other worker is killed and the returned
- * exit code is non-zero. Resolves once every worker has exited (cleanly or via SIGINT/SIGTERM).
- *
- * Also starts a loopback-only, bearer-token-guarded control server (see control-server.ts): every
- * core plugin (core-plugins/) and every external plugin named in `options.plugins` registers
- * routes/static dirs/upgrade handlers and lifecycle listeners on it through the same
- * PluginContext, and its port + token are recorded in the pidfile.
+ * Forks one worker per config, tracks PIDs in a pidfile, kills every worker if one crashes, and
+ * starts the control server core and external plugins register on. Resolves once every worker
+ * has exited.
  */
 export async function runManager(
 	configs: ProcessConfig[],
@@ -161,8 +153,7 @@ export async function runManager(
 		emitter,
 	});
 
-	// Core plugins registered by name that need config get it looked up here, rather than every
-	// core plugin uniformly receiving the same options object regardless of relevance to it.
+	// Options per core plugin, by name - not every core plugin needs config.
 	const corePluginOptions: Record<string, Record<string, unknown>> = {
 		"core:logger": {
 			dir: logsDir,
@@ -222,11 +213,6 @@ export async function runManager(
 				...config.env,
 				BRAID_CONFIG: JSON.stringify(config),
 			},
-			// Only the source (.ts) worker needs tsx's loader; the compiled worker.js is plain JS a
-			// published package's consumers can run with no TypeScript tooling installed at all.
-			// Not process.execArgv: if this process itself was started with a bare "--import tsx",
-			// forwarding it would race an unresolved "tsx" (unreachable from a worker with a different
-			// cwd, e.g. via config.cwd) against the properly pre-resolved one sourceExecArgv returns.
 			execArgv: sourceExecArgv(import.meta.url),
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		});

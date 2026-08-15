@@ -24,8 +24,7 @@ import type {
 } from "./types.js";
 
 const DAEMON_PATH = siblingModulePath(import.meta.url, "daemon");
-// How long `start` waits for the detached daemon to confirm it's up before giving up (the daemon
-// itself keeps running either way - this only bounds how long the CLI invocation blocks).
+// How long `start` waits for the daemon to confirm it's up before giving up.
 const DAEMON_READY_TIMEOUT_MS = 5000;
 
 export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
@@ -80,11 +79,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 const CONFIG_SHAPE_ERROR = (configPath: string): string =>
 	`braid config at ${configPath} must default-export a non-empty array or a { processes } object`;
 
-/**
- * Normalizes a config file's default export to a BraidConfig. A bare
- * ProcessConfig[] (today's format) becomes { processes: [...] } with no
- * plugins; the object form additionally allows a `plugins` array.
- */
+/** Normalizes a config file's default export to a BraidConfig. */
 export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	if (!existsSync(configPath)) {
 		throw new Error(`braid config not found at ${configPath}`);
@@ -121,12 +116,7 @@ type DaemonStartOutcome =
 	| { ok: true; pid: number }
 	| { ok: false; message: string };
 
-/**
- * Forks daemon.ts detached, redirecting its stdout/stderr straight to daemon.log via an
- * already-open fd (the standard Node idiom for a detached process whose output must persist after
- * the spawning parent exits - no piping needed, the child gets its own reference to the same open
- * file description), then races a ready/error IPC message against the child dying or a timeout.
- */
+/** Forks daemon.ts detached (stdout/stderr to daemon.log), then races its ready/error IPC message. */
 async function startDaemon(
 	config: BraidConfig,
 	configPath: string,
@@ -154,10 +144,6 @@ async function startDaemon(
 		detached: true,
 		stdio: ["ignore", daemonLogFd, daemonLogFd, "ipc"],
 		env: { ...process.env, BRAID_DAEMON_INPUT: JSON.stringify(daemonInput) },
-		// Not process.execArgv: if the CLI's own process itself happens to have been started with a
-		// bare "--import tsx" (e.g. invoked directly as `node --import tsx cli.ts`), blindly forwarding
-		// it here would race an unresolved "tsx" (which the child - running in a different cwd - can't
-		// necessarily resolve) against the properly pre-resolved one below.
 		execArgv: sourceExecArgv(import.meta.url),
 	});
 	closeSync(daemonLogFd);
@@ -253,12 +239,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			if (follow) url.searchParams.set("follow", "true");
 			if (lines !== undefined) url.searchParams.set("lines", String(lines));
 
-			// Registering handlers suppresses Node's default "die from the raw signal" behavior for
-			// both - without this, interrupting --follow exits via signal rather than a normal exit
-			// code, which e.g. pnpm reports as a script failure rather than a clean stop. Both signals
-			// matter: Ctrl-C sends SIGINT directly, but pnpm's own recursive/filtered script runner
-			// re-sends termination as SIGTERM to the nested script rather than always forwarding the
-			// original signal verbatim, so SIGINT-only handling isn't enough under `pnpm run`.
+			// Handle both: Ctrl-C sends SIGINT, but pnpm re-sends interruption as SIGTERM.
 			const controller = new AbortController();
 			const onSignal = () => controller.abort();
 			process.on("SIGINT", onSignal);
@@ -317,9 +298,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 	}
 }
 
-// Compares realpaths, not raw paths: when invoked through a package manager's bin symlink (the
-// normal case for an installed CLI), process.argv[1] is the symlink path but import.meta.url
-// reports the resolved target, so a naive comparison never matches and the CLI silently no-ops.
+// Compares realpaths: process.argv[1] is a symlink for an installed bin, import.meta.url isn't.
 export function isMainModule(
 	argv1: string | undefined,
 	moduleUrl: string,

@@ -32,12 +32,7 @@ export type ControlServer = {
 	readonly token: string;
 };
 
-/**
- * A loopback-only HTTP server, bearer-token-guarded on every request, that
- * both braid's own core plugins and external plugins register routes/static
- * dirs/upgrade handlers on through the exact same three methods - there is
- * deliberately no separate internal registration path.
- */
+/** A loopback-only HTTP server, bearer-token-guarded on every request. */
 export function createControlServer(): ControlServer {
 	const token = randomBytes(24).toString("hex");
 	const routes = new Map<string, RouteHandler>();
@@ -49,8 +44,7 @@ export function createControlServer(): ControlServer {
 		pathname: string,
 		res: ServerResponse,
 	): Promise<void> {
-		// decodeURIComponent before resolving so an encoded traversal payload
-		// (%2e%2e%2f) is caught by the same startsWith(root) check as a literal one.
+		// Decode before resolving so an encoded traversal payload (%2e%2e%2f) is caught too.
 		const relative = decodeURIComponent(pathname.slice(entry.prefix.length));
 		const root = resolvePath(entry.dir);
 		const filePath = resolvePath(join(root, relative || "index.html"));
@@ -160,9 +154,7 @@ export function createControlServer(): ControlServer {
 			});
 		},
 		close() {
-			// Plain server.close() waits for every open connection, including idle
-			// keep-alive sockets a pooling client (e.g. fetch()) leaves open, and
-			// can hang indefinitely - closeIdleConnections() clears those first.
+			// server.close() alone waits for idle keep-alive connections too, and can hang forever.
 			server.closeIdleConnections();
 			return new Promise((resolve, reject) => {
 				server.close((error) => (error ? reject(error) : resolve()));

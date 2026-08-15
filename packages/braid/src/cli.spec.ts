@@ -45,9 +45,7 @@ describe("isMainModule", () => {
 		);
 	});
 
-	// import.meta.url for a real loaded module always reports the canonical (realpath'd) location,
-	// which on macOS differs from a freshly-built tmpdir path (/var/folders/... -> /private/var/...)
-	// - so tests build the expected moduleUrl via realpathSync too, matching what Node actually does.
+	// realpathSync matches what Node reports for import.meta.url on a real loaded module.
 	it("matches when argv1 is the same real file as moduleUrl", () => {
 		const realFile = join(tmpDir, "cli.js");
 		writeFileSync(realFile, "");
@@ -211,8 +209,7 @@ describe("runCli", () => {
 	});
 
 	afterEach(async () => {
-		// start daemonizes to a real detached process now - a mid-test assertion failure before a
-		// test's own explicit "stop" must not leak it running after the test file finishes.
+		// Catches any daemon a failed test left running.
 		await stopFromPidfile(join(tmpDir, DEFAULT_PIDFILE_PATH)).catch(() => {});
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
@@ -298,9 +295,7 @@ describe("runCli", () => {
 		const errorSpy = vi
 			.spyOn(console, "error")
 			.mockImplementation(() => undefined);
-		// Occupies the pidfile's own path with a directory, so runManager's writeFileSync(pidfilePath)
-		// throws inside the daemon after it's already forked - a realistic, non-contrived way to
-		// exercise the "daemon fails after forking, before signaling ready" handshake path.
+		// A directory at the pidfile's path makes writeFileSync throw inside the daemon.
 		mkdirSync(join(tmpDir, ".braid", "run.json"), { recursive: true });
 
 		const code = await runCli(["start"], tmpDir);
@@ -367,12 +362,8 @@ describe("runCli", () => {
 
 			expect(await runCli(["start"], tmpDir)).toBe(0);
 			const logsPromise = runCli(["logs", "solo", "--follow"], tmpDir);
-			// Give the follow request time to actually connect before interrupting it.
 			await new Promise((resolve) => setTimeout(resolve, 200));
-			// process.emit (not process.kill): exercises the same registered listener a real
-			// signal would, without sending an actual OS signal to the whole test-runner process.
-			// Both signals matter: Ctrl-C sends SIGINT directly, but pnpm's own recursive/filtered
-			// script runner re-sends termination as SIGTERM rather than forwarding SIGINT verbatim.
+			// process.emit, not process.kill: triggers the listener without signaling the whole test runner.
 			process.emit(signal);
 
 			expect(await logsPromise).toBe(0);

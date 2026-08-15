@@ -157,10 +157,7 @@ describe("runManager log rotation", () => {
 
 	it("rotates a chatty process's log on crossing maxSizeBytes, preserving every byte across the two files", async () => {
 		const totalBytes = expectedChattyBytes("[noisy] ");
-		// Comfortably above half of totalBytes: guarantees exactly one rotation (the remaining bytes
-		// after resetting the counter can't climb back past the threshold a second time), so this is
-		// a clean regression test for the sync:true reopen fix - any lost or misfiled chunk from a
-		// reopen race would show up as rotated+active falling short of totalBytes.
+		// Above half of totalBytes so exactly one rotation happens.
 		const maxSizeBytes = Math.round(totalBytes * 0.65);
 
 		const configs = [chattyConfig("noisy")];
@@ -181,9 +178,7 @@ describe("runManager log rotation", () => {
 		const rotatedSize = statSync(rotatedPath).size;
 		const activeSize = existsSync(logPath) ? statSync(logPath).size : 0;
 		expect(rotatedSize).toBeGreaterThan(0);
-		// >= totalBytes (the 500 chatty lines) with a small upper margin for chatty.js's one extra
-		// "started <pid>" line - tight enough to catch a lost/misfiled chunk (short of totalBytes) or
-		// gross duplication (far past it), without hardcoding the pid's exact digit count.
+		// +50 margin for chatty.js's one extra "started <pid>" line.
 		expect(rotatedSize + activeSize).toBeGreaterThanOrEqual(totalBytes);
 		expect(rotatedSize + activeSize).toBeLessThan(totalBytes + 50);
 

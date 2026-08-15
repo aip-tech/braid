@@ -19,13 +19,7 @@ type ContextFactoryOptions = {
 	emitter: EventEmitter;
 };
 
-/**
- * Returns a function that builds one PluginContext per plugin. Each plugin
- * gets its own instance (not a single shared object) purely so log() can
- * prefix the right plugin name - registerRoute/registerStatic/registerUpgrade
- * and getProcesses() delegate to the same underlying control server and
- * worker snapshot for every plugin.
- */
+/** Builds one PluginContext per plugin, so log() can prefix the right plugin name. */
 export function createPluginContextFactory(
 	options: ContextFactoryOptions,
 ): (pluginName: string) => PluginContext {
@@ -44,13 +38,7 @@ export function createPluginContextFactory(
 	});
 }
 
-/**
- * Calls a plugin's register(), catching both a synchronous throw and a
- * rejected promise from an async register() - `await` on a call that throws
- * synchronously lands in the same catch block as one that returns a rejected
- * promise, so one try/catch covers both failure modes. Used for core plugins
- * and external plugins alike, so neither can take the manager down.
- */
+/** Calls a plugin's register(), logging (not throwing) on a sync or async failure. */
 export async function registerPlugin(
 	plugin: BraidPlugin,
 	ctx: PluginContext,
@@ -65,17 +53,7 @@ export async function registerPlugin(
 	}
 }
 
-/**
- * Dispatches a lifecycle event to every listener registered for `type`,
- * isolating each call individually instead of calling emitter.emit()
- * directly. emit() propagates a listener's synchronous throw straight to
- * whatever called it (here, code inside a child's "exit" handler with no
- * surrounding try/catch), which would hit Node's default uncaughtException
- * handling and crash the whole manager; an async listener's rejected promise
- * is a second, separate failure mode (unhandled rejection, also fatal by
- * default) that a bare try/catch around emit() wouldn't catch either. Both
- * are guarded here.
- */
+// Not emitter.emit(): a throwing/rejecting listener there would crash the whole manager.
 export async function safeEmit<T extends PluginLifecycleEvent["type"]>(
 	emitter: EventEmitter,
 	type: T,

@@ -13,13 +13,12 @@ export type ProcessConfig = {
 	env?: Record<string, string>;
 	/** ANSI color name used for this process's log prefix (see COLOR_CODES in prefix.ts). */
 	color?: string;
-	/**
-	 * Directories to watch for changes. When set, the process runs under nodemon and restarts on
-	 * matching file changes. When omitted, the command runs once and is expected to manage its own
-	 * reload (e.g. a command that already wraps itself in `tsx watch`, or a dev server with its own HMR).
-	 */
+	/** Paths to watch for changes; when set, the process runs under nodemon and restarts on change. */
 	watch?: string[];
-	/** File extensions nodemon watches, comma-separated (nodemon's own format). Only used when `watch` is set. */
+	/**
+	 * File extensions nodemon watches, comma-separated. Only used when `watch` is set.
+	 * @default "ts,js,json"
+	 */
 	ext?: string;
 };
 
@@ -39,30 +38,23 @@ export type Pidfile = {
 	controlToken: string;
 };
 
-/**
- * A config's `plugins` entry: either a bare package name / local path, or a
- * tuple pairing one with an options object passed through to that plugin's
- * `register()`.
- */
+/** A `plugins` entry: a package name/path, or a [name, options] tuple. */
 export type PluginConfigEntry = string | [string, Record<string, unknown>];
 
-/**
- * The object form a braid config file can default-export. A bare
- * `ProcessConfig[]` (today's format) normalizes to `{ processes }` with no
- * plugins - see loadConfig in cli.ts.
- */
+/** The object form a config file can default-export. A bare `ProcessConfig[]` also works. */
 export type BraidConfig = {
 	processes: ProcessConfig[];
 	plugins?: PluginConfigEntry[];
-	/** Per-process log file settings, consumed by the core logger plugin. */
-	logs?: { dir?: string; maxSizeBytes?: number };
+	/** Per-process log file settings. */
+	logs?: {
+		/** @default ".braid/logs" (a "logs" directory next to the pidfile) */
+		dir?: string;
+		/** Size-based rotation backstop, in bytes. @default 5242880 (5MB) */
+		maxSizeBytes?: number;
+	};
 };
 
-/**
- * Lifecycle events plugins can subscribe to via PluginContext.on(). Dispatched
- * through safeEmit (plugin-runtime.ts), never a raw EventEmitter.emit(), so a
- * throwing or rejecting listener can't take the manager down.
- */
+/** Lifecycle events plugins can subscribe to via PluginContext.on(). */
 export type PluginLifecycleEvent =
 	| { type: "processStart"; name: string; pid: number }
 	| {
@@ -73,12 +65,12 @@ export type PluginLifecycleEvent =
 	  }
 	| { type: "processCrash"; name: string; code: number | null }
 	| {
-			/** A nodemon-wrapped process restarted internally (a file change), not exited. */
+			/** A nodemon-wrapped process restarted internally, not exited. */
 			type: "processRestart";
 			name: string;
 	  }
 	| {
-			/** Raw stdout/stderr bytes from a child, already line-prefixed by worker.ts. */
+			/** Raw stdout/stderr bytes from a child, already line-prefixed. */
 			type: "processOutput";
 			name: string;
 			stream: "stdout" | "stderr";
@@ -102,11 +94,7 @@ export type UpgradeHandler = (
 	head: Buffer,
 ) => void;
 
-/**
- * The capability surface handed to a plugin's register(). One instance per
- * plugin (see createPluginContextFactory in plugin-runtime.ts), so log()
- * calls can be attributed to the plugin that made them.
- */
+/** The capability surface handed to a plugin's register(). One instance per plugin. */
 export type PluginContext = {
 	/** Registers an HTTP route on the shared control server. Throws if method+path is already taken. */
 	registerRoute(method: string, path: string, handler: RouteHandler): void;
@@ -130,11 +118,7 @@ export type PluginContext = {
 	log(message: string): void;
 };
 
-/**
- * The contract every plugin implements, whether it's a core plugin (statically
- * imported, compiled into @aip-tech/braid itself) or an external one (declared
- * by package name/path in a config's `plugins` array and dynamically loaded).
- */
+/** The contract every plugin implements, core or external. */
 export type BraidPlugin = {
 	name: string;
 	register(

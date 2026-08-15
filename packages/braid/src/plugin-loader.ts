@@ -13,23 +13,8 @@ function splitEntry(entry: PluginConfigEntry): {
 		: { specifier: entry };
 }
 
-/**
- * Resolves a config's plugin entry to a real module URL. A bare package
- * specifier ("@aip-tech/braid-plugin-ui") resolves from the config file's own
- * location via import-meta-resolve, Node's actual ESM resolver (exports maps,
- * conditions, all of it) - not a require.resolve()-based workaround, which
- * breaks on a pure-ESM plugin package whose package.json#exports has only an
- * "import" condition and no "require"/"default" fallback (exactly the shape a
- * Vite/tsc-built, "type": "module" plugin package will have). Resolving from
- * the config file matters: a plugin declared by a config author must be found
- * in *that author's* node_modules, not inside @aip-tech/braid's own - under
- * pnpm's symlinked layout those are different trees.
- *
- * A relative or absolute local-path entry (checked via node:path's
- * isAbsolute(), not a literal "/" prefix, so a Windows-authored absolute path
- * resolves too) is joined against the config file's directory directly, no
- * resolver needed.
- */
+// Resolves relative to configPath, not this package, so a bare specifier is found in the config
+// author's own node_modules.
 export function resolvePluginModule(
 	specifier: string,
 	configPath: string,
@@ -61,13 +46,7 @@ function logLoaderFailure(
 	process.stderr.write(`[braid] plugin "${specifier}" ${stage}: ${message}\n`);
 }
 
-/**
- * Resolves, loads, and registers every configured external plugin. Every
- * step - resolution, the dynamic import itself, shape validation, and
- * register() (via registerPlugin, see plugin-runtime.ts) - is isolated per
- * entry: one broken plugin is logged and skipped, never thrown, so it can't
- * stop the manager or any other plugin from working.
- */
+/** Resolves, imports, and registers every configured external plugin. A broken one is logged and skipped. */
 export async function loadExternalPlugins(
 	entries: PluginConfigEntry[],
 	configPath: string,
