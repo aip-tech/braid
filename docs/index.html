@@ -31,13 +31,13 @@
 		<main>
 			<section id="install">
 				<h2>Install</h2>
-				<pre><code>npm install @aip-tech/braid</code></pre>
+				<pre><code class="language-bash">npm install @aip-tech/braid</code></pre>
 			</section>
 
 			<section id="config">
 				<h2>Config</h2>
 				<p><code>braid.config.ts</code>:</p>
-				<pre><code>import { defineConfig } from "@aip-tech/braid";
+				<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
 
 export default defineConfig({
 	processes: [
@@ -55,7 +55,7 @@ export default defineConfig({
 
 			<section id="cli">
 				<h2>CLI</h2>
-				<pre><code>npx @aip-tech/braid start                    # start every configured process as a background daemon
+				<pre><code class="language-bash">npx @aip-tech/braid start                    # start every configured process as a background daemon
 npx @aip-tech/braid status                   # list each process's name/pid/alive state
 npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
 npx @aip-tech/braid logs [name] --follow     # keep streaming new output

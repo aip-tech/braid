@@ -1,3 +1,12 @@
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import typescript from "highlight.js/lib/languages/typescript";
+import "highlight.js/styles/github-dark.css";
+
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("typescript", typescript);
+hljs.highlightAll();
+
 const sections = document.querySelectorAll<HTMLElement>("main section[id]");
 const navLinks = document.querySelectorAll<HTMLAnchorElement>("nav a");
 
