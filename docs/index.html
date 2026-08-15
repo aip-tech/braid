@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>braid</title>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body>
+		<header>
+			<h1>braid</h1>
+			<p class="tagline">
+				Runs multiple long-lived processes as one unit, as a background daemon: PID tracking,
+				nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.
+			</p>
+			<p class="links">
+				<a href="https://www.npmjs.com/package/@aip-tech/braid">npm</a>
+				&middot;
+				<a href="https://github.com/aip-tech/braid">GitHub</a>
+			</p>
+		</header>
+
+		<nav>
+			<a href="#install">Install</a>
+			<a href="#config">Config</a>
+			<a href="#cli">CLI</a>
+			<a href="#logs">Logs</a>
+			<a href="#plugins">Plugins</a>
+		</nav>
+
+		<main>
+			<section id="install">
+				<h2>Install</h2>
+				<pre><code>npm install @aip-tech/braid</code></pre>
+			</section>
+
+			<section id="config">
+				<h2>Config</h2>
+				<p><code>braid.config.ts</code>:</p>
+				<pre><code>import { defineConfig } from "@aip-tech/braid";
+
+export default defineConfig({
+	processes: [
+		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
+		{ name: "client", command: "pnpm", args: ["--filter", "./client", "run", "dev"] },
+	],
+});</code></pre>
+				<ul>
+					<li><code>watch</code>: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.</li>
+					<li><code>plugins</code>: external plugins to load, by package name/path (or a <code>[name, options]</code> tuple).</li>
+					<li><code>logs</code>: <code>{ dir, maxSizeBytes }</code>, see <a href="#logs">Logs</a>.</li>
+				</ul>
+				<p>Full field list and defaults live in <code>src/types.ts</code> (<code>ProcessConfig</code>, <code>BraidConfig</code>) in the braid package source.</p>
+			</section>
+
+			<section id="cli">
+				<h2>CLI</h2>
+				<pre><code>npx @aip-tech/braid start                    # start every configured process as a background daemon
+npx @aip-tech/braid status                   # list each process's name/pid/alive state
+npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
+npx @aip-tech/braid logs [name] --follow     # keep streaming new output
+npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
+npx @aip-tech/braid stop                     # kill everything
+npx @aip-tech/braid start --config ./other.config.ts</code></pre>
+				<p>Or just <code>braid ...</code> if installed as a dependency and run via a package.json script.</p>
+			</section>
+
+			<section id="logs">
+				<h2>Logs</h2>
+				<p>
+					Each process gets a rotated log file at <code>.braid/logs/&lt;name&gt;.log</code>. Rotated
+					(one backup kept) on every <code>start</code>, on a nodemon-triggered restart, and past
+					<code>logs.maxSizeBytes</code> (default 5MB). Braid's own diagnostics (plugin failures,
+					crash notices) go to <code>.braid/daemon.log</code>.
+				</p>
+			</section>
+
+			<section id="plugins">
+				<h2>Plugins</h2>
+				<p>
+					<code>start</code> runs a loopback-only, token-guarded control server that plugins
+					register routes on. List a plugin by package name/path in <code>plugins</code> to load
+					it, see <code>PluginContext</code> in <code>src/types.ts</code>. No external plugins
+					ship yet.
+				</p>
+			</section>
+		</main>
+
+		<footer>
+			<p>See <a href="https://github.com/aip-tech/braid/blob/main/packages/braid/CHANGELOG.md">CHANGELOG.md</a> for release notes.</p>
+		</footer>
+
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

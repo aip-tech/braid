@@ -1,0 +1,19 @@
+{
+	"name": "@aip-tech/braid-docs",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Documentation site for braid, built with Vite and deployed to GitHub Pages.",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"typecheck": "tsc --noEmit",
+		"format": "biome format --write",
+		"lint": "biome lint --write",
+		"check": "biome check --write"
+	},
+	"devDependencies": {
+		"vite": "^8.2.1"
+	}
+}

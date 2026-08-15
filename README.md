@@ -8,6 +8,7 @@ See [packages/braid/README.md](packages/braid/README.md) for install, config, an
 
 - [`packages/braid`](packages/braid/README.md) — the library and CLI, published as `@aip-tech/braid` ([CHANGELOG.md](packages/braid/CHANGELOG.md)).
 - [`packages/example`](packages/example/README.md) — a live test bed using braid's real built `bin`.
+- [`docs`](docs/) — the documentation site, built with Vite and deployed to GitHub Pages on every push to `main`.
 
 ## Setup
 
@@ -36,6 +37,15 @@ pnpm coverage
 ```
 
 Filter to one package: `pnpm --filter ./packages/braid run test`.
+
+## Docs site
+
+```bash
+pnpm docs:dev      # local dev server
+pnpm docs:build    # static build to docs/dist
+```
+
+Deployed automatically to GitHub Pages on push to `main` via [`.github/workflows/docs.yml`](.github/workflows/docs.yml).
 
 ## Contributing
 

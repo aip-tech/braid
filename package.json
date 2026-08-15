@@ -12,6 +12,8 @@
 		"dev:status": "pnpm --filter ./packages/example run dev:status",
 		"dev:logs": "pnpm --filter ./packages/example run dev:logs",
 		"build": "pnpm --filter ./packages/braid run build",
+		"docs:dev": "pnpm --filter ./docs run dev",
+		"docs:build": "pnpm --filter ./docs run build",
 		"typecheck": "pnpm -r run typecheck",
 		"format": "pnpm -r run format",
 		"lint": "pnpm -r run lint",
