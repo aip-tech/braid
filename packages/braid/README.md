@@ -27,6 +27,8 @@ export default defineConfig({
 
 - `watch`: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.
 - `dependsOn`: `{ processes, run? }` — restart this process whenever any of `processes` restarts, optionally running a command first (e.g. codegen) and waiting for it to finish. See [Dependent restarts](#dependent-restarts).
+- `onRestart`: run a command after this process itself restarts, e.g. rebuilding a shared workspace package. See [Post-restart hooks](#post-restart-hooks).
+- `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes }` — see [Logs](#logs).
 
@@ -61,11 +63,44 @@ A process can restart whenever another one does — e.g. a client that needs to 
 },
 ```
 
-When `api` restarts: `client` stops, `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since the dependency may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
+When `api` restarts: `client` stops once `api` has actually re-spawned (not the instant nodemon decides to restart it), `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since `api` may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
+
+## Post-restart hooks
+
+For a shared workspace package other processes just read from (no process of its own to restart), run a command directly after the process that changed it restarts:
+
+```ts
+{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	watch: ["api/src"],
+	onRestart: { command: "pnpm", args: ["--filter", "./types", "run", "generate"] },
+},
+```
+
+Same shape and retry behavior as `dependsOn.run`, but scoped to `api` restarting itself — no dependent process is stopped or restarted. If `api` also has dependents (via `dependsOn`), they're notified only once this hook succeeds, and not at all if it never does.
+
+## Waiting for readiness
+
+Re-spawning a process isn't the same as it being ready — an API might take a moment after restarting before it's actually serving. `readyPattern` holds off `onRestart` and any `dependsOn` cascades until a regex matches that process's own stdout/stderr:
+
+```ts
+{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	watch: ["api/src"],
+	readyPattern: "Server listening",
+	readyTimeoutMs: 15000, // @default 10000
+},
+```
+
+Without `readyPattern`, dependents are held off only until `api` has re-spawned (not exited/killed while restarting, but not necessarily done starting up either) — a `run`/`onRestart` hook's own retry is what bridges the rest of that gap. If `readyPattern` never matches within `readyTimeoutMs`, braid logs why and proceeds anyway rather than holding dependents off forever on a misconfigured pattern.
 
 ## Logs
 
-Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a nodemon-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`.
+Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a nodemon-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`; a `dependsOn`/`onRestart` hook that keeps failing, or a `readyPattern` that never matches, is also logged into the relevant process's own log.
 
 ## Plugins
 

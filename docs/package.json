@@ -1,6 +1,6 @@
 {
 	"name": "@aip-tech/braid-docs",
-	"version": "0.0.0",
+	"version": "0.2.4",
 	"private": true,
 	"description": "Documentation site for braid, built with Vite and deployed to GitHub Pages.",
 	"type": "module",

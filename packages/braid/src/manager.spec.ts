@@ -71,6 +71,21 @@ function watchedConfig(name: string, watchFilePath: string): ProcessConfig {
 	};
 }
 
+/** A process restarted by nodemon that only prints "ready-marker <pid>" `delayMs` after each (re)start. */
+function watchedSlowConfig(
+	name: string,
+	watchFilePath: string,
+	delayMs: number,
+): ProcessConfig {
+	return {
+		name,
+		command: "node",
+		args: [join(FIXTURES, "slow-start.js"), String(delayMs)],
+		watch: [watchFilePath],
+		ext: "trigger",
+	};
+}
+
 type DependsOnRun = NonNullable<NonNullable<ProcessConfig["dependsOn"]>["run"]>;
 
 function dependentConfig(
@@ -493,6 +508,13 @@ describe("runManager dependsOn", () => {
 			{ timeoutMs: 10000 },
 		);
 
+		// Regression: the hook's own stdout used to reach the log completely unprefixed, unlike
+		// every other process's output.
+		const clientLog = join(tmpDir, "logs", "client.log");
+		await waitFor(() =>
+			readFileSync(clientLog, "utf8").includes("[client] generate-hook ran"),
+		);
+
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);
@@ -592,6 +614,13 @@ describe("runManager dependsOn", () => {
 		const clientAfter = pidfileWorker(pidfilePath, "client");
 		expect(clientAfter?.pid).toBe(clientBefore?.pid);
 
+		// Also visible via `braid logs`/`--follow`, not just daemon.log - previously this
+		// diagnostic only ever reached process.stderr (daemon.log), invisible there.
+		const clientLog = join(tmpDir, "logs", "client.log");
+		expect(readFileSync(clientLog, "utf8")).toContain(
+			'[client] braid: dependency hook "node" kept failing',
+		);
+
 		writeSpy.mockRestore();
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
@@ -633,6 +662,211 @@ describe("runManager dependsOn", () => {
 						'"client": dependency hook "braid-test-command-that-does-not-exist" kept failing',
 					),
 				),
+			{ timeoutMs: 10000 },
+		);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+});
+
+describe("runManager onRestart", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-onrestart-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("runs its own onRestart hook after a nodemon-triggered restart, with no dependents involved", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const markerFile = join(tmpDir, "generated.log");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "generate-hook.js"), markerFile],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const api = pidfileWorker(pidfilePath, "api");
+			return api !== undefined && isPidAlive(api.pid);
+		});
+		const apiBefore = pidfileWorker(pidfilePath, "api");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
+		const apiLog = join(tmpDir, "logs", "api.log");
+		await waitFor(() =>
+			readFileSync(apiLog, "utf8").includes("[api] generate-hook ran"),
+		);
+		// nodemon restarts the exec'd process in place - the outer forked worker (and its pidfile
+		// entry) never changes for this kind of restart.
+		expect(pidfileWorker(pidfilePath, "api")?.pid).toBe(apiBefore?.pid);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("does not notify a dependsOn'd dependent when the trigger's own onRestart hook keeps failing", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "always-fail-hook.js")],
+					retries: 1,
+					retryDelayMs: 20,
+				},
+			},
+			dependentConfig("client", ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(
+			() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						'"api": onRestart hook "node" kept failing; not notifying dependents',
+					),
+				),
+			{ timeoutMs: 10000 },
+		);
+
+		// Gave the hook a moment past the failure log to (wrongly) cascade, if it were going to.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const clientAfter = pidfileWorker(pidfilePath, "client");
+		expect(clientAfter?.pid).toBe(clientBefore?.pid);
+		expect(isPidAlive(clientAfter?.pid as number)).toBe(true);
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+});
+
+describe("runManager readyPattern", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-ready-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("holds off a dependent's restart until the dependency's own output matches readyPattern", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const markerFile = join(tmpDir, "generated.log");
+		const readyDelayMs = 1500;
+
+		const configs = [
+			{
+				...watchedSlowConfig("api", watchFile, readyDelayMs),
+				readyPattern: "ready-marker",
+			},
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [join(FIXTURES, "generate-hook.js"), markerFile],
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		const triggeredAt = Date.now();
+		await triggerWatchedRestart(watchFile);
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
+
+		// Some slack for scheduling jitter, but this proves the hook waited for readiness rather
+		// than firing the moment nodemon merely decided to restart "api".
+		expect(Date.now() - triggeredAt).toBeGreaterThanOrEqual(readyDelayMs - 300);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("logs and proceeds anyway once readyTimeoutMs elapses without a match", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				readyPattern: "this-will-never-appear-in-output",
+				readyTimeoutMs: 300,
+			},
+			dependentConfig("client", ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(
+			() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						'"api": readyPattern never matched within 300ms; proceeding anyway',
+					),
+				),
+			{ timeoutMs: 10000 },
+		);
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return (
+					client !== undefined &&
+					client.pid !== clientBefore?.pid &&
+					isPidAlive(client.pid)
+				);
+			},
 			{ timeoutMs: 10000 },
 		);
 

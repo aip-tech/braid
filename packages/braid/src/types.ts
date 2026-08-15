@@ -1,6 +1,17 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 
+/** A command run as part of a restart, retried on non-zero exit since a dependency it needs (an API server, a workspace package's build) may still be catching up. */
+export type RestartHook = {
+	command: string;
+	args?: string[];
+	cwd?: string;
+	/** @default 5 */
+	retries?: number;
+	/** Delay between retries, in ms. @default 1000 */
+	retryDelayMs?: number;
+};
+
 export type ProcessConfig = {
 	/** Unique name used for log prefixes, the pidfile, and status output. */
 	name: string;
@@ -21,6 +32,19 @@ export type ProcessConfig = {
 	 */
 	ext?: string;
 	/**
+	 * A regex (as a string, passed to `new RegExp()`) matched against this process's own
+	 * stdout/stderr after each restart. Until it matches (or `readyTimeoutMs` elapses), `onRestart`
+	 * and any dependents' `dependsOn` cascades are held off - e.g. an API's own
+	 * `"Server listening"` log line, so a client's codegen hook doesn't run against a server that's
+	 * merely been re-spawned but hasn't finished its own startup yet. Without this, both are held
+	 * off only until the new process has been (re)spawned (nodemon's own restart is otherwise
+	 * indistinguishable from "ready"), and a `run`/`onRestart` hook's own retry is the only thing
+	 * bridging the remaining gap.
+	 */
+	readyPattern?: string;
+	/** How long to wait for `readyPattern` before giving up and proceeding anyway. @default 10000 */
+	readyTimeoutMs?: number;
+	/**
 	 * Restart this process whenever any of these other configured processes restarts (a
 	 * nodemon-triggered `watch` restart, or one cascaded from its own `dependsOn`). Referencing
 	 * an unknown process name, or a chain that loops back on itself, is rejected at startup.
@@ -28,21 +52,16 @@ export type ProcessConfig = {
 	dependsOn?: {
 		/** Names of other processes in this same config; any of their restarts triggers this one. */
 		processes: string[];
-		/**
-		 * Command run after a dependency restarts and before this process restarts - e.g. a
-		 * codegen script that needs the dependency (an API server) back up and serving first.
-		 * Retried on non-zero exit since the dependency may still be starting back up.
-		 */
-		run?: {
-			command: string;
-			args?: string[];
-			cwd?: string;
-			/** @default 5 */
-			retries?: number;
-			/** Delay between retries, in ms. @default 1000 */
-			retryDelayMs?: number;
-		};
+		/** Command run after a dependency restarts and before this process restarts. */
+		run?: RestartHook;
 	};
+	/**
+	 * Run a command after this process itself restarts (a nodemon-triggered `watch` restart) -
+	 * e.g. rebuilding a shared workspace package other processes read from without themselves
+	 * needing to restart. Dependents (via `dependsOn`) aren't notified of this restart until the
+	 * hook succeeds, and not at all if it never does.
+	 */
+	onRestart?: RestartHook;
 };
 
 /**
@@ -54,7 +73,12 @@ export type ProcessConfig = {
  */
 export type WorkerStatusMessage =
 	| { source: "braid-worker"; type: "crash"; code: number | null }
-	| { source: "braid-worker"; type: "restart" };
+	| { source: "braid-worker"; type: "restart" }
+	| {
+			/** The exec'd/scripted process has (re)spawned - fires at initial start too. */
+			source: "braid-worker";
+			type: "started";
+	  };
 
 export type PidfileWorker = { name: string; pid: number; startedAt: string };
 

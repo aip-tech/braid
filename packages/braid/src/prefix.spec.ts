@@ -1,11 +1,9 @@
-import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { colorize, linePrefixer } from "./prefix.js";
 
-function collect(stream: PassThrough): string[] {
-	const chunks: string[] = [];
-	stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString()));
-	return chunks;
+function collectingSink(): { lines: string[]; sink: (line: string) => void } {
+	const lines: string[] = [];
+	return { lines, sink: (line) => lines.push(line) };
 }
 
 describe("colorize", () => {
@@ -24,48 +22,44 @@ describe("colorize", () => {
 
 describe("linePrefixer", () => {
 	it("prefixes each complete line and holds back a trailing partial line", () => {
-		const target = new PassThrough();
-		const chunks = collect(target);
-		const prefixer = linePrefixer(target, "api", "blue");
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api", "blue");
 
 		prefixer.write("first line\nsecond line\npartial");
 
-		expect(chunks).toEqual([
+		expect(lines).toEqual([
 			`${colorize("[api]", "blue")} first line\n`,
 			`${colorize("[api]", "blue")} second line\n`,
 		]);
 	});
 
 	it("completes a buffered partial line once a newline arrives in a later chunk", () => {
-		const target = new PassThrough();
-		const chunks = collect(target);
-		const prefixer = linePrefixer(target, "api");
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api");
 
 		prefixer.write("hello ");
 		prefixer.write("world\n");
 
-		expect(chunks).toEqual(["[api] hello world\n"]);
+		expect(lines).toEqual(["[api] hello world\n"]);
 	});
 
 	it("flush writes out a trailing partial line with no newline", () => {
-		const target = new PassThrough();
-		const chunks = collect(target);
-		const prefixer = linePrefixer(target, "api");
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api");
 
 		prefixer.write("no newline yet");
 		prefixer.flush();
 
-		expect(chunks).toEqual(["[api] no newline yet\n"]);
+		expect(lines).toEqual(["[api] no newline yet\n"]);
 	});
 
 	it("flush is a no-op when there is no buffered content", () => {
-		const target = new PassThrough();
-		const chunks = collect(target);
-		const prefixer = linePrefixer(target, "api");
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api");
 
 		prefixer.write("complete line\n");
 		prefixer.flush();
 
-		expect(chunks).toEqual(["[api] complete line\n"]);
+		expect(lines).toEqual(["[api] complete line\n"]);
 	});
 });

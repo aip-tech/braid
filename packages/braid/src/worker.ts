@@ -23,12 +23,12 @@ function send(message: WorkerStatusMessage, onSent: () => void): void {
 
 export function runWorker(config: ProcessConfig): void {
 	const stdoutPrefixer = linePrefixer(
-		process.stdout,
+		(line) => process.stdout.write(line),
 		config.name,
 		config.color,
 	);
 	const stderrPrefixer = linePrefixer(
-		process.stderr,
+		(line) => process.stderr.write(line),
 		config.name,
 		config.color,
 	);
@@ -65,6 +65,11 @@ export function runWorker(config: ProcessConfig): void {
 		);
 		monitor.on("restart", () =>
 			send({ source: "braid-worker", type: "restart" }, () => {}),
+		);
+		// Fires at initial start too, not just restarts - the manager only acts on it when it's
+		// actually expecting one (i.e. right after a "restart" message), see manager.ts.
+		monitor.on("start", () =>
+			send({ source: "braid-worker", type: "started" }, () => {}),
 		);
 		monitor.on("quit", () => {
 			stdoutPrefixer.flush();

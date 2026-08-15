@@ -19,12 +19,14 @@ import {
 	registerPlugin,
 	safeEmit,
 } from "./plugin-runtime.js";
+import { linePrefixer } from "./prefix.js";
 import type {
 	BraidConfig,
 	Pidfile,
 	PidfileWorker,
 	PluginConfigEntry,
 	ProcessConfig,
+	RestartHook,
 	WorkerStatusMessage,
 } from "./types.js";
 
@@ -35,6 +37,10 @@ const SHUTDOWN_EVENT_TIMEOUT_MS = 2000;
 
 const DEFAULT_HOOK_RETRIES = 5;
 const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
+const DEFAULT_READY_TIMEOUT_MS = 10_000;
+// Bounds the rolling buffer readyPattern is tested against, so a chatty process before it's
+// actually ready can't grow this without bound while still letting a match span two chunks.
+const READY_PATTERN_BUFFER_BYTES = 8192;
 
 export type RunManagerOptions = {
 	/** External plugins to load, resolved relative to configPath. */
@@ -190,6 +196,9 @@ export async function runManager(
 	const pidfileWorkers: PidfileWorker[] = [];
 	// Dependent names currently mid stop/hook/restart cycle, so an overlapping trigger is skipped.
 	const restarting = new Set<string>();
+	// Process names whose "restart" message has fired but whose matching "started" hasn't yet -
+	// onRestart/dependsOn cascades wait here, rather than on "restart" itself, see handleFreshStart.
+	const awaitingFreshStart = new Set<string>();
 	const dependentsByTrigger = computeDependents(configs);
 	let shuttingDown = false;
 	let exitCode = 0;
@@ -283,65 +292,96 @@ export async function runManager(
 	};
 
 	/**
-	 * Runs a `dependsOn.run` hook once, its output folded into `logName`'s (the dependent's own)
-	 * log; resolves true on a zero exit code.
+	 * Runs a restart hook once, its output line-prefixed with `logName` (the owning process's own
+	 * name) the same way a regular process's output is, and folded into that same log; resolves
+	 * true on a zero exit code.
 	 */
 	function runHookOnce(
 		logName: string,
-		hook: { command: string; args?: string[]; cwd?: string },
+		color: string | undefined,
+		hook: RestartHook,
 	): Promise<boolean> {
 		return new Promise((resolve) => {
+			const emitOutput = (stream: "stdout" | "stderr", line: string) =>
+				void safeEmit(emitter, "processOutput", {
+					type: "processOutput",
+					name: logName,
+					stream,
+					chunk: Buffer.from(line),
+				});
+			const stdoutPrefixer = linePrefixer(
+				(line) => emitOutput("stdout", line),
+				logName,
+				color,
+			);
+			const stderrPrefixer = linePrefixer(
+				(line) => emitOutput("stderr", line),
+				logName,
+				color,
+			);
+
 			const hookChild = spawn(hook.command, hook.args ?? [], {
 				cwd: hook.cwd ? join(process.cwd(), hook.cwd) : process.cwd(),
 				env: process.env,
 			});
 			hookChildren.add(hookChild);
-			hookChild.stdout?.on("data", (chunk: Buffer) => {
-				void safeEmit(emitter, "processOutput", {
-					type: "processOutput",
-					name: logName,
-					stream: "stdout",
-					chunk,
-				});
-			});
-			hookChild.stderr?.on("data", (chunk: Buffer) => {
-				void safeEmit(emitter, "processOutput", {
-					type: "processOutput",
-					name: logName,
-					stream: "stderr",
-					chunk,
-				});
-			});
+			hookChild.stdout?.on("data", (chunk: Buffer) =>
+				stdoutPrefixer.write(chunk),
+			);
+			hookChild.stderr?.on("data", (chunk: Buffer) =>
+				stderrPrefixer.write(chunk),
+			);
 			hookChild.on("exit", (code) => {
+				stdoutPrefixer.flush();
+				stderrPrefixer.flush();
 				hookChildren.delete(hookChild);
 				resolve(code === 0);
 			});
 			hookChild.on("error", () => {
+				stdoutPrefixer.flush();
+				stderrPrefixer.flush();
 				hookChildren.delete(hookChild);
 				resolve(false);
 			});
 		});
 	}
 
-	/** Retries a `dependsOn.run` hook, since its dependency may still be starting back up. */
+	/** Retries a restart hook, since whatever it needs (a dependency, a build) may still be catching up. */
 	async function runHookWithRetries(
 		logName: string,
-		hook: {
-			command: string;
-			args?: string[];
-			cwd?: string;
-			retries?: number;
-			retryDelayMs?: number;
-		},
+		color: string | undefined,
+		hook: RestartHook,
 	): Promise<boolean> {
 		const retries = hook.retries ?? DEFAULT_HOOK_RETRIES;
 		const retryDelayMs = hook.retryDelayMs ?? DEFAULT_HOOK_RETRY_DELAY_MS;
 		for (let attempt = 0; attempt <= retries; attempt++) {
 			if (shuttingDown) return false;
-			if (await runHookOnce(logName, hook)) return true;
+			if (await runHookOnce(logName, color, hook)) return true;
 			if (attempt < retries) await delay(retryDelayMs);
 		}
 		return false;
+	}
+
+	/**
+	 * Writes a dependsOn/onRestart/readyPattern diagnostic both to `.braid/daemon.log` (as before)
+	 * and into `config`'s own log, prefixed the same way its output already is - otherwise these
+	 * only ever showed up in daemon.log, invisible to anyone just running `braid logs --follow`.
+	 */
+	function emitDiagnostic(config: ProcessConfig, message: string): void {
+		process.stderr.write(`[braid] "${config.name}": ${message}\n`);
+		const prefixer = linePrefixer(
+			(line) =>
+				void safeEmit(emitter, "processOutput", {
+					type: "processOutput",
+					name: config.name,
+					stream: "stderr",
+					chunk: Buffer.from(line),
+				}),
+			config.name,
+			config.color,
+		);
+		prefixer.write(`braid: ${message}`);
+		prefixer.flush();
 	}
 
 	function spawnWorker(config: ProcessConfig): void {
@@ -393,7 +433,17 @@ export async function runManager(
 					type: "processRestart",
 					name: config.name,
 				});
-				onProcessRestarted(config.name);
+				// Don't run onRestart/dependsOn hooks yet - nodemon fires this the moment it decides
+				// to restart, before the old process is even dead, let alone the new one ready. Wait
+				// for the matching "started" message instead (see below).
+				awaitingFreshStart.add(config.name);
+				return;
+			}
+			if (message.type === "started") {
+				// Also fires at initial start, with no preceding "restart" - nothing to do then.
+				if (awaitingFreshStart.delete(config.name)) {
+					void handleFreshStart(config);
+				}
 				return;
 			}
 			if (message.type === "crash" && !shuttingDown) {
@@ -460,10 +510,11 @@ export async function runManager(
 
 			const hook = config.dependsOn?.run;
 			if (hook) {
-				const ok = await runHookWithRetries(config.name, hook);
+				const ok = await runHookWithRetries(config.name, config.color, hook);
 				if (!ok) {
-					process.stderr.write(
-						`[braid] "${config.name}": dependency hook "${hook.command}" kept failing; leaving it stopped\n`,
+					emitDiagnostic(
+						config,
+						`dependency hook "${hook.command}" kept failing; leaving it stopped`,
 					);
 					return;
 				}
@@ -485,6 +536,89 @@ export async function runManager(
 		for (const dependent of dependentsByTrigger.get(name) ?? []) {
 			void restartDependent(dependent);
 		}
+	}
+
+	/** Resolves once `pattern` matches `name`'s accumulated stdout/stderr, or `timeoutMs` elapses. */
+	function waitForReadyPattern(
+		name: string,
+		pattern: RegExp,
+		timeoutMs: number,
+	): Promise<boolean> {
+		return new Promise((resolve) => {
+			let buffer = "";
+			let settled = false;
+			const onOutput = (event: {
+				type: string;
+				name: string;
+				chunk: Buffer;
+			}) => {
+				if (event.type !== "processOutput" || event.name !== name) return;
+				buffer = (buffer + event.chunk.toString()).slice(
+					-READY_PATTERN_BUFFER_BYTES,
+				);
+				if (pattern.test(buffer)) settle(true);
+			};
+			const settle = (ready: boolean) => {
+				if (settled) return;
+				settled = true;
+				emitter.off("processOutput", onOutput);
+				clearTimeout(timer);
+				resolve(ready);
+			};
+			emitter.on("processOutput", onOutput);
+			const timer = setTimeout(() => settle(false), timeoutMs);
+		});
+	}
+
+	/**
+	 * Runs once `config`'s process has actually (re)spawned after a restart (not merely once
+	 * nodemon decided to restart it - see the "started" branch above): waits for `readyPattern` (if
+	 * set), then runs its own `onRestart` hook (if set), then notifies dependents. Skipped if the
+	 * hook keeps failing, since a dependent's own hook would otherwise run against whatever the
+	 * failed hook was supposed to freshen up. A `readyPattern` that never matches is logged and
+	 * treated as "proceed anyway" - it's a best-effort signal, not a hard gate.
+	 */
+	async function handleFreshStart(config: ProcessConfig): Promise<void> {
+		if (shuttingDown) return;
+		if (config.readyPattern) {
+			const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+			const ready = await waitForReadyPattern(
+				config.name,
+				new RegExp(config.readyPattern),
+				timeoutMs,
+			);
+			if (!ready) {
+				emitDiagnostic(
+					config,
+					`readyPattern never matched within ${timeoutMs}ms; proceeding anyway`,
+				);
+			}
+			if (shuttingDown) return;
+		}
+
+		const hook = config.onRestart;
+		if (!hook) {
+			onProcessRestarted(config.name);
+			return;
+		}
+		// Shares `restarting` with restartDependent's dependent-keyed guard: both mean "don't
+		// start another restart cycle for this same process name while one's already in flight."
+		if (restarting.has(config.name)) return;
+		restarting.add(config.name);
+		try {
+			const ok = await runHookWithRetries(config.name, config.color, hook);
+			if (!ok) {
+				emitDiagnostic(
+					config,
+					`onRestart hook "${hook.command}" kept failing; not notifying dependents`,
+				);
+				return;
+			}
+		} finally {
+			restarting.delete(config.name);
+			shutdownIfEveryWorkerIsDone();
+		}
+		onProcessRestarted(config.name);
 	}
 
 	for (const config of configs) {

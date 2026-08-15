@@ -24,6 +24,8 @@ declare module "nodemon" {
 		): NodemonInstance;
 		on(event: "crash", listener: () => void): NodemonInstance;
 		on(event: "restart", listener: () => void): NodemonInstance;
+		/** Fires once the exec'd/scripted process has (re)spawned - at initial start too, not just restarts. */
+		on(event: "start", listener: () => void): NodemonInstance;
 		on(event: "quit", listener: () => void): NodemonInstance;
 	};
 

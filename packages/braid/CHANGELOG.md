@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.2.4] - 2026-08-15
+
+### Added
+
+- `onRestart` on a `ProcessConfig`: run a command after this process
+  itself restarts, e.g. rebuilding a shared workspace package other
+  processes just read from, with no process of its own to restart.
+  Same shape and retry behavior as `dependsOn.run`; if the process also
+  has dependents, they're notified only once this hook succeeds.
+- `readyPattern`/`readyTimeoutMs` on a `ProcessConfig`: hold off
+  `onRestart` and any dependents' `dependsOn` cascades until a regex
+  matches the process's own stdout/stderr after a restart (e.g. an
+  API's "Server listening" line), not just once nodemon has re-spawned
+  it. Proceeds anyway, with a logged reason, if it never matches within
+  `readyTimeoutMs` (default 10s).
+
+### Fixed
+
+- A `dependsOn`/`onRestart` hook's own output is now line-prefixed
+  (`[name] ...`) like every other process's output, instead of landing
+  in the log raw and unattributed.
+- `onRestart` and `dependsOn` cascades now wait for nodemon to actually
+  finish restarting (its `start` event) instead of firing the instant
+  nodemon decides to restart - previously a hook could run, and a
+  dependent restart, while the old process was still alive and the new
+  one hadn't started at all.
+- A hook that keeps failing, or a `readyPattern` that never matches, is
+  now logged into the relevant process's own log (visible via `braid
+  logs`/`--follow`), not just `.braid/daemon.log`.
+
 ## [0.2.3] - 2026-08-15
 
 ### Added

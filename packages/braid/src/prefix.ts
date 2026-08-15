@@ -22,8 +22,9 @@ export type LinePrefixer = {
 	flush(): void;
 };
 
+/** `sink` receives each already-prefixed, newline-terminated line - a real stream's `write`, or anything else. */
 export function linePrefixer(
-	target: NodeJS.WritableStream,
+	sink: (line: string) => void,
 	name: string,
 	color?: string,
 ): LinePrefixer {
@@ -36,12 +37,12 @@ export function linePrefixer(
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) {
-				target.write(`${prefix}${line}\n`);
+				sink(`${prefix}${line}\n`);
 			}
 		},
 		flush() {
 			if (buffer.length > 0) {
-				target.write(`${prefix}${buffer}\n`);
+				sink(`${prefix}${buffer}\n`);
 				buffer = "";
 			}
 		},
