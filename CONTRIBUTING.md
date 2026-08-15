@@ -46,6 +46,13 @@ CI runs the same four steps on every push and PR; a green CI run is required bef
 - Reference an issue in the PR description if one exists.
 - Small, focused PRs are easier to review than large ones bundling unrelated changes.
 
+## Releasing
+
+- Bump `version` in both `package.json` (the private monorepo root) and `packages/braid/package.json` together, to the same value - the root version isn't published, but keeping it in sync avoids the two drifting into meaningless numbers.
+- Add an entry to `packages/braid/CHANGELOG.md` (top, under `## [Unreleased]` if one's accumulated, otherwise a new `## [x.y.z] - YYYY-MM-DD` section) - this project is pre-1.0, so a backwards-incompatible change is fine in a minor bump, just call it out.
+- Sanity-check the package before publishing: `cd packages/braid && npm publish --dry-run` - review the tarball contents list (it should be `dist/`, `package.json`, `README.md`, `CHANGELOG.md`, `LICENSE` and nothing else) and confirm the version isn't already published.
+- `npm publish` (from `packages/braid`) runs `prepublishOnly` (a fresh build) automatically first.
+
 ## Reporting bugs / requesting features
 
 Use the issue templates under `.github/ISSUE_TEMPLATE/`. For security issues, see `SECURITY.md` instead of opening a public issue.

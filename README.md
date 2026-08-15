@@ -12,7 +12,7 @@ For install instructions, config format, and CLI usage of the actual npm package
 
 A pnpm workspace with two packages:
 
-- [`packages/braid`](packages/braid/README.md) — the library and CLI itself, published as `@aip-tech/braid`.
+- [`packages/braid`](packages/braid/README.md) — the library and CLI itself, published as `@aip-tech/braid` (see its [CHANGELOG.md](packages/braid/CHANGELOG.md)).
 - [`packages/example`](packages/example/README.md) — a live test bed: two toy processes (an HTTP server and a background worker) started via braid's actual `bin`, exactly the way an external consumer would use it.
 
 ## Setup

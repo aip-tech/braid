@@ -10,4 +10,4 @@ Include as much detail as you can: the version affected, a description of the is
 
 ## Supported versions
 
-braid is early-stage and pre-1.0 (not yet published to npm). Until a stable release, only the latest commit on `main` is supported.
+braid is early-stage and pre-1.0. Until a stable release, only the latest version published to npm is supported.

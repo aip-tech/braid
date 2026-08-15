@@ -12,6 +12,8 @@ Built as a replacement for ad hoc `concurrently`/shell-script setups in monorepo
 npm install @aip-tech/braid
 ```
 
+See [CHANGELOG.md](./CHANGELOG.md) for what's changed between versions.
+
 ## Config
 
 A config file default-exports either an array of `ProcessConfig`, or a `{ processes, plugins }` object (see [`src/types.ts`](./src/types.ts)) when you also want to load a plugin:
