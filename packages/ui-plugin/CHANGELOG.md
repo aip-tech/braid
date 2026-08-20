@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.2.2] - 2026-08-21
+
+### Fixed
+
+- Loading older history could leave the log pane visually blank until the
+  user scrolled. `refreshVirtualizer()` asked the virtualizer to apply its
+  "keep the same content in view" scroll adjustment before the pane had
+  been resized for the newly-prepended lines, so the browser clamped that
+  scroll to the still-old (shorter) scrollable range and the adjustment
+  was silently dropped - the pane stayed scrolled to what was now a gap
+  above the actual rows. The pane is now resized first. Also closed a
+  related latent bug where the virtualizer's key lookup read the live
+  `lines` array instead of a snapshot, which could corrupt its own
+  before/after comparison across a prepend.
+
 ## [0.2.1] - 2026-08-21
 
 ### Fixed

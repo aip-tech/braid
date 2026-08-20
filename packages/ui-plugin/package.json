@@ -1,6 +1,6 @@
 {
 	"name": "@aip-tech/braid-plugin-ui",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "A web dashboard for braid: live process status, stop/restart buttons, and per-process live log tailing with scroll-back history, served straight off braid's own control server.",
 	"license": "MIT",
 	"homepage": "https://aip-tech.github.io/braid",

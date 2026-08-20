@@ -316,12 +316,20 @@ function showLogStatus(message: string | undefined): void {
 // ---- Virtualizer ----
 
 function virtualizerOptions() {
+	// Captured once per call rather than read live off the `lines` binding: `setOptions` below
+	// compares this object against the *previous* one it was given to detect which keys moved, so
+	// that previous object's getItemKey must keep resolving against the array as it was at that
+	// call, not whatever `lines` has since become. That only holds if code which shifts existing
+	// indices (prependHistoryLines' prepend, trimLogLines' front-trim) replaces `lines` with a new
+	// array instead of mutating in place; a pure append (pushLiveLine) is fine either way since it
+	// never changes an existing line's index.
+	const snapshot = lines;
 	return {
-		count: lines.length,
+		count: snapshot.length,
 		getScrollElement: () => detailLog,
 		estimateSize: () => ROW_ESTIMATE_PX,
 		overscan: OVERSCAN_ROWS,
-		getItemKey: (index: number) => lines[index]?.id ?? index,
+		getItemKey: (index: number) => snapshot[index]?.id ?? index,
 		observeElementRect,
 		observeElementOffset,
 		scrollToFn: elementScroll,
@@ -361,22 +369,32 @@ function renderVisibleRows(): void {
 /** Call after mutating `lines` - setOptions() alone updates state but doesn't re-render. */
 function refreshVirtualizer(): void {
 	virtualizer.setOptions(virtualizerOptions());
+	// Grow (or shrink) the scrollable area to match the new item count *before* _willUpdate() runs:
+	// prepending history moves anchorTo:"end"'s preserved-position scroll offset forward via a
+	// scrollTo() call inside _willUpdate(), but the browser clamps that to the pane's *current*
+	// scrollable range - if the pane is still sized for the old, shorter content when that runs, the
+	// clamp silently discards the adjustment and leaves the pane scrolled to what's now a mid-air gap
+	// above the actual rendered rows (visually blank until the user's own scroll nudges it back in
+	// sync). Sizing first gives scrollTo() room to land where the virtualizer intends.
+	detailLogInner.style.height = `${virtualizer.getTotalSize()}px`;
 	virtualizer._willUpdate();
 	renderVisibleRows();
 }
 
 function trimLogLines(): void {
+	// Slices to a new array rather than splicing in place - see virtualizerOptions' snapshot
+	// comment for why `lines` must never be mutated in place.
 	// Cheap to be strict while anchored at the bottom (the common case while live-tailing).
 	if (virtualizer.isAtEnd(AT_END_THRESHOLD_PX)) {
 		if (lines.length > SOFT_MAX_LOG_LINES) {
-			lines.splice(0, lines.length - SOFT_MAX_LOG_LINES);
+			lines = lines.slice(lines.length - SOFT_MAX_LOG_LINES);
 		}
 		return;
 	}
 	// Otherwise the user is browsing history - only step in at the hard ceiling, and even then
 	// trim from the loaded-history end rather than deleting what's likely still on screen.
 	if (lines.length > HARD_MAX_LOG_LINES) {
-		lines.splice(0, lines.length - HARD_MAX_LOG_LINES);
+		lines = lines.slice(lines.length - HARD_MAX_LOG_LINES);
 	}
 }
 
@@ -390,7 +408,7 @@ function prependHistoryLines(rawLines: string[]): void {
 	// narrow, accepted cosmetic limitation rather than replaying ANSI state from the true start of
 	// the file on every page.
 	const renderer = new AnsiUp();
-	lines.unshift(...rawLines.map((text) => makeLogLine(text, renderer)));
+	lines = [...rawLines.map((text) => makeLogLine(text, renderer)), ...lines];
 	refreshVirtualizer();
 }
 
@@ -480,6 +498,9 @@ detailLoadOlderButton.addEventListener("click", () => {
 // ---- Live tail ----
 
 function pushLiveLine(text: string): void {
+	// In-place push is safe here (unlike the front-affecting mutations in prependHistoryLines and
+	// trimLogLines - see virtualizerOptions' snapshot comment): appending never changes the index of
+	// an existing line, so the previous snapshot's indices stay valid even after this mutates it.
 	lines.push(makeLogLine(text, liveAnsiUp));
 	trimLogLines();
 	refreshVirtualizer();
