@@ -813,7 +813,10 @@ describe("runManager readyPattern", () => {
 
 		const triggeredAt = Date.now();
 		await triggerWatchedRestart(watchFile);
-		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
+		// A deliberately longer cap than this file's other watch/restart tests: this one stacks an
+		// extra fixed readyDelayMs (1500ms) on top of the usual settle/spawn overhead, leaving it
+		// with less slack on a loaded CI runner even at the same outer test timeout.
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 20000 });
 
 		// Some slack for scheduling jitter, but this proves the hook waited for readiness rather
 		// than firing the moment nodemon merely decided to restart "api".
@@ -821,7 +824,7 @@ describe("runManager readyPattern", () => {
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
-	}, 20000);
+	}, 30000);
 
 	it("logs and proceeds anyway once readyTimeoutMs elapses without a match", async () => {
 		const writeSpy = vi
