@@ -47,9 +47,9 @@
 						<code>/api/processes/restart</code> routes behind
 						<code>braid stop &lt;name&gt;</code>/<code>restart &lt;name&gt;</code>) aren't
 						configurable and aren't listed in <code>plugins</code>.
-						<code>@aip-tech/braid-plugin-ui</code> is the first real
-						external plugin built against this API &mdash; a web dashboard with live
-						status and stop/restart buttons.
+						<a href="/braid/docs/ui-plugin.html"><code>@aip-tech/braid-plugin-ui</code></a>
+						is the first real external plugin built against this API &mdash; a web
+						dashboard with live status and stop/restart buttons.
 					</p>
 				</section>
 
@@ -159,9 +159,9 @@ export default helloPlugin;</code></pre>
 						Putting this together, a plugin serving a browser-facing page typically
 						calls <code>registerStatic</code> during <code>register()</code>, then waits
 						for <code>controlServerReady</code> to log an open-this-URL line with the
-						token attached &mdash; see
-						<code>@aip-tech/braid-plugin-ui</code>'s own <code>src/index.ts</code> for a
-						working example.
+						token attached &mdash; see the
+						<a href="https://github.com/aip-tech/braid/blob/main/packages/ui-plugin/src/index.ts"><code>@aip-tech/braid-plugin-ui</code></a>
+						source for a working example.
 					</p>
 				</section>
 			</main>

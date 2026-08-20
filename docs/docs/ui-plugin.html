@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Web UI &middot; braid</title>
+		<meta
+			name="description"
+			content="@aip-tech/braid-plugin-ui: a web dashboard for braid, with live process status and stop/restart buttons."
+		/>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="ui-plugin">
+		<div id="topnav"></div>
+
+		<div class="docs-shell">
+			<aside id="sidebar"></aside>
+
+			<main class="docs-main">
+				<h1>Web UI</h1>
+				<p class="lede">
+					<code>@aip-tech/braid-plugin-ui</code> is a small web dashboard for
+					braid &mdash; live process status, and Stop/Restart buttons &mdash;
+					served straight off the control server every <code>start</code>
+					already runs. It's a separate, optional package: nothing about it
+					is required to use braid, and it's the first real plugin built
+					against the <a href="/braid/docs/plugins.html">plugin API</a>.
+				</p>
+
+				<ul class="jump-to">
+					<li><a href="#install">Install</a></li>
+					<li><a href="#opening-it">Opening it</a></li>
+					<li><a href="#options">Options</a></li>
+					<li><a href="#what-it-shows">What it shows</a></li>
+					<li><a href="#compatibility">Compatibility</a></li>
+				</ul>
+
+				<section id="install">
+					<h2>Install</h2>
+					<pre><code class="language-bash">npm install --save-dev @aip-tech/braid-plugin-ui</code></pre>
+					<p>List it in your config's <code>plugins</code> array:</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [ /* ... */ ],
+	plugins: ["@aip-tech/braid-plugin-ui"],
+});</code></pre>
+				</section>
+
+				<section id="opening-it">
+					<h2>Opening it</h2>
+					<p>
+						Once the daemon is up, it logs a line with a URL to open &mdash;
+						check <code>.braid/daemon.log</code> if daemonized, or your
+						terminal if run with <code>--foreground</code>:
+					</p>
+					<pre><code class="nohighlight">[plugin:ui] dashboard ready - open http://127.0.0.1:54213/?token=... in your browser</code></pre>
+					<p>
+						Open that URL once. The control server's usual bearer-token check
+						can't work for a plain browser navigation (there's no way to send
+						a custom header), so this URL authenticates with a one-time
+						<code>?token=</code> instead: the first request sets a session
+						cookie and redirects to the plain <code>http://127.0.0.1:&lt;port&gt;/</code>,
+						so the token doesn't linger in your address bar or history. Every
+						page load and button click after that authenticates via the
+						cookie automatically.
+					</p>
+					<p>
+						The token (and the cookie) are per-run &mdash; if the daemon
+						restarts, check the log again for a fresh URL.
+					</p>
+				</section>
+
+				<section id="options">
+					<h2>Options</h2>
+					<pre><code class="language-typescript">plugins: [["@aip-tech/braid-plugin-ui", { path: "/dashboard/" }]],</code></pre>
+					<ul>
+						<li><code>path</code> &mdash; URL prefix the dashboard is served under. Default <code>"/"</code>.</li>
+					</ul>
+				</section>
+
+				<section id="what-it-shows">
+					<h2>What it shows</h2>
+					<p>
+						Every configured process's name, pid, running/stopped status, and
+						start time, polling every 2 seconds &mdash; the same data
+						<code>braid status</code> prints. Stop and Restart buttons per
+						process, backed by the same
+						<code>braid stop &lt;name&gt;</code>/<code>restart &lt;name&gt;</code>
+						routes the CLI itself uses. A top bar shows the host project's
+						installed <code>@aip-tech/braid</code> version.
+					</p>
+					<p>
+						No live log tailing yet &mdash; use <code>braid logs --follow</code>
+						for that in the meantime.
+					</p>
+				</section>
+
+				<section id="compatibility">
+					<h2>Compatibility</h2>
+					<p>
+						Requires <code>@aip-tech/braid</code> <code>&gt;=0.3.0</code> (the
+						version that added per-process stop/restart and the
+						browser-loadable static-plugin auth mechanism this plugin
+						depends on) &mdash; declared as a <code>peerDependency</code>, so
+						your package manager will flag an older one.
+					</p>
+					<p>
+						Source lives at
+						<a href="https://github.com/aip-tech/braid/tree/main/packages/ui-plugin">packages/ui-plugin</a>
+						in the main braid repo.
+					</p>
+				</section>
+			</main>
+		</div>
+
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

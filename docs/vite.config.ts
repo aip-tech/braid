@@ -15,6 +15,7 @@ export default defineConfig({
 				config: resolve(__dirname, "docs/config.html"),
 				cli: resolve(__dirname, "docs/cli.html"),
 				plugins: resolve(__dirname, "docs/plugins.html"),
+				uiPlugin: resolve(__dirname, "docs/ui-plugin.html"),
 			},
 		},
 	},

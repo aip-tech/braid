@@ -1,6 +1,12 @@
 import { icon } from "./icons.js";
 
-type PageId = "home" | "getting-started" | "config" | "cli" | "plugins";
+type PageId =
+	| "home"
+	| "getting-started"
+	| "config"
+	| "cli"
+	| "plugins"
+	| "ui-plugin";
 
 const BASE = import.meta.env.BASE_URL;
 const CHANGELOG_URL =
@@ -32,6 +38,12 @@ const DOCS_PAGES: Array<{
 		label: "Plugins",
 		href: `${BASE}docs/plugins.html`,
 		icon: "plug",
+	},
+	{
+		id: "ui-plugin",
+		label: "Web UI",
+		href: `${BASE}docs/ui-plugin.html`,
+		icon: "monitor",
 	},
 ];
 
