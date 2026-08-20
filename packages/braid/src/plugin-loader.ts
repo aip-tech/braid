@@ -1,8 +1,8 @@
 import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve as resolveEsm } from "import-meta-resolve";
-import { braidTag } from "./prefix.js";
 import { registerPlugin } from "./plugin-runtime.js";
+import { braidTag } from "./prefix.js";
 import type { BraidPlugin, PluginConfigEntry, PluginContext } from "./types.js";
 
 function splitEntry(entry: PluginConfigEntry): {

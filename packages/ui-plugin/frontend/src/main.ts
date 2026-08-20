@@ -7,9 +7,13 @@ type ProcessStatus = {
 
 const POLL_INTERVAL_MS = 2000;
 
-const tbody = document.querySelector("#processes tbody") as HTMLTableSectionElement;
+const tbody = document.querySelector(
+	"#processes tbody",
+) as HTMLTableSectionElement;
 const errorBanner = document.querySelector("#error") as HTMLParagraphElement;
-const versionLabel = document.querySelector("#braid-version") as HTMLSpanElement;
+const versionLabel = document.querySelector(
+	"#braid-version",
+) as HTMLSpanElement;
 
 // Fetched once - the running daemon's own braid version can't change without a restart.
 async function loadBraidVersion(): Promise<void> {
@@ -49,7 +53,10 @@ function formatStarted(iso: string): string {
 	return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
-function renderRow(process: ProcessStatus, rowError: string | undefined): HTMLTableRowElement {
+function renderRow(
+	process: ProcessStatus,
+	rowError: string | undefined,
+): HTMLTableRowElement {
 	const row = document.createElement("tr");
 	const busy = pending.has(process.name);
 
@@ -76,12 +83,18 @@ function renderRow(process: ProcessStatus, rowError: string | undefined): HTMLTa
 	const stopButton = document.createElement("button");
 	stopButton.textContent = busy ? "..." : "Stop";
 	stopButton.disabled = busy || !process.alive;
-	stopButton.addEventListener("click", () => void runAction("stop", process.name));
+	stopButton.addEventListener(
+		"click",
+		() => void runAction("stop", process.name),
+	);
 
 	const restartButton = document.createElement("button");
 	restartButton.textContent = busy ? "..." : "Restart";
 	restartButton.disabled = busy;
-	restartButton.addEventListener("click", () => void runAction("restart", process.name));
+	restartButton.addEventListener(
+		"click",
+		() => void runAction("restart", process.name),
+	);
 
 	actionsCell.append(stopButton, restartButton);
 	row.append(nameCell, pidCell, statusCell, startedCell, actionsCell);
@@ -99,7 +112,9 @@ async function refresh(): Promise<void> {
 		return;
 	}
 	if (res.status === 401) {
-		showBanner("Session expired (the daemon may have restarted) - reload this page.");
+		showBanner(
+			"Session expired (the daemon may have restarted) - reload this page.",
+		);
 		return;
 	}
 	if (!res.ok) {
@@ -118,7 +133,10 @@ async function refresh(): Promise<void> {
 	);
 }
 
-async function runAction(action: "stop" | "restart", name: string): Promise<void> {
+async function runAction(
+	action: "stop" | "restart",
+	name: string,
+): Promise<void> {
 	pending.add(name);
 	rowErrors.delete(name);
 	await refresh();
