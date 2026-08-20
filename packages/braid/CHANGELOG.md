@@ -5,6 +5,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.2.9] - 2026-08-20
+
+### Changed
+
+- README example paths cleaned up (no functional change).
+
 ## [0.2.8] - 2026-08-20
 
 ### Fixed
