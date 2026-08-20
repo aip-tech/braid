@@ -26,6 +26,7 @@
 					<li><a href="#watch">Watching and restarting</a></li>
 					<li><a href="#dependent-restarts">Dependent restarts</a></li>
 					<li><a href="#post-restart-hooks">Post-restart hooks</a></li>
+					<li><a href="#pre-restart-hooks">Pre-restart hooks</a></li>
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
@@ -59,9 +60,9 @@ export default defineConfig({
 				<section id="watch">
 					<h2>Watching and restarting</h2>
 					<p>
-						Set <code>watch</code> to run a process under <a href="https://github.com/remy/nodemon">nodemon</a>,
-						restarting it whenever a matched path changes. Omit it for a command that manages its own reload
-						(a dev server with its own HMR, for instance).
+						Set <code>watch</code> to restart a process whenever a matched path changes.
+						Omit it for a command that manages its own reload (a dev server with its own
+						HMR, for instance).
 					</p>
 					<pre><code class="language-typescript">{
 	name: "api",
@@ -90,8 +91,8 @@ export default defineConfig({
 },</code></pre>
 					<p>
 						When <code>api</code> restarts: <code>client</code> stops once
-						<code>api</code> has actually re-spawned (not the instant nodemon decides
-						to restart it), <code>run</code> executes (retried on failure &mdash;
+						<code>api</code> has actually re-spawned (not the instant it decides
+						to restart), <code>run</code> executes (retried on failure &mdash;
 						<code>retries</code>/<code>retryDelayMs</code>, default 5&times; / 1s
 						apart, since <code>api</code> may still be starting back up), then
 						<code>client</code> restarts. Left stopped with a logged reason if
@@ -122,6 +123,33 @@ export default defineConfig({
 						or restarted. If <code>api</code> also has dependents (via
 						<code>dependsOn</code>), they're notified only once this hook succeeds, and
 						not at all if it never does.
+					</p>
+				</section>
+
+				<section id="pre-restart-hooks">
+					<h2>Pre-restart hooks</h2>
+					<p>
+						For a process that needs to regenerate its own on-disk dependencies (e.g. a
+						GraphQL SDK generated from a schema it also watches) before it restarts on
+						that same change, <code>beforeRestart</code> runs after the process is
+						stopped and before a fresh one starts:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "client",
+	command: "pnpm",
+	args: ["vike", "dev"],
+	watch: ["server", "lib/sdk"],
+	beforeRestart: { command: "pnpm", args: ["--filter", "lib/sdk", "run", "generate"] },
+},</code></pre>
+					<p>
+						<code>client</code> is fully stopped, <code>generate</code> runs to
+						completion (retried like <code>onRestart</code>/<code>dependsOn.run</code>),
+						and only then does <code>client</code> restart &mdash; the fresh process
+						never boots against stale or half-regenerated code. Requires
+						<code>watch</code>; rejected at startup otherwise. If the hook keeps failing
+						past its retries, <code>client</code> is left stopped, but the watcher stays
+						active &mdash; the next matching file change retries the whole cycle, rather
+						than requiring a manual restart.
 					</p>
 				</section>
 
@@ -158,7 +186,7 @@ export default defineConfig({
 					<h2>Logs</h2>
 					<p>
 						Each process gets a rotated log file at <code>.braid/logs/&lt;name&gt;.log</code>.
-						Rotated (one backup kept) on every <code>start</code>, on a nodemon-triggered
+						Rotated (one backup kept) on every <code>start</code>, on a watch-triggered
 						restart, and past <code>logs.maxSizeBytes</code> (default 5MB, set at the
 						top level of the config, not per-process):
 					</p>
@@ -171,7 +199,8 @@ export default defineConfig({
 });</code></pre>
 					<p>
 						Braid's own diagnostics (plugin failures, crash notices) go to
-						<code>.braid/daemon.log</code>; a <code>dependsOn</code>/<code>onRestart</code>
+						<code>.braid/daemon.log</code>; a
+						<code>dependsOn</code>/<code>onRestart</code>/<code>beforeRestart</code>
 						hook that keeps failing, or a <code>readyPattern</code> that never matches,
 						is also logged into the relevant process's own log &mdash; visible via
 						<code>braid logs</code>/<code>--follow</code>, not just <code>daemon.log</code>.

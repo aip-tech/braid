@@ -1,6 +1,6 @@
 # braid
 
-Runs multiple long-lived processes as one unit, as a background daemon: PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs. Published on npm as `@aip-tech/braid`.
+Runs multiple long-lived processes as one unit, as a background daemon: PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs. Published on npm as `@aip-tech/braid`.
 
 See [packages/braid/README.md](packages/braid/README.md) for install, config, and CLI usage of the package itself. This README covers the monorepo.
 

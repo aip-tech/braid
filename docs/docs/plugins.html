@@ -105,7 +105,7 @@ export default helloPlugin;</code></pre>
 							<tr><td><code>processStart</code></td><td><code>{ name, pid }</code></td><td>A process is first forked.</td></tr>
 							<tr><td><code>processExit</code></td><td><code>{ name, code, signal }</code></td><td>A process's underlying child exits.</td></tr>
 							<tr><td><code>processCrash</code></td><td><code>{ name, code }</code></td><td>A process crashes (or fails to start) &mdash; the whole stack is about to shut down.</td></tr>
-							<tr><td><code>processRestart</code></td><td><code>{ name }</code></td><td>A nodemon-wrapped process restarted internally, not exited.</td></tr>
+							<tr><td><code>processRestart</code></td><td><code>{ name }</code></td><td>A watched process restarted internally, not exited.</td></tr>
 							<tr><td><code>processOutput</code></td><td><code>{ name, stream, chunk }</code></td><td>Raw stdout/stderr bytes from a process, already line-prefixed.</td></tr>
 							<tr><td><code>daemonShutdown</code></td><td>&mdash;</td><td>The daemon is shutting down &mdash; the last chance to clean up (e.g. end open connections) before the control server closes.</td></tr>
 						</tbody>

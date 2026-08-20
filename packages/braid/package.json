@@ -1,7 +1,7 @@
 {
 	"name": "@aip-tech/braid",
-	"version": "0.2.5",
-	"description": "Runs multiple long-lived processes as one unit, as a background daemon or attached to your terminal — PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.",
+	"version": "0.2.6",
+	"description": "Runs multiple long-lived processes as one unit, as a background daemon or attached to your terminal — PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs.",
 	"license": "MIT",
 	"homepage": "https://aip-tech.github.io/braid",
 	"type": "module",
@@ -25,7 +25,7 @@
 	"keywords": [
 		"process-manager",
 		"process-supervisor",
-		"nodemon",
+		"file-watcher",
 		"monorepo",
 		"dev-tools",
 		"cli"
@@ -44,8 +44,8 @@
 		"prepublishOnly": "pnpm run build"
 	},
 	"dependencies": {
+		"chokidar": "^3.6.0",
 		"import-meta-resolve": "^4.1.0",
-		"nodemon": "^3.1.14",
 		"sonic-boom": "^5.0.0",
 		"tree-kill": "^1.2.2"
 	}

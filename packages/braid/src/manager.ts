@@ -68,7 +68,7 @@ function readPidfile(pidfilePath: string): Pidfile | undefined {
 	}
 }
 
-/** Distinguishes braid's own worker->manager IPC protocol from nodemon's auto-forwarded events. */
+/** Guards against any stray IPC message that isn't braid's own worker->manager protocol. */
 function isWorkerStatusMessage(
 	message: unknown,
 ): message is WorkerStatusMessage {
@@ -192,6 +192,13 @@ export async function runManager(
 		);
 	}
 	validateDependsOn(configs);
+	for (const config of configs) {
+		if (config.beforeRestart && !(config.watch && config.watch.length > 0)) {
+			throw new Error(
+				`braid: process "${config.name}" sets "beforeRestart" but no "watch" paths - nothing would ever trigger it`,
+			);
+		}
+	}
 	const baseCwd = options.cwd ?? process.cwd();
 
 	mkdirSync(dirname(pidfilePath), { recursive: true });
@@ -432,17 +439,15 @@ export async function runManager(
 		});
 
 		child.on("message", (message: unknown) => {
-			// nodemon auto-forwards its own internal bus events (restart, crash, log, ...) over this
-			// same IPC channel whenever it detects it's forked - ignore anything not tagged as ours.
 			if (!isWorkerStatusMessage(message)) return;
 			if (message.type === "restart") {
 				void safeEmit(emitter, "processRestart", {
 					type: "processRestart",
 					name: config.name,
 				});
-				// Don't run onRestart/dependsOn hooks yet - nodemon fires this the moment it decides
-				// to restart, before the old process is even dead, let alone the new one ready. Wait
-				// for the matching "started" message instead (see below).
+				// Don't run onRestart/dependsOn hooks yet - the worker sends this the moment it
+				// decides to restart, before the old process is even dead, let alone the new one
+				// ready. Wait for the matching "started" message instead (see below).
 				awaitingFreshStart.add(config.name);
 				return;
 			}
@@ -578,8 +583,8 @@ export async function runManager(
 	}
 
 	/**
-	 * Runs once `config`'s process has actually (re)spawned after a restart (not merely once
-	 * nodemon decided to restart it - see the "started" branch above): waits for `readyPattern` (if
+	 * Runs once `config`'s process has actually (re)spawned after a restart (not merely once the
+	 * worker decided to restart it - see the "started" branch above): waits for `readyPattern` (if
 	 * set), then runs its own `onRestart` hook (if set), then notifies dependents. Skipped if the
 	 * hook keeps failing, since a dependent's own hook would otherwise run against whatever the
 	 * failed hook was supposed to freshen up. A `readyPattern` that never matches is logged and

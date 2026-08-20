@@ -1,6 +1,6 @@
 # braid
 
-Runs multiple long-lived processes as one unit, as a background daemon by default (or attached to your terminal with `--foreground`): PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.
+Runs multiple long-lived processes as one unit, as a background daemon by default (or attached to your terminal with `--foreground`): PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs.
 
 Published on npm as `@aip-tech/braid`. See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
@@ -25,9 +25,10 @@ export default defineConfig({
 });
 ```
 
-- `watch`: restart this process via nodemon when these paths change. Omit it for a command that manages its own reload.
+- `watch`: restart this process when these paths change. Omit it for a command that manages its own reload.
 - `dependsOn`: `{ processes, run? }` — restart this process whenever any of `processes` restarts, optionally running a command first (e.g. codegen) and waiting for it to finish. See [Dependent restarts](#dependent-restarts).
 - `onRestart`: run a command after this process itself restarts, e.g. rebuilding a shared workspace package. See [Post-restart hooks](#post-restart-hooks).
+- `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes }` — see [Logs](#logs).
@@ -68,7 +69,7 @@ A process can restart whenever another one does — e.g. a client that needs to 
 },
 ```
 
-When `api` restarts: `client` stops once `api` has actually re-spawned (not the instant nodemon decides to restart it), `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since `api` may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
+When `api` restarts: `client` stops once `api` has actually re-spawned (not the instant it decides to restart), `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since `api` may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
 
 ## Post-restart hooks
 
@@ -85,6 +86,22 @@ For a shared workspace package other processes just read from (no process of its
 ```
 
 Same shape and retry behavior as `dependsOn.run`, but scoped to `api` restarting itself — no dependent process is stopped or restarted. If `api` also has dependents (via `dependsOn`), they're notified only once this hook succeeds, and not at all if it never does.
+
+## Pre-restart hooks
+
+For a process that needs to regenerate its own on-disk dependencies (e.g. a GraphQL SDK generated from a schema it also watches) before it restarts on that same change, `beforeRestart` runs after the process is stopped and before a fresh one starts:
+
+```ts
+{
+	name: "client",
+	command: "pnpm",
+	args: ["vike", "dev"],
+	watch: ["server", "lib/sdk"],
+	beforeRestart: { command: "pnpm", args: ["--filter", "lib/sdk", "run", "generate"] },
+},
+```
+
+`client` is fully stopped, `generate` runs to completion (retried like `onRestart`/`dependsOn.run`), and only then does `client` restart — the fresh process never boots against stale or half-regenerated code. Requires `watch`; rejected at startup otherwise. If the hook keeps failing past its retries, `client` is left stopped, but the watcher stays active — the next matching file change retries the whole cycle, rather than requiring a manual restart.
 
 ## Waiting for readiness
 
@@ -105,7 +122,7 @@ Without `readyPattern`, dependents are held off only until `api` has re-spawned 
 
 ## Logs
 
-Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a nodemon-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`; a `dependsOn`/`onRestart` hook that keeps failing, or a `readyPattern` that never matches, is also logged into the relevant process's own log.
+Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a watch-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`; a `dependsOn`/`onRestart`/`beforeRestart` hook that keeps failing, or a `readyPattern` that never matches, is also logged into the relevant process's own log.
 
 ## Plugins
 

@@ -8,7 +8,7 @@ export default defineConfig({
 	foreground: false,
 	processes: [
 		{
-			// Edit src/web.ts and save while `pnpm dev` is running to see it restart.
+			// Plain `watch`, no hooks. Edit src/web.ts and save to see it restart.
 			name: "web",
 			color: "blue",
 			command: "tsx",
@@ -22,6 +22,59 @@ export default defineConfig({
 			color: "yellow",
 			command: "tsx",
 			args: ["src/worker.ts"],
+		},
+		{
+			// `readyPattern` + `onRestart`. Edit src/api.ts and save: client (below) waits for the
+			// "api listening" line, not just a respawn, before its own dependsOn cascade runs; and
+			// note-restart.ts runs after every restart of api itself, regardless of any dependents.
+			name: "api",
+			color: "magenta",
+			command: "tsx",
+			args: ["src/api.ts"],
+			watch: ["src/api.ts"],
+			ext: "ts",
+			readyPattern: "api listening",
+			onRestart: { command: "tsx", args: ["src/note-restart.ts"] },
+		},
+		{
+			// `dependsOn` + `run`. Regenerates client-sdk.json from schema.json once api restarts
+			// (and is confirmed ready), then restarts to pick it up.
+			name: "client",
+			color: "cyan",
+			command: "tsx",
+			args: ["src/client.ts"],
+			dependsOn: {
+				processes: ["api"],
+				run: {
+					command: "tsx",
+					args: [
+						"src/generate.ts",
+						"src/schema.json",
+						"src/client-sdk.json",
+						"client",
+					],
+				},
+			},
+		},
+		{
+			// `beforeRestart` - the real scenario this hook exists for: a process that needs to
+			// regenerate its own on-disk dependency from the very files it watches, reliably,
+			// before it restarts. Edit src/schema.json's "greeting" and save to see it in action.
+			name: "codegen",
+			color: "green",
+			command: "tsx",
+			args: ["src/codegen.ts"],
+			watch: ["src/codegen.ts", "src/schema.json"],
+			ext: "ts,json",
+			beforeRestart: {
+				command: "tsx",
+				args: [
+					"src/generate.ts",
+					"src/schema.json",
+					"src/generated-sdk.json",
+					"codegen",
+				],
+			},
 		},
 	],
 });

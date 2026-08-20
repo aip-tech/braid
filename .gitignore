@@ -20,3 +20,8 @@ npm-debug.log*
 
 # braid's own pidfile, when run against this repo
 .braid/
+
+# generated at runtime by packages/example's beforeRestart/dependsOn.run demo hooks
+packages/example/src/generated-sdk.json
+packages/example/src/client-sdk.json
+packages/example/src/restart-log.txt

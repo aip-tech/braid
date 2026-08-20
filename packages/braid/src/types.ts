@@ -24,10 +24,10 @@ export type ProcessConfig = {
 	env?: Record<string, string>;
 	/** ANSI color name used for this process's log prefix (see COLOR_CODES in prefix.ts). */
 	color?: string;
-	/** Paths to watch for changes; when set, the process runs under nodemon and restarts on change. */
+	/** Paths to watch for changes; when set, braid restarts the process on a matching change. */
 	watch?: string[];
 	/**
-	 * File extensions nodemon watches, comma-separated. Only used when `watch` is set.
+	 * File extensions to watch, comma-separated. Only used when `watch` is set.
 	 * @default "ts,js,json"
 	 */
 	ext?: string;
@@ -37,7 +37,7 @@ export type ProcessConfig = {
 	 * and any dependents' `dependsOn` cascades are held off - e.g. an API's own
 	 * `"Server listening"` log line, so a client's codegen hook doesn't run against a server that's
 	 * merely been re-spawned but hasn't finished its own startup yet. Without this, both are held
-	 * off only until the new process has been (re)spawned (nodemon's own restart is otherwise
+	 * off only until the new process has been (re)spawned (a fresh spawn is otherwise
 	 * indistinguishable from "ready"), and a `run`/`onRestart` hook's own retry is the only thing
 	 * bridging the remaining gap.
 	 */
@@ -46,8 +46,8 @@ export type ProcessConfig = {
 	readyTimeoutMs?: number;
 	/**
 	 * Restart this process whenever any of these other configured processes restarts (a
-	 * nodemon-triggered `watch` restart, or one cascaded from its own `dependsOn`). Referencing
-	 * an unknown process name, or a chain that loops back on itself, is rejected at startup.
+	 * `watch`-triggered restart, or one cascaded from its own `dependsOn`). Referencing an
+	 * unknown process name, or a chain that loops back on itself, is rejected at startup.
 	 */
 	dependsOn?: {
 		/** Names of other processes in this same config; any of their restarts triggers this one. */
@@ -56,26 +56,28 @@ export type ProcessConfig = {
 		run?: RestartHook;
 	};
 	/**
-	 * Run a command after this process itself restarts (a nodemon-triggered `watch` restart) -
-	 * e.g. rebuilding a shared workspace package other processes read from without themselves
-	 * needing to restart. Dependents (via `dependsOn`) aren't notified of this restart until the
-	 * hook succeeds, and not at all if it never does.
+	 * Run a command after this process itself restarts (a `watch`-triggered restart) - e.g.
+	 * rebuilding a shared workspace package other processes read from without themselves needing
+	 * to restart. Dependents (via `dependsOn`) aren't notified of this restart until the hook
+	 * succeeds, and not at all if it never does.
 	 */
 	onRestart?: RestartHook;
+	/**
+	 * Run a command once this process's own watched files change, after the old process is
+	 * confirmed dead and before a fresh one starts - e.g. regenerating something the new process
+	 * needs on disk before it boots. Requires `watch`. Retried like `onRestart`/`dependsOn.run`;
+	 * if it keeps failing, the process is left stopped and the watcher stays active, so the next
+	 * matching file change retries the whole cycle rather than requiring a manual restart.
+	 */
+	beforeRestart?: RestartHook;
 };
 
-/**
- * `source` distinguishes braid's own worker->manager IPC protocol from nodemon's own: nodemon
- * monkey-patches its internal event bus to auto-forward every internal event (`restart`, `crash`,
- * `start`, `log`, ...) over the same `process.send` channel whenever it detects it's running
- * under `fork()` - some of those collide in shape with this protocol (e.g. nodemon's own
- * `{ type: "restart", data: [...] }`), so a message missing this marker must be ignored.
- */
+/** `source` tags braid's own worker->manager IPC protocol, distinct from any other message shape. */
 export type WorkerStatusMessage =
 	| { source: "braid-worker"; type: "crash"; code: number | null }
 	| { source: "braid-worker"; type: "restart" }
 	| {
-			/** The exec'd/scripted process has (re)spawned - fires at initial start too. */
+			/** The process has respawned after a watch-triggered restart - never fires at initial start. */
 			source: "braid-worker";
 			type: "started";
 	  };
@@ -124,7 +126,7 @@ export type PluginLifecycleEvent =
 	  }
 	| { type: "processCrash"; name: string; code: number | null }
 	| {
-			/** A nodemon-wrapped process restarted internally, not exited. */
+			/** A watched process restarted internally (its app child, not the worker itself), not exited. */
 			type: "processRestart";
 			name: string;
 	  }

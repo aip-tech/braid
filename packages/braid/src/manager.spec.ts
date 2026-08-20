@@ -1,5 +1,6 @@
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
@@ -55,23 +56,18 @@ function chattyConfig(name: string): ProcessConfig {
 	return { name, command: "node", args: [join(FIXTURES, "chatty.js")] };
 }
 
-/**
- * A keep-alive process restarted by nodemon whenever `watchFilePath` changes. Routed through
- * `sh -c` rather than `command: "node"` directly: nodemon's programmatic API silently no-ops
- * when its `exec` is exactly "node" with no separate `script` field (lib/nodemon.js's own usage
- * check), which would make every watch/restart in this suite a silent do-nothing.
- */
+/** A keep-alive process restarted whenever `watchFilePath` changes. */
 function watchedConfig(name: string, watchFilePath: string): ProcessConfig {
 	return {
 		name,
-		command: "sh",
-		args: ["-c", `node ${JSON.stringify(join(FIXTURES, "keep-alive.js"))}`],
+		command: "node",
+		args: [join(FIXTURES, "keep-alive.js")],
 		watch: [watchFilePath],
 		ext: "trigger",
 	};
 }
 
-/** A process restarted by nodemon that only prints "ready-marker <pid>" `delayMs` after each (re)start. */
+/** A process restarted on a watch trigger that only prints "ready-marker <pid>" `delayMs` after each (re)start. */
 function watchedSlowConfig(
 	name: string,
 	watchFilePath: string,
@@ -110,9 +106,9 @@ function pidfileWorker(
 }
 
 /**
- * Writes a fresh value to nodemon's watched file to trigger a real restart. nodemon's own file
- * watcher takes a moment to attach after start, so writing right away can go unnoticed - a short
- * settle delay first makes sure it's actually watching by the time this write happens.
+ * Writes a fresh value to a watched trigger file to cause a real restart. The watcher takes a
+ * moment to attach after start, so writing right away can go unnoticed - a short settle delay
+ * first makes sure it's actually watching by the time this write happens.
  */
 async function triggerWatchedRestart(watchFilePath: string): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 800));
@@ -220,17 +216,7 @@ describe("runManager watch", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it('restarts a plain `command: "node"` process via nodemon when its watched path changes', async () => {
-		// Regression test for two bugs at once:
-		// 1. nodemon's programmatic API silently no-ops (no restart, ever - and no error either)
-		//    when `exec` is exactly "node" with no separate `script` field, which is exactly what
-		//    `command: "node", args: [scriptPath]` produced before worker.ts special-cased this
-		//    shape to use `script` instead.
-		// 2. nodemon auto-forwards its own internal events (including its own lookalike "restart")
-		//    over the same IPC channel braid's worker->manager protocol uses, which - before that
-		//    protocol was tagged and manager.ts started ignoring untagged messages - fired a second,
-		//    spurious `processRestart` per real restart and clobbered the just-rotated log backup
-		//    with an empty file. The pid assertions below fail if either regresses.
+	it('restarts a plain `command: "node"` process and rotates its log when its watched path changes', async () => {
 		const watchFile = join(tmpDir, "watch.trigger");
 		writeFileSync(watchFile, "0");
 		const configs = [
@@ -254,7 +240,7 @@ describe("runManager watch", () => {
 
 		await triggerWatchedRestart(watchFile);
 
-		// The log is rotated on a nodemon-triggered restart (see the logger core plugin), so the
+		// The log is rotated on a watch-triggered restart (see the logger core plugin), so the
 		// original "started <pid>" line ends up in the rotated backup and a new one lands active.
 		await waitFor(
 			() =>
@@ -471,7 +457,7 @@ describe("runManager dependsOn", () => {
 		expect(existsSync(pidfilePath)).toBe(false);
 	});
 
-	it("stops a dependent, runs its hook, and restarts it once its dependency restarts via a nodemon watch", async () => {
+	it("stops a dependent, runs its hook, and restarts it once its dependency restarts via a watch trigger", async () => {
 		const watchFile = join(tmpDir, "watch.trigger");
 		writeFileSync(watchFile, "0");
 		const markerFile = join(tmpDir, "generated.log");
@@ -492,7 +478,7 @@ describe("runManager dependsOn", () => {
 		});
 		const clientBefore = pidfileWorker(pidfilePath, "client");
 
-		// A real nodemon-driven restart of "api", not a simulated one.
+		// A real watch-triggered restart of "api", not a simulated one.
 		await triggerWatchedRestart(watchFile);
 
 		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
@@ -684,7 +670,7 @@ describe("runManager onRestart", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("runs its own onRestart hook after a nodemon-triggered restart, with no dependents involved", async () => {
+	it("runs its own onRestart hook after a watch-triggered restart, with no dependents involved", async () => {
 		const watchFile = join(tmpDir, "watch.trigger");
 		writeFileSync(watchFile, "0");
 		const markerFile = join(tmpDir, "generated.log");
@@ -714,8 +700,8 @@ describe("runManager onRestart", () => {
 		await waitFor(() =>
 			readFileSync(apiLog, "utf8").includes("[api] generate-hook ran"),
 		);
-		// nodemon restarts the exec'd process in place - the outer forked worker (and its pidfile
-		// entry) never changes for this kind of restart.
+		// A watch-triggered restart only kills/respawns the worker's inner app process - the outer
+		// forked worker (and its pidfile entry) never changes for this kind of restart.
 		expect(pidfileWorker(pidfilePath, "api")?.pid).toBe(apiBefore?.pid);
 
 		await stopFromPidfile(pidfilePath);
@@ -819,7 +805,7 @@ describe("runManager readyPattern", () => {
 		await waitFor(() => existsSync(markerFile), { timeoutMs: 20000 });
 
 		// Some slack for scheduling jitter, but this proves the hook waited for readiness rather
-		// than firing the moment nodemon merely decided to restart "api".
+		// than firing the moment "api" merely decided to restart.
 		expect(Date.now() - triggeredAt).toBeGreaterThanOrEqual(readyDelayMs - 300);
 
 		await stopFromPidfile(pidfilePath);
@@ -877,6 +863,189 @@ describe("runManager readyPattern", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);
+});
+
+describe("runManager beforeRestart", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-before-restart-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("throws at startup when beforeRestart is set without watch", async () => {
+		const configs = [
+			{
+				name: "api",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+				beforeRestart: {
+					command: "node",
+					args: [join(FIXTURES, "generate-hook.js")],
+				},
+			},
+		];
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/sets "beforeRestart" but no "watch" paths/,
+		);
+	});
+
+	it("runs the hook only after the old process is confirmed dead, before a fresh one starts", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const oldPidFile = join(tmpDir, "old-pid");
+		const markerFile = join(tmpDir, "generated.log");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				beforeRestart: {
+					command: "node",
+					args: [
+						join(FIXTURES, "assert-pid-dead-then-mark.js"),
+						oldPidFile,
+						markerFile,
+					],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		const apiLog = join(tmpDir, "logs", "api.log");
+
+		await waitFor(
+			() =>
+				existsSync(apiLog) && readFileSync(apiLog, "utf8").includes("started"),
+		);
+		const oldPid = readFileSync(apiLog, "utf8").match(/started (\d+)/)?.[1];
+		expect(oldPid).toBeDefined();
+		writeFileSync(oldPidFile, oldPid as string);
+
+		await triggerWatchedRestart(watchFile);
+
+		// The hook fixture itself exits non-zero (and never writes the marker) if it observes the
+		// old pid still alive - so this only passes if the ordering is actually enforced, not just
+		// eventually true.
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 10000 });
+		await waitFor(() => {
+			const matches = [
+				...readFileSync(apiLog, "utf8").matchAll(/started (\d+)/g),
+			];
+			const newPid = matches.at(-1)?.[1];
+			return newPid !== undefined && newPid !== oldPid;
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("still runs onRestart after a beforeRestart-triggered respawn", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const beforeMarker = join(tmpDir, "before.log");
+		const afterMarker = join(tmpDir, "after.log");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				beforeRestart: {
+					command: "node",
+					args: [join(FIXTURES, "generate-hook.js"), beforeMarker],
+				},
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "generate-hook.js"), afterMarker],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() => existsSync(beforeMarker));
+		await waitFor(() => existsSync(afterMarker), { timeoutMs: 10000 });
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("leaves the process stopped on a failing hook, but retries on the next matching change", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const counterPath = join(tmpDir, "counter");
+		const markerPath = join(tmpDir, "generated.log");
+
+		const configs = [
+			{
+				...watchedConfig("api", watchFile),
+				beforeRestart: {
+					command: "node",
+					args: [join(FIXTURES, "flaky-hook.js"), counterPath, markerPath, "1"],
+					retries: 0,
+					retryDelayMs: 20,
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+
+		await triggerWatchedRestart(watchFile);
+
+		const apiLog = join(tmpDir, "logs", "api.log");
+		await waitFor(() =>
+			readFileSync(apiLog, "utf8").includes(
+				'[api] braid: beforeRestart hook "node" kept failing',
+			),
+		);
+		expect(existsSync(markerPath)).toBe(false);
+
+		// A subsequent matching change retries the whole cycle - flaky-hook.js succeeds this time.
+		writeFileSync(watchFile, String(Date.now() + 1));
+		await waitFor(() => existsSync(markerPath), { timeoutMs: 10000 });
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("ignores changes under a watched path's node_modules or .git", async () => {
+		const watchDir = join(tmpDir, "watched");
+		mkdirSync(join(watchDir, "node_modules"), { recursive: true });
+		mkdirSync(join(watchDir, ".git"), { recursive: true });
+
+		const configs = [
+			{
+				name: "api",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+				watch: [watchDir],
+				ext: "trigger",
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		const apiLog = join(tmpDir, "logs", "api.log");
+		await waitFor(
+			() =>
+				existsSync(apiLog) && readFileSync(apiLog, "utf8").includes("started"),
+		);
+
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		writeFileSync(join(watchDir, "node_modules", "dep.trigger"), "0");
+		writeFileSync(join(watchDir, ".git", "HEAD.trigger"), "0");
+
+		// No restart should happen - give it a real chance to (wrongly) fire before asserting.
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		expect((readFileSync(apiLog, "utf8").match(/started/g) ?? []).length).toBe(
+			1,
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
 });
 
 describe("pidfile helpers with no pidfile present", () => {

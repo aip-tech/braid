@@ -5,6 +5,33 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.2.6] - 2026-08-20
+
+### Added
+
+- `beforeRestart` on a `ProcessConfig`: runs a command after a process's
+  own watched files change and it's stopped, but before a fresh one
+  starts - e.g. regenerating a GraphQL SDK from a schema the same
+  process also watches, so the restarted process never boots against
+  stale or half-regenerated output. Requires `watch`; retried like
+  `onRestart`/`dependsOn.run`. If it keeps failing, the process is left
+  stopped but the watcher stays active - the next matching file change
+  retries the whole cycle.
+
+### Changed
+
+- Watch-triggered restarts no longer go through `nodemon` - braid now
+  watches and restarts the process itself. Behavior is preserved for
+  existing configs (same restart timing, log rotation, pid stability,
+  crash detection, and default ignore list for `node_modules`/`.git`/
+  etc.), but two internal details changed: the app is now killed with
+  SIGTERM instead of nodemon's default SIGUSR2, and `ext` matching is a
+  plain comma-separated extension check rather than nodemon's glob
+  matcher (matches braid's own docs, which only ever described `ext`
+  as a plain extension list). `nodemon` is no longer a dependency;
+  `chokidar` (already pulled in transitively before) is now a direct
+  one.
+
 ## [0.2.5] - 2026-08-20
 
 ### Added
