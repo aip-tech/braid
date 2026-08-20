@@ -1029,8 +1029,12 @@ describe("runManager readyPattern", () => {
 		await triggerWatchedRestart(watchFile);
 		// A deliberately longer cap than this file's other watch/restart tests: this one stacks an
 		// extra fixed readyDelayMs (1500ms) on top of the usual settle/spawn overhead, leaving it
-		// with less slack on a loaded CI runner even at the same outer test timeout.
-		await waitFor(() => existsSync(markerFile), { timeoutMs: 20000 });
+		// with less slack on a loaded CI runner even at the same outer test timeout. Bumped a
+		// second time (20000 -> 45000) after it still hit its previous 20s/30s cap on CI - this
+		// file now spawns a lot more child processes overall (the manual stop/restart tests added
+		// alongside it), so a shared runner has even less headroom than when that cap was last
+		// raised.
+		await waitFor(() => existsSync(markerFile), { timeoutMs: 45000 });
 
 		// Some slack for scheduling jitter, but this proves the hook waited for readiness rather
 		// than firing the moment "api" merely decided to restart.
@@ -1038,7 +1042,7 @@ describe("runManager readyPattern", () => {
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
-	}, 30000);
+	}, 60000);
 
 	it("logs and proceeds anyway once readyTimeoutMs elapses without a match", async () => {
 		const writeSpy = vi
