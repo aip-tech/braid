@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.2.1] - 2026-08-21
+
+### Fixed
+
+- "Load older" history is now a button, not automatic. 0.2.0 auto-fetched
+  more history whenever the log pane wasn't tall enough to scroll, so a
+  quiet process's short log wouldn't strand a scroll-driven trigger with
+  no scrollbar to drive it - but in real use that raced: each auto-fetch's
+  prepend nudges scrollTop via the virtualizer's own anchor-preservation,
+  which could refire the same automatic check before the browser settled
+  the previous adjustment, corrupting the pane's layout for a process
+  with real backlog, and surprising users with a dump of old history
+  right on first open. Automatic loading is removed entirely (the
+  scroll-driven trigger too, not just the on-open one) in favor of a
+  "Load older lines" button - exactly one fetch per click.
+- That button also never visually hid once history was exhausted in
+  0.2.0: its own `display: block` rule tied with the `[hidden]`
+  UA-stylesheet rule on specificity and won as an author style, even
+  though the underlying `hidden` property was toggling correctly the
+  whole time.
+
 ## [0.2.0] - 2026-08-20
 
 ### Added
@@ -13,14 +34,12 @@ minor version bump.
   toolbar plus that process's log output streaming live underneath,
   rendered with the same ANSI colors its terminal output has (via
   `ansi_up`).
-- A "Load older lines" button loads further back into the process's
+- Scroll up in that log view to load further back into the process's
   history, backed by `@aip-tech/braid`'s new paginated
   `GET /api/logs/history` route - **requires `@aip-tech/braid` >=0.4.0**,
-  bumped in `peerDependencies` accordingly. Deliberately a button, not
-  automatic-on-scroll or automatic-on-open: it never fetches more than
-  once per click. The log view is virtualized (`@tanstack/virtual-core`),
-  so a long-lived session or a deep scroll-back doesn't grow the page's
-  DOM without bound.
+  bumped in `peerDependencies` accordingly. The log view is virtualized
+  (`@tanstack/virtual-core`), so a long-lived session or a deep scroll-back
+  doesn't grow the page's DOM without bound.
 - Renders `@aip-tech/braid`'s new `logs.timestamps` config option (also
   requires >=0.4.0) the same as any other line content - no separate UI
   needed, it's just part of the line.
