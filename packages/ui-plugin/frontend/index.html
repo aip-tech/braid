@@ -18,18 +18,42 @@
 		</div>
 		<main>
 			<p id="error" class="error" hidden></p>
-			<table id="processes">
-				<thead>
-					<tr>
-						<th>Name</th>
-						<th>PID</th>
-						<th>Status</th>
-						<th>Started</th>
-						<th></th>
-					</tr>
-				</thead>
-				<tbody></tbody>
-			</table>
+			<div id="view-table">
+				<table id="processes">
+					<thead>
+						<tr>
+							<th>Name</th>
+							<th>PID</th>
+							<th>Status</th>
+							<th>Started</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody></tbody>
+				</table>
+			</div>
+			<div id="view-detail" hidden>
+				<p class="detail-back"><a href="#/">&larr; All processes</a></p>
+				<div class="detail-toolbar">
+					<div class="detail-heading">
+						<h1 id="detail-name">Process</h1>
+						<span id="detail-status" class="detail-status"></span>
+					</div>
+					<div class="detail-meta">
+						<span>PID <span id="detail-pid"></span></span>
+						<span>Started <span id="detail-started"></span></span>
+					</div>
+					<div class="detail-actions">
+						<button id="detail-stop" type="button">Stop</button>
+						<button id="detail-restart" type="button">Restart</button>
+					</div>
+				</div>
+				<p id="detail-error" class="row-error" hidden></p>
+				<p id="detail-log-status" class="error" hidden></p>
+				<div id="detail-log" class="log-pane">
+					<div id="detail-log-inner" class="log-pane-inner"></div>
+				</div>
+			</div>
 		</main>
 		<script type="module" src="./src/main.ts"></script>
 	</body>

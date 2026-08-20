@@ -1,7 +1,7 @@
 {
 	"name": "@aip-tech/braid-plugin-ui",
-	"version": "0.1.1",
-	"description": "A web dashboard for braid: live process status, and stop/restart buttons, served straight off braid's own control server.",
+	"version": "0.2.0",
+	"description": "A web dashboard for braid: live process status, stop/restart buttons, and per-process live log tailing with scroll-back history, served straight off braid's own control server.",
 	"license": "MIT",
 	"homepage": "https://aip-tech.github.io/braid",
 	"type": "module",
@@ -41,6 +41,10 @@
 		"vite": "^8.2.1"
 	},
 	"peerDependencies": {
-		"@aip-tech/braid": ">=0.3.0"
+		"@aip-tech/braid": ">=0.4.0"
+	},
+	"dependencies": {
+		"@tanstack/virtual-core": "^3.17.8",
+		"ansi_up": "^6.0.6"
 	}
 }

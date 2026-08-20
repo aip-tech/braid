@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.2.0] - 2026-08-20
+
+### Added
+
+- Click a process's name in the dashboard for its own page: a Stop/Restart
+  toolbar plus that process's log output streaming live underneath,
+  rendered with the same ANSI colors its terminal output has (via
+  `ansi_up`).
+- Scroll up in that log view to load further back into the process's
+  history, backed by `@aip-tech/braid`'s new paginated
+  `GET /api/logs/history` route - **requires `@aip-tech/braid` >=0.4.0**,
+  bumped in `peerDependencies` accordingly. The log view is virtualized
+  (`@tanstack/virtual-core`), so a long-lived session or a deep scroll-back
+  doesn't grow the page's DOM without bound.
+- Renders `@aip-tech/braid`'s new `logs.timestamps` config option (also
+  requires >=0.4.0) the same as any other line content - no separate UI
+  needed, it's just part of the line.
+
+### Changed
+
+- Dashboard layout widened (720px -> 1100px max width) to give the log
+  view more room; the process table's Stop/Restart buttons now
+  right-align within their column instead of sitting flush against the
+  Started column at the wider width.
+
 ## [0.1.1] - 2026-08-20
 
 ### Changed
