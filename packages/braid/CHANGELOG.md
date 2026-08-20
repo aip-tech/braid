@@ -5,18 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
-## [0.2.6] - 2026-08-20
+## [0.2.7] - 2026-08-20
 
 ### Added
 
-- `beforeRestart` on a `ProcessConfig`: runs a command after a process's
-  own watched files change and it's stopped, but before a fresh one
-  starts - e.g. regenerating a GraphQL SDK from a schema the same
-  process also watches, so the restarted process never boots against
-  stale or half-regenerated output. Requires `watch`; retried like
-  `onRestart`/`dependsOn.run`. If it keeps failing, the process is left
-  stopped but the watcher stays active - the next matching file change
-  retries the whole cycle.
 - A process now logs `braid: stopping` (or `braid: stopping (dependency
   restarted)`/`braid: stopping (restarting)`) into its own log right
   before braid stops it for a `dependsOn` cascade or a watch-triggered
@@ -37,6 +29,22 @@ version bump.
   listener failed" warning) if a still-running process's own output
   arrives in the brief window after `daemonShutdown` already closed its
   log stream.
+- A crash-triggered shutdown could misreport the very process that
+  crashed as having been stopped by braid, rather than having crashed -
+  its own exit hadn't been detected yet at the moment the check ran.
+
+## [0.2.6] - 2026-08-20
+
+### Added
+
+- `beforeRestart` on a `ProcessConfig`: runs a command after a process's
+  own watched files change and it's stopped, but before a fresh one
+  starts - e.g. regenerating a GraphQL SDK from a schema the same
+  process also watches, so the restarted process never boots against
+  stale or half-regenerated output. Requires `watch`; retried like
+  `onRestart`/`dependsOn.run`. If it keeps failing, the process is left
+  stopped but the watcher stays active - the next matching file change
+  retries the whole cycle.
 
 ### Changed
 
