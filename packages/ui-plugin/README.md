@@ -56,9 +56,10 @@ A top bar shows the host project's installed `@aip-tech/braid` version
 
 Click a process's name for its own page: the same Stop/Restart actions,
 plus that process's log output streaming live underneath, rendered with
-its real ANSI colors. It starts with the last 300 lines; scroll up to load
-further back into the process's retained history (bounded by
-`logs.maxSizeBytes` - the current file plus one rotation backup). The log
+its real ANSI colors. It starts with the last 300 lines; a "Load older
+lines" button loads further back into the process's retained history
+(bounded by `logs.maxSizeBytes` - the current file plus one rotation
+backup) - one page per click, nothing loads automatically. The log
 view is virtualized, so a long-lived session or a deep scroll-back doesn't
 grow the page's DOM without bound.
 

@@ -28,7 +28,9 @@ const RECONNECT_REPLAY_LINES = 50;
 // never reaches RECONNECT_REPLAY_LINES total output would otherwise never resolve at all.
 const REPLAY_RESOLVE_WINDOW_MS = 400;
 const LOG_RETRY_DELAY_MS = 2000;
-const LOAD_OLDER_THRESHOLD_PX = 200;
+// Used only by trimLogLines' isAtEnd() check, not for triggering a load - "load older" is purely
+// button-driven now (see updateLoadOlderButton for why).
+const AT_END_THRESHOLD_PX = 200;
 // Matches font-size 0.8rem * line-height 1.4 from style.css - only an estimate for unmeasured rows,
 // corrected per-row once actually rendered (see measureElement in refreshVirtualizer's onChange).
 const ROW_ESTIMATE_PX = 18;
@@ -68,6 +70,9 @@ const detailError = document.querySelector(
 const detailLogStatus = document.querySelector(
 	"#detail-log-status",
 ) as HTMLParagraphElement;
+const detailLoadOlderButton = document.querySelector(
+	"#detail-load-older",
+) as HTMLButtonElement;
 const detailLog = document.querySelector("#detail-log") as HTMLDivElement;
 const detailLogInner = document.querySelector(
 	"#detail-log-inner",
@@ -362,7 +367,7 @@ function refreshVirtualizer(): void {
 
 function trimLogLines(): void {
 	// Cheap to be strict while anchored at the bottom (the common case while live-tailing).
-	if (virtualizer.isAtEnd(LOAD_OLDER_THRESHOLD_PX)) {
+	if (virtualizer.isAtEnd(AT_END_THRESHOLD_PX)) {
 		if (lines.length > SOFT_MAX_LOG_LINES) {
 			lines.splice(0, lines.length - SOFT_MAX_LOG_LINES);
 		}
@@ -417,11 +422,7 @@ async function loadInitialHistory(stream: ActiveStream): Promise<void> {
 		if (activeStream === stream) stream.historyLoading = false;
 	}
 	if (activeStream === stream) void runLogStream(stream);
-	// A pane shorter than the viewport has no scrollbar at all, so the "scroll" listener that
-	// normally drives this can never fire even though older history exists - re-check here (and
-	// again at the end of loadOlderHistory) so a short log's full retained history still loads
-	// without the user needing to somehow scroll a pane that isn't scrollable yet.
-	maybeLoadOlder();
+	updateLoadOlderButton();
 }
 
 async function loadOlderHistory(stream: ActiveStream): Promise<void> {
@@ -441,22 +442,40 @@ async function loadOlderHistory(stream: ActiveStream): Promise<void> {
 			}
 		}
 	} catch {
-		// Transient - scrolling up again retries naturally, no special state needed.
+		// Transient - clicking "load older" again retries naturally, no special state needed.
 	} finally {
 		if (activeStream === stream) stream.historyLoading = false;
 	}
-	maybeLoadOlder();
+	updateLoadOlderButton();
 }
 
-function maybeLoadOlder(): void {
+// A pane shorter than the viewport has no scrollbar at all, so a scroll-driven "load older" trigger
+// could never fire for a quiet process even with lots more history available. An earlier version of
+// this auto-loaded in that case, but a fetch's own prepend nudges scrollTop via the virtualizer's
+// anchor-preservation, which can refire an automatic scroll-based check before the browser's
+// actually settled that adjustment - for a process whose retained history spans many pages, that
+// raced into a tight loop and visibly corrupted the pane's layout. An explicit button sidesteps
+// this entirely: exactly one fetch per click, no auto-retriggering, and no surprise history dump on
+// first open either.
+function updateLoadOlderButton(): void {
+	const stream = activeStream;
+	const hasMore = stream !== undefined && stream.historyCursor !== null;
+	detailLoadOlderButton.hidden = !hasMore;
+	if (!hasMore) return;
+	const loading = stream.historyLoading;
+	detailLoadOlderButton.disabled = loading;
+	detailLoadOlderButton.textContent = loading
+		? "Loading..."
+		: "Load older lines";
+}
+
+detailLoadOlderButton.addEventListener("click", () => {
 	const stream = activeStream;
 	if (!stream || stream.historyLoading || stream.historyCursor === null) return;
-	if (detailLog.scrollTop > LOAD_OLDER_THRESHOLD_PX) return;
 	stream.historyLoading = true;
+	updateLoadOlderButton();
 	void loadOlderHistory(stream);
-}
-
-detailLog.addEventListener("scroll", maybeLoadOlder);
+});
 
 // ---- Live tail ----
 

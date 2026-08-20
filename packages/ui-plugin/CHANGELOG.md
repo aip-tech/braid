@@ -13,12 +13,14 @@ minor version bump.
   toolbar plus that process's log output streaming live underneath,
   rendered with the same ANSI colors its terminal output has (via
   `ansi_up`).
-- Scroll up in that log view to load further back into the process's
+- A "Load older lines" button loads further back into the process's
   history, backed by `@aip-tech/braid`'s new paginated
   `GET /api/logs/history` route - **requires `@aip-tech/braid` >=0.4.0**,
-  bumped in `peerDependencies` accordingly. The log view is virtualized
-  (`@tanstack/virtual-core`), so a long-lived session or a deep scroll-back
-  doesn't grow the page's DOM without bound.
+  bumped in `peerDependencies` accordingly. Deliberately a button, not
+  automatic-on-scroll or automatic-on-open: it never fetches more than
+  once per click. The log view is virtualized (`@tanstack/virtual-core`),
+  so a long-lived session or a deep scroll-back doesn't grow the page's
+  DOM without bound.
 - Renders `@aip-tech/braid`'s new `logs.timestamps` config option (also
   requires >=0.4.0) the same as any other line content - no separate UI
   needed, it's just part of the line.

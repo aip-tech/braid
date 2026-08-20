@@ -99,12 +99,14 @@
 						keeps the connection open, reconnecting on its own if it drops.
 					</p>
 					<p>
-						Scroll up to load further back into that process's retained
-						history (the current log file plus one rotation backup, see
+						A "Load older lines" button loads further back into that
+						process's retained history (the current log file plus one
+						rotation backup, see
 						<a href="/braid/docs/config.html#logs">Logs</a>), via the
-						paginated <code>/api/logs/history</code> route. The log view is
-						virtualized, so a long-lived session or a deep scroll-back
-						doesn't grow the page's DOM without bound.
+						paginated <code>/api/logs/history</code> route - one page per
+						click, nothing loads automatically on open or on scroll. The log
+						view is virtualized, so a long-lived session or a deep
+						scroll-back doesn't grow the page's DOM without bound.
 					</p>
 				</section>
 

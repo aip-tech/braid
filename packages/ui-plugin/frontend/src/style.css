@@ -222,6 +222,16 @@ button:disabled {
 	text-decoration: underline;
 }
 
+/* No `display` here on purpose - `<button>`'s default `inline-block` already respects `width`, and
+ * setting `display` here would have the same specificity as the UA stylesheet's `[hidden] { display:
+ * none }` and (as an author style) win the tie, keeping a hidden button visible. */
+.load-older {
+	width: 100%;
+	margin-bottom: 0.5rem;
+	font-size: 0.8rem;
+	color: var(--muted);
+}
+
 .log-pane {
 	background: var(--bg);
 	border: 1px solid var(--border);
