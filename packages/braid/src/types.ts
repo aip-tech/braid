@@ -106,6 +106,11 @@ export type BraidConfig = {
 		/** Size-based rotation backstop, in bytes. @default 5242880 (5MB) */
 		maxSizeBytes?: number;
 	};
+	/**
+	 * Run `start` attached to the terminal instead of forking a background daemon. Overridable per
+	 * invocation with `--foreground`/`--daemon`. @default false
+	 */
+	foreground?: boolean;
 };
 
 /** Lifecycle events plugins can subscribe to via PluginContext.on(). */

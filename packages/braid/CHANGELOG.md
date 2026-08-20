@@ -5,6 +5,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.2.5] - 2026-08-20
+
+### Added
+
+- `foreground` config option (and `--foreground`/`--daemon` CLI flags,
+  which override it per invocation): runs `start` attached to the
+  terminal instead of forking a background daemon, blocking until every
+  process stops and streaming their combined output straight there.
+
+### Fixed
+
+- A `{ processes, logs }`-shaped config's `logs` settings (log
+  directory, rotation size) were silently dropped and never reached the
+  daemon; the object-form config loader now actually passes them
+  through.
+
 ## [0.2.4] - 2026-08-15
 
 ### Added

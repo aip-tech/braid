@@ -16,7 +16,7 @@
 				<h1>Config</h1>
 				<p class="lede">
 					<code>braid.config.ts</code> default-exports a <code>{ processes, plugins?,
-					logs? }</code> object (or a bare <code>ProcessConfig[]</code>, treated the
+					logs?, foreground? }</code> object (or a bare <code>ProcessConfig[]</code>, treated the
 					same way). Full field list and defaults live in
 					<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/src/types.ts"><code>src/types.ts</code></a>.
 				</p>
@@ -28,6 +28,7 @@
 					<li><a href="#post-restart-hooks">Post-restart hooks</a></li>
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
 					<li><a href="#logs">Logs</a></li>
+					<li><a href="#foreground">Foreground mode</a></li>
 				</ul>
 
 				<section id="basics">
@@ -174,6 +175,25 @@ export default defineConfig({
 						hook that keeps failing, or a <code>readyPattern</code> that never matches,
 						is also logged into the relevant process's own log &mdash; visible via
 						<code>braid logs</code>/<code>--follow</code>, not just <code>daemon.log</code>.
+					</p>
+				</section>
+
+				<section id="foreground">
+					<h2>Foreground mode</h2>
+					<p>
+						<code>start</code> forks a background daemon by default. Set <code>foreground:
+						true</code> at the top level of the config to make it run attached to the
+						terminal instead &mdash; it then blocks, streaming every process's combined
+						output there, until Ctrl-C (or a <code>braid stop</code> from another
+						terminal) stops everything:
+					</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [ /* ... */ ],
+	foreground: true, // @default false
+});</code></pre>
+					<p>
+						Override this per invocation with <code>braid start --foreground</code> or
+						<code>braid start --daemon</code>, regardless of what the config says.
 					</p>
 				</section>
 			</main>

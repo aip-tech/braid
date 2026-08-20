@@ -31,6 +31,16 @@
 					<pre><code class="language-bash">braid start
 braid start --config ./other.config.ts</code></pre>
 					<p>Refuses to start if a pidfile from a still-running daemon already exists.</p>
+					<p>
+						Pass <code>--foreground</code> to run attached to this terminal instead
+						&mdash; <code>start</code> then blocks, streaming every process's combined
+						output here, until Ctrl-C (or a <code>braid stop</code> from another
+						terminal) stops everything. A config's own <code>foreground: true</code>
+						makes this the default; <code>--daemon</code> forces the background daemon
+						regardless of what the config says.
+					</p>
+					<pre><code class="language-bash">braid start --foreground
+braid start --daemon</code></pre>
 				</section>
 
 				<section id="status">
@@ -58,6 +68,8 @@ braid logs api --lines 50     # only the last 50 lines</code></pre>
 					<h2>Flags</h2>
 					<ul>
 						<li><code>--config &lt;path&gt;</code> &mdash; <code>start</code> only; use a config file other than <code>./braid.config.ts</code>.</li>
+						<li><code>--foreground</code> &mdash; <code>start</code> only; run attached to this terminal instead of forking a background daemon.</li>
+						<li><code>--daemon</code> &mdash; <code>start</code> only; force the background daemon, overriding a config's <code>foreground: true</code>.</li>
 						<li><code>--follow</code> &mdash; <code>logs</code> only; keep the connection open and stream new output as it arrives.</li>
 						<li><code>--lines &lt;n&gt;</code> &mdash; <code>logs</code> only; only print the last <code>n</code> lines.</li>
 					</ul>

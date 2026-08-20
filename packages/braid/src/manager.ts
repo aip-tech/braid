@@ -49,6 +49,12 @@ export type RunManagerOptions = {
 	configPath?: string;
 	/** Per-process log file settings, forwarded to the core logger plugin. */
 	logs?: BraidConfig["logs"];
+	/**
+	 * Base directory each config's own relative `cwd` (and restart hooks' `cwd`) is resolved
+	 * against. @default process.cwd() - only needs overriding when the caller runs in-process
+	 * (e.g. a foreground `start`) rather than as a daemon already forked into the right directory.
+	 */
+	cwd?: string;
 	/** Called once every process has forked and the pidfile is written, before awaiting exit. */
 	onReady?: () => void;
 };
@@ -186,6 +192,7 @@ export async function runManager(
 		);
 	}
 	validateDependsOn(configs);
+	const baseCwd = options.cwd ?? process.cwd();
 
 	mkdirSync(dirname(pidfilePath), { recursive: true });
 	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
@@ -321,7 +328,7 @@ export async function runManager(
 			);
 
 			const hookChild = spawn(hook.command, hook.args ?? [], {
-				cwd: hook.cwd ? join(process.cwd(), hook.cwd) : process.cwd(),
+				cwd: hook.cwd ? join(baseCwd, hook.cwd) : baseCwd,
 				env: process.env,
 			});
 			hookChildren.add(hookChild);
@@ -386,7 +393,7 @@ export async function runManager(
 
 	function spawnWorker(config: ProcessConfig): void {
 		const child = fork(WORKER_PATH, [], {
-			cwd: config.cwd ? join(process.cwd(), config.cwd) : process.cwd(),
+			cwd: config.cwd ? join(baseCwd, config.cwd) : baseCwd,
 			env: {
 				...process.env,
 				...config.env,

@@ -128,6 +128,21 @@ describe("parseArgs", () => {
 			/positive number/,
 		);
 	});
+
+	it("defaults foreground to undefined, deferring to config", () => {
+		expect(parseArgs(["start"], "/repo").foreground).toBeUndefined();
+	});
+
+	it("parses --foreground and --daemon as explicit true/false overrides", () => {
+		expect(parseArgs(["start", "--foreground"], "/repo").foreground).toBe(true);
+		expect(parseArgs(["start", "--daemon"], "/repo").foreground).toBe(false);
+	});
+
+	it("throws when --foreground and --daemon are both given", () => {
+		expect(() =>
+			parseArgs(["start", "--foreground", "--daemon"], "/repo"),
+		).toThrow(/mutually exclusive/);
+	});
 });
 
 describe("loadConfig", () => {
@@ -174,6 +189,17 @@ describe("loadConfig", () => {
 		const config = await loadConfig(configPath);
 		expect(config.processes).toHaveLength(1);
 		expect(config.plugins).toEqual(["some-plugin"]);
+	});
+
+	it("passes through the object form's logs and foreground options", async () => {
+		const configPath = join(tmpDir, "valid.config.ts");
+		writeFileSync(
+			configPath,
+			`const config = { processes: [{ name: "one", command: "node", args: ["${join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\")}"] }], logs: { dir: "custom-logs" }, foreground: true };\nexport default config;\n`,
+		);
+		const config = await loadConfig(configPath);
+		expect(config.logs).toEqual({ dir: "custom-logs" });
+		expect(config.foreground).toBe(true);
 	});
 
 	it("throws when the object form's processes is missing or empty", async () => {
@@ -286,6 +312,78 @@ describe("runCli", () => {
 			),
 		).toBe(true);
 		expect(existsSync(join(tmpDir, ".braid", "daemon.log"))).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("runs start --foreground attached to this process, streaming logs, and exits cleanly on stop", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const stdoutSpy = vi
+			.spyOn(process.stdout, "write")
+			.mockImplementation(() => true);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(["start", "--foreground"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("running in foreground"),
+			),
+		).toBe(true);
+		await waitFor(() =>
+			stdoutSpy.mock.calls.some((call) =>
+				Buffer.from(call[0]).toString().includes("started"),
+			),
+		);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		expect(existsSync(pidfilePath)).toBe(false);
+
+		stdoutSpy.mockRestore();
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("honors a config-level foreground:true default without needing the flag", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default { processes: [{ name: "solo", command: "node", args: ["${fixture}"] }], foreground: true };\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("running in foreground"),
+			),
+		).toBe(true);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("--daemon overrides a config-level foreground:true default", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default { processes: [{ name: "solo", command: "node", args: ["${fixture}"] }], foreground: true };\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const code = await runCli(["start", "--daemon"], tmpDir);
+		expect(code).toBe(0);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				/braid: started \(pid \d+\)/.test(String(call[0])),
+			),
+		).toBe(true);
 
 		await stopFromPidfile(pidfilePath);
 		logSpy.mockRestore();

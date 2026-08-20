@@ -1,13 +1,14 @@
 {
 	"name": "@aip-tech/braid-monorepo",
 	"private": true,
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"packageManager": "pnpm@11.16.0",
 	"engines": {
 		"node": ">=22"
 	},
 	"scripts": {
 		"dev": "pnpm --filter ./packages/example run dev",
+		"dev:watch": "pnpm --filter ./packages/example run watch",
 		"dev:stop": "pnpm --filter ./packages/example run dev:stop",
 		"dev:status": "pnpm --filter ./packages/example run dev:status",
 		"dev:logs": "pnpm --filter ./packages/example run dev:logs",

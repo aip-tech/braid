@@ -1,6 +1,11 @@
-import { defineConfig } from "@aip-tech/braid";
+import { DEFAULT_LOG_MAX_SIZE_BYTES, defineConfig } from "@aip-tech/braid";
 
 export default defineConfig({
+	logs: {
+		maxSizeBytes: DEFAULT_LOG_MAX_SIZE_BYTES,
+		dir: ".braid/logs",
+	},
+	foreground: false,
 	processes: [
 		{
 			// Edit src/web.ts and save while `pnpm dev` is running to see it restart.

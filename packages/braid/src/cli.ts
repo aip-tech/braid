@@ -13,6 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	findRunningPidfile,
+	runManager,
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
@@ -20,6 +21,7 @@ import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import type {
 	BraidConfig,
 	DaemonHandshakeMessage,
+	Pidfile,
 	ProcessConfig,
 } from "./types.js";
 
@@ -37,6 +39,8 @@ export type ParsedArgs = {
 	processName?: string;
 	follow: boolean;
 	lines?: number;
+	/** `start`'s foreground/daemon override: undefined defers to the config's `foreground` option. */
+	foreground?: boolean;
 };
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
@@ -45,6 +49,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	let processName: string | undefined;
 	let follow = false;
 	let lines: number | undefined;
+	let foreground: boolean | undefined;
 
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i];
@@ -63,6 +68,11 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 			}
 			lines = parsed;
 			i++;
+		} else if (arg === "--foreground" || arg === "--daemon") {
+			if (foreground !== undefined) {
+				throw new Error("--foreground and --daemon are mutually exclusive");
+			}
+			foreground = arg === "--foreground";
 		} else if (!arg?.startsWith("--") && processName === undefined) {
 			processName = arg;
 		}
@@ -73,6 +83,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 		processName,
 		follow,
 		lines,
+		foreground,
 	};
 }
 
@@ -97,7 +108,8 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	}
 
 	if (exported && typeof exported === "object") {
-		const { processes, plugins } = exported as Partial<BraidConfig>;
+		const { processes, plugins, logs, foreground } =
+			exported as Partial<BraidConfig>;
 		if (!Array.isArray(processes) || processes.length === 0) {
 			throw new Error(CONFIG_SHAPE_ERROR(configPath));
 		}
@@ -106,7 +118,12 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 				`braid config at ${configPath}'s "plugins" must be an array`,
 			);
 		}
-		return { processes: processes as ProcessConfig[], plugins };
+		return {
+			processes: processes as ProcessConfig[],
+			plugins,
+			logs,
+			foreground,
+		};
 	}
 
 	throw new Error(CONFIG_SHAPE_ERROR(configPath));
@@ -203,11 +220,55 @@ async function startDaemon(
 	return outcome;
 }
 
-export async function runCli(argv: string[], cwd: string): Promise<number> {
-	const { command, configPath, processName, follow, lines } = parseArgs(
-		argv,
+/** Streams a running manager's combined process output straight to this terminal until it shuts down. */
+async function followLogs(pidfile: Pidfile): Promise<void> {
+	const url = new URL(`http://127.0.0.1:${pidfile.controlPort}/api/logs`);
+	url.searchParams.set("follow", "true");
+	try {
+		const response = await fetch(url, {
+			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+		});
+		if (!response.body) return;
+		for await (const chunk of response.body) {
+			process.stdout.write(chunk);
+		}
+	} catch {
+		// The control server tears down mid-stream on shutdown - nothing left to report.
+	}
+}
+
+/**
+ * Runs every configured process attached to this terminal instead of forking a background daemon.
+ * Ctrl-C is handled by runManager's own SIGINT listener, which stops every process before this
+ * resolves.
+ */
+async function runForeground(
+	config: BraidConfig,
+	configPath: string,
+	pidfilePath: string,
+	cwd: string,
+): Promise<number> {
+	let following: Promise<void> | undefined;
+	const exitCode = await runManager(config.processes, pidfilePath, {
+		plugins: config.plugins,
+		configPath,
+		logs: config.logs,
 		cwd,
-	);
+		onReady: () => {
+			console.log(
+				`braid: running in foreground (pid ${process.pid}). Press Ctrl-C to stop.`,
+			);
+			const running = findRunningPidfile(pidfilePath);
+			if (running) following = followLogs(running);
+		},
+	});
+	await following;
+	return exitCode;
+}
+
+export async function runCli(argv: string[], cwd: string): Promise<number> {
+	const { command, configPath, processName, follow, lines, foreground } =
+		parseArgs(argv, cwd);
 	const pidfilePath = resolve(cwd, DEFAULT_PIDFILE_PATH);
 
 	switch (command) {
@@ -220,6 +281,10 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				return 1;
 			}
 			const config = await loadConfig(configPath);
+			const runInForeground = foreground ?? config.foreground ?? false;
+			if (runInForeground) {
+				return runForeground(config, configPath, pidfilePath, cwd);
+			}
 			const outcome = await startDaemon(config, configPath, pidfilePath, cwd);
 			if (!outcome.ok) {
 				console.error(`braid: ${outcome.message}`);
@@ -291,7 +356,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 		}
 		default: {
 			console.error(
-				"Usage: braid <start|stop|status|logs [name]> [--config <path>] [--follow] [--lines <n>]",
+				"Usage: braid <start|stop|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
 			);
 			return 1;
 		}

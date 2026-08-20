@@ -1,6 +1,6 @@
 # braid
 
-Runs multiple long-lived processes as one unit, as a background daemon: PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.
+Runs multiple long-lived processes as one unit, as a background daemon by default (or attached to your terminal with `--foreground`): PID tracking, nodemon-driven restarts, kill-everything-on-crash, and persistent rotated per-process logs.
 
 Published on npm as `@aip-tech/braid`. See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
@@ -31,6 +31,7 @@ export default defineConfig({
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes }` — see [Logs](#logs).
+- `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
 
 Full field list and defaults: [`src/types.ts`](./src/types.ts) (`ProcessConfig`, `BraidConfig`).
 
@@ -38,6 +39,8 @@ Full field list and defaults: [`src/types.ts`](./src/types.ts) (`ProcessConfig`,
 
 ```bash
 npx @aip-tech/braid start                    # start every configured process as a background daemon
+npx @aip-tech/braid start --foreground       # ...or attached to this terminal (Ctrl-C stops everything)
+npx @aip-tech/braid start --daemon           # force the background daemon, overriding a config's foreground: true
 npx @aip-tech/braid status                   # list each process's name/pid/alive state
 npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
 npx @aip-tech/braid logs [name] --follow     # keep streaming new output
@@ -45,6 +48,8 @@ npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
 npx @aip-tech/braid stop                     # kill everything
 npx @aip-tech/braid start --config ./other.config.ts
 ```
+
+In `--foreground` mode, `start` blocks until every process stops (Ctrl-C, or `braid stop` from another terminal), streaming their combined output straight here instead of only to the log files.
 
 ## Dependent restarts
 

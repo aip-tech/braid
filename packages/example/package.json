@@ -6,6 +6,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "braid start",
+		"watch": "braid start --foreground",
 		"dev:stop": "braid stop",
 		"dev:status": "braid status",
 		"dev:logs": "braid logs --follow",
