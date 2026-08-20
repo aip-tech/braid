@@ -177,6 +177,7 @@ export function runWorker(config: ProcessConfig): void {
 				send({ source: "braid-worker", type: "restart" }, () => {});
 				const pid = child?.pid;
 				if (typeof pid === "number") {
+					stderrPrefixer.write("braid: stopping (restarting)\n");
 					await new Promise<void>((resolveExit) => {
 						awaitingExit = resolveExit;
 						void killTree(pid);

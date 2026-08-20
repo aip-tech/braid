@@ -186,6 +186,16 @@ describe("runManager", () => {
 
 		expect(exitCode).toBe(1);
 		expect(existsSync(pidfilePath)).toBe(false);
+		// The still-alive sibling gets a "stopping" note in its own log; the crashing process
+		// itself doesn't (it crashed, braid didn't stop it) - regression check for a real bug
+		// where the crashing process's own ChildProcess.exitCode hadn't caught up yet at the
+		// moment this ran, misreporting it as stopped too.
+		expect(readFileSync(join(tmpDir, "logs", "ok.log"), "utf8")).toContain(
+			"braid: stopping",
+		);
+		expect(readFileSync(join(tmpDir, "logs", "bad.log"), "utf8")).not.toContain(
+			"braid: stopping",
+		);
 	}, 10000);
 
 	it("refuses to start a second manager against a pidfile that's still alive", async () => {
@@ -499,6 +509,9 @@ describe("runManager dependsOn", () => {
 		const clientLog = join(tmpDir, "logs", "client.log");
 		await waitFor(() =>
 			readFileSync(clientLog, "utf8").includes("[client] generate-hook ran"),
+		);
+		expect(readFileSync(clientLog, "utf8")).toContain(
+			"braid: stopping (dependency restarted)",
 		);
 
 		await stopFromPidfile(pidfilePath);
@@ -938,6 +951,9 @@ describe("runManager beforeRestart", () => {
 			const newPid = matches.at(-1)?.[1];
 			return newPid !== undefined && newPid !== oldPid;
 		});
+		expect(readFileSync(apiLog, "utf8")).toContain(
+			"braid: stopping (restarting)",
+		);
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;

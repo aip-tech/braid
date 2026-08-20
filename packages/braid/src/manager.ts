@@ -200,6 +200,7 @@ export async function runManager(
 		}
 	}
 	const baseCwd = options.cwd ?? process.cwd();
+	const configsByName = new Map(configs.map((config) => [config.name, config]));
 
 	mkdirSync(dirname(pidfilePath), { recursive: true });
 	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
@@ -284,12 +285,41 @@ export async function runManager(
 		void shutdown(0);
 	};
 
-	const shutdown = async (code: number): Promise<void> => {
+	/**
+	 * `crashedName`, when given, is the process whose own crash triggered this shutdown - excluded
+	 * from the "stopping" note below since braid didn't stop it, it crashed on its own. A liveness
+	 * check alone isn't enough to tell the two apart: a process that just called `process.exit()`
+	 * can still pass `isAlive` (a zombie until reaped) or show `exitCode === null` on its own
+	 * ChildProcess object for a moment (the crash IPC message can arrive before the manager's own
+	 * "exit" event for it does).
+	 */
+	const shutdown = async (
+		code: number,
+		crashedName?: string,
+	): Promise<void> => {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		exitCode = code;
-		process.off("SIGINT", onSignal);
-		process.off("SIGTERM", onSignal);
+		// Deliberately NOT removed here: a graceful shutdown with several processes to tree-kill
+		// can take a moment, and a second SIGINT/SIGTERM in that window (an impatient repeat
+		// Ctrl-C, or some terminals/shells delivering it twice) needs to land on this same
+		// listener and no-op via the guard above - otherwise, with no listener left, Node's
+		// default disposition kills the process immediately via the raw signal, truncating
+		// whatever was still in flight (mid-tree-kill children, unflushed log/log-follow output)
+		// and reporting a signal-based failure to whatever launched it (e.g. pnpm).
+
+		// Logged before daemonShutdown (below) closes every log stream - writing to one after
+		// that point throws (SonicBoom destroyed).
+		for (const [name, child] of children) {
+			if (
+				name !== crashedName &&
+				typeof child.pid === "number" &&
+				isAlive(child.pid)
+			) {
+				const config = configsByName.get(name);
+				if (config) logToProcess(config, "stopping");
+			}
+		}
 
 		await Promise.race([
 			safeEmit(emitter, "daemonShutdown", { type: "daemonShutdown" }),
@@ -302,6 +332,8 @@ export async function runManager(
 			controlServer.close(),
 		]);
 		rmSync(pidfilePath, { force: true });
+		process.off("SIGINT", onSignal);
+		process.off("SIGTERM", onSignal);
 		resolveExitPromise(exitCode);
 	};
 
@@ -376,13 +408,8 @@ export async function runManager(
 		return false;
 	}
 
-	/**
-	 * Writes a dependsOn/onRestart/readyPattern diagnostic both to `.braid/daemon.log` (as before)
-	 * and into `config`'s own log, prefixed the same way its output already is - otherwise these
-	 * only ever showed up in daemon.log, invisible to anyone just running `braid logs --follow`.
-	 */
-	function emitDiagnostic(config: ProcessConfig, message: string): void {
-		process.stderr.write(`[braid] "${config.name}": ${message}\n`);
+	/** Writes `message` into `config`'s own log only, prefixed the same way its output already is. */
+	function logToProcess(config: ProcessConfig, message: string): void {
 		const prefixer = linePrefixer(
 			(line) =>
 				void safeEmit(emitter, "processOutput", {
@@ -396,6 +423,16 @@ export async function runManager(
 		);
 		prefixer.write(`braid: ${message}`);
 		prefixer.flush();
+	}
+
+	/**
+	 * Writes a dependsOn/onRestart/readyPattern diagnostic both to `.braid/daemon.log` (as before)
+	 * and into `config`'s own log (via `logToProcess`) - otherwise these only ever showed up in
+	 * daemon.log, invisible to anyone just running `braid logs --follow`.
+	 */
+	function emitDiagnostic(config: ProcessConfig, message: string): void {
+		process.stderr.write(`[braid] "${config.name}": ${message}\n`);
+		logToProcess(config, message);
 	}
 
 	function spawnWorker(config: ProcessConfig): void {
@@ -467,7 +504,7 @@ export async function runManager(
 					name: config.name,
 					code: message.code,
 				});
-				void shutdown(1);
+				void shutdown(1, config.name);
 			}
 		});
 		child.on("error", (error) => {
@@ -480,7 +517,7 @@ export async function runManager(
 					name: config.name,
 					code: null,
 				});
-				void shutdown(1);
+				void shutdown(1, config.name);
 			}
 		});
 		child.on("exit", (code, signal) => {
@@ -517,7 +554,10 @@ export async function runManager(
 		restarting.add(config.name);
 		try {
 			const current = children.get(config.name);
-			if (current) await stopChild(current);
+			if (current) {
+				logToProcess(config, "stopping (dependency restarted)");
+				await stopChild(current);
+			}
 			if (shuttingDown) return;
 
 			const hook = config.dependsOn?.run;

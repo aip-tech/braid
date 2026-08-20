@@ -17,6 +17,26 @@ version bump.
   `onRestart`/`dependsOn.run`. If it keeps failing, the process is left
   stopped but the watcher stays active - the next matching file change
   retries the whole cycle.
+- A process now logs `braid: stopping` (or `braid: stopping (dependency
+  restarted)`/`braid: stopping (restarting)`) into its own log right
+  before braid stops it for a `dependsOn` cascade or a watch-triggered
+  restart, so `braid logs`/`--follow` shows a clear marker instead of
+  the log just going quiet. Not yet emitted for a plain `braid stop`
+  (the CLI stops each process directly rather than asking the running
+  daemon to shut down gracefully).
+
+### Fixed
+
+- A `braid start --foreground` shutdown could be aborted mid-flight (a
+  raw, unhandled SIGINT/SIGTERM killing the process instead of exiting
+  cleanly) if a second Ctrl-C landed while several processes were still
+  being stopped - the signal handler was removed as soon as shutdown
+  began, so a repeat signal in that window fell through to Node's
+  default disposition instead of being safely ignored.
+- `core:logger` no longer throws (and logs a spurious "lifecycle
+  listener failed" warning) if a still-running process's own output
+  arrives in the brief window after `daemonShutdown` already closed its
+  log stream.
 
 ### Changed
 

@@ -16,6 +16,10 @@ type Destination = {
 	stream: SonicBoom;
 	filePath: string;
 	bytesWritten: number;
+	/** Set once daemonShutdown has called stream.end() on it - SonicBoom finishes destroying
+	 *  itself asynchronously, so a still-running process's own output can otherwise arrive in the
+	 *  gap and throw "SonicBoom destroyed" trying to write to it. */
+	ended: boolean;
 };
 
 function rotateFileIfExists(filePath: string): void {
@@ -77,7 +81,12 @@ export const loggerPlugin: BraidPlugin = {
 				sync: true,
 				maxLength: MAX_BUFFERED_BYTES,
 			});
-			const destination: Destination = { stream, filePath, bytesWritten: 0 };
+			const destination: Destination = {
+				stream,
+				filePath,
+				bytesWritten: 0,
+				ended: false,
+			};
 			destinations.set(name, destination);
 			return destination;
 		}
@@ -99,6 +108,8 @@ export const loggerPlugin: BraidPlugin = {
 
 		ctx.on("processOutput", (event) => {
 			const destination = getOrCreateDestination(event.name);
+			// Once shutting down, there's nowhere useful left to persist this to anyway.
+			if (destination.ended) return;
 			const text = event.chunk.toString();
 			destination.stream.write(text);
 			destination.bytesWritten += Buffer.byteLength(text);
@@ -121,7 +132,10 @@ export const loggerPlugin: BraidPlugin = {
 				for (const res of set) res.end();
 				set.clear();
 			}
-			for (const destination of destinations.values()) destination.stream.end();
+			for (const destination of destinations.values()) {
+				destination.ended = true;
+				destination.stream.end();
+			}
 		});
 
 		ctx.registerRoute("GET", "/api/logs", (req, res) => {
