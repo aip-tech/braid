@@ -433,6 +433,40 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 10000);
 
+	it("relays a plugin's early ctx.log() line to this terminal when daemonized, before the started line", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		const pluginFixture = join(FIXTURES, "plugins", "ok-plugin.js").replace(
+			/\\/g,
+			"\\\\",
+		);
+		writeFileSync(
+			configPath,
+			`export default { processes: [{ name: "solo", command: "node", args: ["${fixture}"] }], plugins: ["${pluginFixture}"] };\n`,
+		);
+
+		const code = await runCli(["start"], tmpDir);
+		expect(code).toBe(0);
+
+		// ok-plugin.js calls ctx.log("registered") synchronously in register(), well before the
+		// "ready" handshake - this proves it reaches the CLI's own terminal, not just daemon.log,
+		// and that it arrives before (not instead of) the normal "started" confirmation.
+		const relayedIndex = logSpy.mock.calls.findIndex((call) => {
+			const text = String(call[0]);
+			return text.includes("[plugin:ok]") && text.includes("registered");
+		});
+		const startedIndex = logSpy.mock.calls.findIndex((call) =>
+			/started \(pid \d+\)/.test(String(call[0])),
+		);
+		expect(relayedIndex).toBeGreaterThanOrEqual(0);
+		expect(startedIndex).toBeGreaterThanOrEqual(0);
+		expect(relayedIndex).toBeLessThan(startedIndex);
+
+		await stopFromPidfile(pidfilePath);
+		logSpy.mockRestore();
+	}, 10000);
+
 	it("runs start --foreground attached to this process, streaming logs, and exits cleanly on stop", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const stdoutSpy = vi

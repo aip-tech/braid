@@ -40,7 +40,16 @@ export function createPluginContextFactory(
 		stopProcess,
 		restartProcess,
 		log(message) {
-			process.stderr.write(`${pluginTag(pluginName)} ${message}\n`);
+			const line = `${pluginTag(pluginName)} ${message}`;
+			process.stderr.write(`${line}\n`);
+			// Also relayed to the CLI's own terminal when daemonized, so e.g. a UI plugin's
+			// open-this-URL line doesn't only end up in daemon.log - but only reaches the CLI if
+			// sent before it disconnects the IPC channel (right after "ready"/"error"), which is
+			// exactly the window a controlServerReady handler runs in. `process.connected` guards
+			// against throwing on an already-disconnected/non-forked (foreground, tests) process.
+			if (process.connected && process.send) {
+				process.send({ type: "log", message: line });
+			}
 		},
 	});
 }

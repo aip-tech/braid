@@ -25,8 +25,9 @@ export default defineConfig({
 });
 ```
 
-Start braid as usual. Once the daemon is up, check its log (`.braid/daemon.log`
-if daemonized, or your terminal if run with `--foreground`) for a line like:
+Start braid as usual. `braid start` prints a line with the URL to open right
+in its own terminal (needs `@aip-tech/braid` `>=0.3.1` - on an older
+version, check `.braid/daemon.log` instead):
 
 ```
 [plugin:ui] dashboard ready - open http://127.0.0.1:54213/?token=... in your browser

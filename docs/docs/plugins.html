@@ -93,7 +93,7 @@ export default helloPlugin;</code></pre>
 						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt }[]</code> for every configured process, the same data <code>status</code> renders.</li>
 						<li><code>stopProcess(name)</code> &mdash; stops one named process. Resolves <code>"ok"</code>, <code>"unknown"</code> (not configured, or not currently running), or <code>"busy"</code> (a restart is already in progress for it).</li>
 						<li><code>restartProcess(name)</code> &mdash; stops and respawns one named process, then runs its own <code>onRestart</code> hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a watch-triggered restart would. Can take a while to resolve if <code>onRestart</code> keeps retrying. Resolves <code>"ok"</code>, <code>"unknown"</code>, or <code>"busy"</code>.</li>
-						<li><code>log(message)</code> &mdash; writes a line to stderr, prefixed with this plugin's own name.</li>
+						<li><code>log(message)</code> &mdash; writes a line to stderr, prefixed with this plugin's own name. If sent before the daemon's ready handshake (e.g. from a <code>controlServerReady</code> handler), also relayed straight to the terminal that ran <code>braid start</code>, not just <code>daemon.log</code>.</li>
 					</ul>
 					<p>
 						<code>stopProcess</code>/<code>restartProcess</code> are available to

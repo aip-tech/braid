@@ -168,33 +168,53 @@ async function startDaemon(
 
 	const outcome = await new Promise<DaemonStartOutcome>((settle) => {
 		const timeout = setTimeout(() => {
+			cleanup();
 			settle({
 				ok: false,
 				message: `daemon (pid ${child.pid}) did not confirm startup within ${DAEMON_READY_TIMEOUT_MS}ms; check ${daemonLogPath}`,
 			});
 		}, DAEMON_READY_TIMEOUT_MS);
-		child.once("message", (message: DaemonHandshakeMessage) => {
+
+		function cleanup(): void {
 			clearTimeout(timeout);
+			child.off("message", onMessage);
+			child.off("exit", onExit);
+			child.off("error", onError);
+		}
+
+		// Not .once(): a plugin's own relayed "log" line (see PluginContext.log) can arrive before
+		// the "ready"/"error" handshake message, and shouldn't be mistaken for it - only "ready"/
+		// "error" settle and stop listening.
+		function onMessage(message: DaemonHandshakeMessage): void {
+			if (message.type === "log") {
+				console.log(message.message);
+				return;
+			}
+			cleanup();
 			settle(
 				message.type === "ready"
 					? { ok: true, pid: child.pid as number }
 					: { ok: false, message: message.message },
 			);
-		});
-		child.once("exit", (code) => {
-			clearTimeout(timeout);
+		}
+		function onExit(code: number | null): void {
+			cleanup();
 			settle({
 				ok: false,
 				message: `daemon exited before starting up (code ${code}); check ${daemonLogPath}`,
 			});
-		});
-		child.once("error", (error) => {
-			clearTimeout(timeout);
+		}
+		function onError(error: Error): void {
+			cleanup();
 			settle({
 				ok: false,
 				message: `failed to start daemon: ${error.message}`,
 			});
-		});
+		}
+
+		child.on("message", onMessage);
+		child.once("exit", onExit);
+		child.once("error", onError);
 	});
 
 	if (!outcome.ok) {

@@ -48,9 +48,10 @@
 				<section id="opening-it">
 					<h2>Opening it</h2>
 					<p>
-						Once the daemon is up, it logs a line with a URL to open &mdash;
-						check <code>.braid/daemon.log</code> if daemonized, or your
-						terminal if run with <code>--foreground</code>:
+						<code>braid start</code> prints a line with a URL to open right in
+						its own terminal (this needs <code>@aip-tech/braid</code>
+						<code>&gt;=0.3.1</code> - on an older version, check
+						<code>.braid/daemon.log</code> instead):
 					</p>
 					<pre><code class="nohighlight">[plugin:ui] dashboard ready - open http://127.0.0.1:54213/?token=... in your browser</code></pre>
 					<p>

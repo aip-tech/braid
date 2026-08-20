@@ -158,7 +158,18 @@ export type ProcessActionResult = "ok" | "unknown" | "busy";
 /** Sent from the daemon entrypoint back to the CLI over IPC once startup succeeds or fails. */
 export type DaemonHandshakeMessage =
 	| { type: "ready" }
-	| { type: "error"; message: string };
+	| { type: "error"; message: string }
+	| {
+			/**
+			 * A plugin's own ctx.log() line, relayed to the CLI's terminal in addition to
+			 * daemon.log - only reaches the CLI if sent before "ready"/"error", since the CLI
+			 * disconnects the IPC channel right after receiving either of those. In practice
+			 * (today, at least) that means only a plugin's `controlServerReady` handler, e.g.
+			 * `@aip-tech/braid-plugin-ui` announcing its open-this-URL line.
+			 */
+			type: "log";
+			message: string;
+	  };
 
 export type RouteHandler = (
 	req: IncomingMessage,

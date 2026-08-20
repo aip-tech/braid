@@ -5,6 +5,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.3.1] - 2026-08-20
+
+### Added
+
+- `PluginContext.log()` now also relays the message to the CLI's own
+  terminal when `start` daemonizes, in addition to `daemon.log` - but
+  only if sent before the daemon's "ready"/"error" handshake, since the
+  CLI disconnects that IPC channel right after. In practice this means a
+  plugin's `controlServerReady` handler (e.g. `@aip-tech/braid-plugin-ui`
+  announcing its dashboard URL) now shows up right in the terminal that
+  ran `braid start`, not only in `daemon.log`.
+
 ## [0.3.0] - 2026-08-20
 
 ### Added
