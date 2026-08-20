@@ -1,7 +1,11 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { registerPlugin, safeEmit } from "./plugin-runtime.js";
-import type { BraidPlugin, PluginContext } from "./types.js";
+import type {
+	BraidPlugin,
+	PluginContext,
+	ProcessActionResult,
+} from "./types.js";
 
 function stubContext(): PluginContext {
 	return {
@@ -10,6 +14,8 @@ function stubContext(): PluginContext {
 		registerUpgrade: vi.fn(),
 		on: vi.fn(),
 		getProcesses: vi.fn(() => []),
+		stopProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
+		restartProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		log: vi.fn(),
 	};
 }

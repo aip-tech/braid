@@ -5,6 +5,48 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.3.0] - 2026-08-20
+
+### Added
+
+- `braid stop <name>` and `braid restart <name>`: per-process stop/restart,
+  backed by two new control-server routes (`POST /api/processes/stop` and
+  `POST /api/processes/restart`, both `?name=<name>`) and two new
+  `PluginContext` methods, `stopProcess(name)`/`restartProcess(name)`,
+  available to any plugin. `restart` reuses the exact same
+  readyPattern-wait/`onRestart`-hook/`dependsOn`-cascade sequence a
+  watch-triggered restart gets. Stopping the last process manually leaves
+  the daemon running (so it can still be restarted later) instead of
+  auto-shutting-down the way an unprompted "every process has exited"
+  does.
+- A new `controlServerReady` lifecycle event (`{ port, token }`), fired
+  once the control server is listening and every plugin has finished
+  `register()`'ing - lets a plugin serving browser content construct and
+  log a URL pointing at itself, which `register()` itself can't do (the
+  port isn't known yet at that point).
+- The control server now accepts a one-time `?token=` query param as well
+  as the `Authorization` header, so a plain browser navigation (which
+  can't send a custom header) can load a plugin's static content. The
+  first request authenticated this way gets a port-scoped session cookie
+  and, for a GET, a redirect that strips the token back off the visible
+  URL - the browser's own subsequent `fetch()` calls then authenticate via
+  that cookie automatically.
+
+### Changed
+
+- `start`'s "running in foreground"/"started" banners, and every other
+  CLI message that used to read `braid: ...`, now carry the same
+  `[braid]` tag as `emitDiagnostic`/plugin-loader messages instead of a
+  plain `braid:` prefix - one consistent style for "this is braid
+  talking," not two. `[braid]` and `[plugin:x]` tags also render in a
+  fixed gray, distinguishing them at a glance from each process's own
+  colored `[name]` log lines when they're interleaved in the same
+  terminal (most visibly under `--foreground`) - though the tag itself is
+  the load-bearing part in a terminal that doesn't render ANSI color.
+
+- `braid stop <name>` previously silently ignored the name and stopped
+  everything; it now stops only that process (see above).
+
 ## [0.2.9] - 2026-08-20
 
 ### Changed

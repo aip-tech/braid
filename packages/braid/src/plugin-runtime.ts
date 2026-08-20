@@ -1,9 +1,11 @@
 import type { EventEmitter } from "node:events";
 import type { ControlServer } from "./control-server.js";
+import { braidTag, pluginTag } from "./prefix.js";
 import type {
 	BraidPlugin,
 	PluginContext,
 	PluginLifecycleEvent,
+	ProcessActionResult,
 } from "./types.js";
 
 type WorkerSnapshot = {
@@ -17,13 +19,16 @@ type ContextFactoryOptions = {
 	controlServer: ControlServer;
 	getWorkers: () => WorkerSnapshot[];
 	emitter: EventEmitter;
+	stopProcess: (name: string) => Promise<ProcessActionResult>;
+	restartProcess: (name: string) => Promise<ProcessActionResult>;
 };
 
 /** Builds one PluginContext per plugin, so log() can prefix the right plugin name. */
 export function createPluginContextFactory(
 	options: ContextFactoryOptions,
 ): (pluginName: string) => PluginContext {
-	const { controlServer, getWorkers, emitter } = options;
+	const { controlServer, getWorkers, emitter, stopProcess, restartProcess } =
+		options;
 	return (pluginName: string): PluginContext => ({
 		registerRoute: controlServer.registerRoute,
 		registerStatic: controlServer.registerStatic,
@@ -32,8 +37,10 @@ export function createPluginContextFactory(
 			emitter.on(type, handler);
 		},
 		getProcesses: getWorkers,
+		stopProcess,
+		restartProcess,
 		log(message) {
-			process.stderr.write(`[plugin:${pluginName}] ${message}\n`);
+			process.stderr.write(`${pluginTag(pluginName)} ${message}\n`);
 		},
 	});
 }
@@ -68,7 +75,7 @@ export async function safeEmit<T extends PluginLifecycleEvent["type"]>(
 				await listener(event);
 			} catch (error) {
 				process.stderr.write(
-					`[braid] a lifecycle listener for "${type}" failed: ${
+					`${braidTag()} a lifecycle listener for "${type}" failed: ${
 						error instanceof Error ? error.message : String(error)
 					}\n`,
 				);

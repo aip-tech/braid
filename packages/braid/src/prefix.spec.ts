@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colorize, linePrefixer } from "./prefix.js";
+import { braidTag, colorize, linePrefixer, pluginTag } from "./prefix.js";
 
 function collectingSink(): { lines: string[]; sink: (line: string) => void } {
 	const lines: string[] = [];
@@ -17,6 +17,18 @@ describe("colorize", () => {
 
 	it("returns the text unchanged for an unknown color name", () => {
 		expect(colorize("[api]", "not-a-color")).toBe("[api]");
+	});
+});
+
+describe("braidTag", () => {
+	it("colors [braid] a fixed neutral color, distinct from any process's own color", () => {
+		expect(braidTag()).toBe(colorize("[braid]", "gray"));
+	});
+});
+
+describe("pluginTag", () => {
+	it("colors [plugin:name] the same fixed neutral color as braidTag", () => {
+		expect(pluginTag("ui")).toBe(colorize("[plugin:ui]", "gray"));
 	});
 });
 

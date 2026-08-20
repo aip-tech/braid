@@ -143,4 +143,83 @@ describe("createControlServer", () => {
 		await fetch(`http://127.0.0.1:${port}/ping`, { headers });
 		await server.close();
 	}, 5000);
+
+	it("authenticates a GET via ?token=, sets a port-scoped cookie, and redirects stripping it", async () => {
+		const server = createControlServer();
+		server.registerRoute("GET", "/hello", (_req, res) => {
+			res.writeHead(200, { "content-type": "text/plain" }).end("hi");
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+
+		const redirected = await fetch(`${base}/hello?token=${server.token}`, {
+			redirect: "manual",
+		});
+		expect(redirected.status).toBe(302);
+		expect(redirected.headers.get("location")).toBe("/hello");
+		const cookie = redirected.headers.get("set-cookie") ?? "";
+		expect(cookie).toContain(`braid_token_${port}=${server.token}`);
+		expect(cookie).toContain("HttpOnly");
+
+		// The cookie alone (no Authorization header, no query token) now authenticates.
+		const cookieValue = cookie.split(";")[0];
+		const viaCookie = await fetch(`${base}/hello`, {
+			headers: { Cookie: cookieValue },
+		});
+		expect(viaCookie.status).toBe(200);
+		expect(await viaCookie.text()).toBe("hi");
+
+		await server.close();
+	});
+
+	it("rejects a bad ?token= the same as a missing one, and doesn't redirect a POST", async () => {
+		const server = createControlServer();
+		server.registerRoute("POST", "/action", (_req, res) => {
+			res.end("done");
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+
+		const bad = await fetch(`${base}/action?token=wrong`, { method: "POST" });
+		expect(bad.status).toBe(401);
+
+		const good = await fetch(`${base}/action?token=${server.token}`, {
+			method: "POST",
+		});
+		expect(good.status).toBe(200);
+		expect(await good.text()).toBe("done");
+
+		await server.close();
+	});
+
+	it("scopes the auth cookie by port, so two servers don't collide", async () => {
+		const serverA = createControlServer();
+		const serverB = createControlServer();
+		serverA.registerRoute("GET", "/hello", (_req, res) => {
+			res.end("a");
+		});
+		serverB.registerRoute("GET", "/hello", (_req, res) => {
+			res.end("b");
+		});
+		const { port: portA } = await serverA.listen();
+		const { port: portB } = await serverB.listen();
+
+		const cookieA = (
+			await fetch(`http://127.0.0.1:${portA}/hello?token=${serverA.token}`, {
+				redirect: "manual",
+			})
+		).headers.get("set-cookie");
+		const cookieB = (
+			await fetch(`http://127.0.0.1:${portB}/hello?token=${serverB.token}`, {
+				redirect: "manual",
+			})
+		).headers.get("set-cookie");
+
+		expect(cookieA).toContain(`braid_token_${portA}=`);
+		expect(cookieB).toContain(`braid_token_${portB}=`);
+		expect(cookieA).not.toBe(cookieB);
+
+		await serverA.close();
+		await serverB.close();
+	});
 });

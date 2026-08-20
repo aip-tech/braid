@@ -16,6 +16,7 @@
 		"check": "biome check --write"
 	},
 	"dependencies": {
-		"@aip-tech/braid": "workspace:*"
+		"@aip-tech/braid": "workspace:*",
+		"@aip-tech/braid-plugin-ui": "workspace:*"
 	}
 }

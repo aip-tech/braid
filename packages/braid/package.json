@@ -1,6 +1,6 @@
 {
 	"name": "@aip-tech/braid",
-	"version": "0.2.9",
+	"version": "0.3.0",
 	"description": "Runs multiple long-lived processes as one unit, as a background daemon or attached to your terminal — PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs.",
 	"license": "MIT",
 	"homepage": "https://aip-tech.github.io/braid",

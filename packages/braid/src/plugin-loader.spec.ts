@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadExternalPlugins, resolvePluginModule } from "./plugin-loader.js";
-import type { PluginContext } from "./types.js";
+import type { PluginContext, ProcessActionResult } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__", "plugins");
@@ -18,6 +18,8 @@ function stubContext(): PluginContext {
 		registerUpgrade: vi.fn(),
 		on: vi.fn(),
 		getProcesses: vi.fn(() => []),
+		stopProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
+		restartProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		log: vi.fn(),
 	};
 }

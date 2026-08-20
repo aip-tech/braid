@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>braid</title>
+		<link rel="stylesheet" href="./src/style.css" />
+	</head>
+	<body>
+		<div id="topnav">
+			<div class="topnav-inner">
+				<span class="brand">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.5" cy="19.5" r="2.5"/><circle cx="19.5" cy="4.5" r="2.5"/><path d="M6.5 17.5 17.5 6.5"/><path d="M8.5 6.5h2a2 2 0 0 1 2 2v7"/></svg>
+					<span>braid</span>
+				</span>
+				<span class="topnav-version" id="braid-version"></span>
+			</div>
+		</div>
+		<main>
+			<p id="error" class="error" hidden></p>
+			<table id="processes">
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>PID</th>
+						<th>Status</th>
+						<th>Started</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			</table>
+		</main>
+		<script type="module" src="./src/main.ts"></script>
+	</body>
+</html>

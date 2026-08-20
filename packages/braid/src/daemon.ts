@@ -1,4 +1,5 @@
 import { runManager } from "./manager.js";
+import { braidTag } from "./prefix.js";
 import type {
 	DaemonHandshakeMessage,
 	PluginConfigEntry,
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
 if (process.env.BRAID_DAEMON_INPUT) {
 	main().catch((error: unknown) => {
 		const message = error instanceof Error ? error.message : String(error);
-		process.stderr.write(`[braid] daemon failed to start: ${message}\n`);
+		process.stderr.write(`${braidTag()} daemon failed to start: ${message}\n`);
 		send({ type: "error", message });
 		process.exit(1);
 	});

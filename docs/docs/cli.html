@@ -60,8 +60,31 @@ braid logs api --lines 50     # only the last 50 lines</code></pre>
 
 				<section id="stop">
 					<h2><code>braid stop</code></h2>
-					<p>Kills every process recorded in the pidfile (and their descendants), then removes it.</p>
+					<p>With no name: kills every process recorded in the pidfile (and their descendants), then removes it. Works even if the daemon itself has crashed, since it kills PIDs directly rather than asking the daemon to do it.</p>
 					<pre><code class="language-bash">braid stop</code></pre>
+					<p>
+						With a name: stops just that one process through the running daemon's control
+						server, leaving everything else (and the daemon itself) running. Unlike the
+						bare form, this needs the daemon to actually be reachable &mdash; there's no
+						direct-PID fallback for a single process, since the daemon's own in-process
+						state (dependents, in-flight guards) has to be involved.
+					</p>
+					<pre><code class="language-bash">braid stop api</code></pre>
+				</section>
+
+				<section id="restart">
+					<h2><code>braid restart &lt;name&gt;</code></h2>
+					<p>
+						Stops and respawns one named process, then runs its own <code>onRestart</code>
+						hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a
+						watch-triggered restart would. A name is required &mdash; there's no bare
+						whole-stack <code>braid restart</code>.
+					</p>
+					<pre><code class="language-bash">braid restart api</code></pre>
+					<p>
+						Can take a moment to return if <code>onRestart</code> keeps retrying. Prints an
+						error and exits non-zero if the daemon isn't reachable.
+					</p>
 				</section>
 
 				<section id="flags">

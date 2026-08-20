@@ -1,0 +1,46 @@
+{
+	"name": "@aip-tech/braid-plugin-ui",
+	"version": "0.1.0",
+	"description": "A web dashboard for braid: live process status, and stop/restart buttons, served straight off braid's own control server.",
+	"license": "MIT",
+	"homepage": "https://aip-tech.github.io/braid",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"CHANGELOG.md"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/aip-tech/braid.git",
+		"directory": "packages/ui-plugin"
+	},
+	"keywords": [
+		"braid",
+		"braid-plugin",
+		"process-manager",
+		"dashboard"
+	],
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"build": "rm -rf dist && vite build --config frontend/vite.config.ts && tsc -p tsconfig.build.json",
+		"typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p frontend/tsconfig.json",
+		"format": "biome format --write",
+		"lint": "biome lint --write",
+		"check": "biome check --write",
+		"prepublishOnly": "pnpm run build"
+	},
+	"devDependencies": {
+		"@aip-tech/braid": "workspace:*",
+		"vite": "^8.2.1"
+	},
+	"peerDependencies": {
+		"@aip-tech/braid": ">=0.3.0"
+	}
+}

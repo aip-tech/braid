@@ -137,7 +137,23 @@ export type PluginLifecycleEvent =
 			stream: "stdout" | "stderr";
 			chunk: Buffer;
 	  }
-	| { type: "daemonShutdown" };
+	| { type: "daemonShutdown" }
+	| {
+			/**
+			 * Fires once, after the control server is listening and every core/external plugin has
+			 * finished register()'ing - the earliest point a plugin can know its own reachable
+			 * port/token, e.g. to log a browser-openable URL for content it served via
+			 * `registerStatic`.
+			 */
+			type: "controlServerReady";
+			port: number;
+			token: string;
+	  };
+
+/** Result of `PluginContext.stopProcess`/`restartProcess`: "unknown" means the name isn't
+ * configured, or (for `stopProcess`) isn't currently running; "busy" means a restart is already
+ * in progress for that name. */
+export type ProcessActionResult = "ok" | "unknown" | "busy";
 
 /** Sent from the daemon entrypoint back to the CLI over IPC once startup succeeds or fails. */
 export type DaemonHandshakeMessage =
@@ -175,6 +191,21 @@ export type PluginContext = {
 		alive: boolean;
 		startedAt: string;
 	}>;
+	/**
+	 * Stops one named process. Available to any plugin, not just core - a plugin can stop/restart
+	 * any configured process, not only ones it registered itself, the same trust level as any other
+	 * capability in `node_modules` gets, but worth knowing before wiring it up to something you
+	 * didn't write. Resolves "unknown" if `name` isn't configured or isn't currently running, "busy"
+	 * if a restart is already in progress for it, "ok" once fully stopped.
+	 */
+	stopProcess(name: string): Promise<ProcessActionResult>;
+	/**
+	 * Stops and respawns one named process, then runs its `onRestart` hook (if any) and cascades to
+	 * `dependsOn` dependents exactly as a watch-triggered restart would. Can take a while to resolve
+	 * if `onRestart` keeps retrying (bounded by its own `retries`/`retryDelayMs`). Resolves "unknown"
+	 * if `name` isn't configured, "busy" if already restarting, "ok" once fully restarted.
+	 */
+	restartProcess(name: string): Promise<ProcessActionResult>;
 	/** Writes a line to stderr, prefixed with this plugin's name. */
 	log(message: string): void;
 };

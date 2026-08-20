@@ -1,4 +1,4 @@
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -302,6 +302,119 @@ describe("runCli", () => {
 		errorSpy.mockRestore();
 	}, 10000);
 
+	it("stop <name> stops just that process, leaving the daemon and the other process running", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [
+				{ name: "one", command: "node", args: ["${fixture}"] },
+				{ name: "two", command: "node", args: ["${fixture}"] },
+			];\n`,
+		);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+			return pidfile.workers.length === 2;
+		});
+
+		expect(await runCli(["stop", "one"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Stopped: one");
+
+		expect(await runCli(["status"], tmpDir)).toBe(0);
+		expect(
+			logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("one") &&
+					String(call[0]).includes("stopped"),
+			),
+		).toBe(true);
+		expect(
+			logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("two") &&
+					String(call[0]).includes("running"),
+			),
+		).toBe(true);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("restart <name> gives a non-watched process a fresh pid", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+		const before = JSON.parse(readFileSync(pidfilePath, "utf8")).workers[0].pid;
+
+		expect(await runCli(["restart", "solo"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Restarted: solo");
+		const after = JSON.parse(readFileSync(pidfilePath, "utf8")).workers[0].pid;
+		expect(after).not.toBe(before);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("requires a name for restart and reports nothing running for stop/restart with no daemon up", async () => {
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		expect(await runCli(["restart"], tmpDir)).toBe(1);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Usage"));
+		errorSpy.mockRestore();
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["stop", "solo"], tmpDir)).toBe(0);
+		expect(await runCli(["restart", "solo"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Nothing running.");
+		logSpy.mockRestore();
+	});
+
+	it("reports a clear error for stop <name>/restart <name> when the daemon can't be reached", async () => {
+		// A synthetic pidfile pointing at a real (but otherwise unrelated) alive process, so
+		// findRunningPidfile considers it "running", and a control port nothing listens on - this
+		// simulates a daemon that crashed without cleaning up after itself.
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 1,
+				controlToken: "wrong",
+			}),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["stop", "solo"], tmpDir)).toBe(1);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("couldn't reach"),
+			),
+		).toBe(true);
+		expect(await runCli(["restart", "solo"], tmpDir)).toBe(1);
+		logSpy.mockRestore();
+
+		dummy.kill();
+	}, 10000);
+
 	it("prints the daemon's pid on a successful start and leaves a daemon.log behind", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
@@ -309,9 +422,10 @@ describe("runCli", () => {
 		const code = await runCli(["start"], tmpDir);
 		expect(code).toBe(0);
 		expect(
-			logSpy.mock.calls.some((call) =>
-				/braid: started \(pid \d+\)/.test(String(call[0])),
-			),
+			logSpy.mock.calls.some((call) => {
+				const text = String(call[0]);
+				return text.includes("[braid]") && /started \(pid \d+\)/.test(text);
+			}),
 		).toBe(true);
 		expect(existsSync(join(tmpDir, ".braid", "daemon.log"))).toBe(true);
 
@@ -382,9 +496,10 @@ describe("runCli", () => {
 		const code = await runCli(["start", "--daemon"], tmpDir);
 		expect(code).toBe(0);
 		expect(
-			logSpy.mock.calls.some((call) =>
-				/braid: started \(pid \d+\)/.test(String(call[0])),
-			),
+			logSpy.mock.calls.some((call) => {
+				const text = String(call[0]);
+				return text.includes("[braid]") && /started \(pid \d+\)/.test(text);
+			}),
 		).toBe(true);
 
 		await stopFromPidfile(pidfilePath);
@@ -442,7 +557,7 @@ describe("runCli", () => {
 		const code = await runCli(["start"], tmpDir);
 		expect(code).toBe(1);
 		expect(
-			errorSpy.mock.calls.some((call) => String(call[0]).startsWith("braid:")),
+			errorSpy.mock.calls.some((call) => String(call[0]).includes("[braid]")),
 		).toBe(true);
 		const daemonLog = readFileSync(
 			join(tmpDir, ".braid", "daemon.log"),

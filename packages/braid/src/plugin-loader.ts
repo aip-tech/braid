@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve as resolveEsm } from "import-meta-resolve";
+import { braidTag } from "./prefix.js";
 import { registerPlugin } from "./plugin-runtime.js";
 import type { BraidPlugin, PluginConfigEntry, PluginContext } from "./types.js";
 
@@ -43,7 +44,9 @@ function logLoaderFailure(
 	detail: unknown,
 ): void {
 	const message = detail instanceof Error ? detail.message : String(detail);
-	process.stderr.write(`[braid] plugin "${specifier}" ${stage}: ${message}\n`);
+	process.stderr.write(
+		`${braidTag()} plugin "${specifier}" ${stage}: ${message}\n`,
+	);
 }
 
 /** Resolves, imports, and registers every configured external plugin. A broken one is logged and skipped. */
@@ -74,7 +77,7 @@ export async function loadExternalPlugins(
 		const candidate = (imported as { default?: unknown }).default;
 		if (!isBraidPlugin(candidate)) {
 			process.stderr.write(
-				`[braid] plugin "${specifier}" does not default-export a { name, register } plugin\n`,
+				`${braidTag()} plugin "${specifier}" does not default-export a { name, register } plugin\n`,
 			);
 			continue;
 		}

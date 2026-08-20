@@ -390,8 +390,10 @@ describe("runManager plugin support", () => {
 		expect(await res.text()).toBe("ok");
 
 		await waitFor(() =>
-			writeSpy.mock.calls.some((call) =>
-				String(call[0]).includes("[plugin:ok] saw processStart"),
+			writeSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("[plugin:ok]") &&
+					String(call[0]).includes("saw processStart"),
 			),
 		);
 
@@ -425,12 +427,225 @@ describe("runManager plugin support", () => {
 		const statusRes = await fetchWithToken(pidfile, "/api/status");
 		expect(statusRes.status).toBe(200);
 		expect(
-			writeSpy.mock.calls.some((call) =>
-				String(call[0]).includes("[plugin:throwing] failed to register: boom"),
+			writeSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("[plugin:throwing]") &&
+					String(call[0]).includes("failed to register: boom"),
 			),
 		).toBe(true);
 
 		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+});
+
+describe("runManager manual process control", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-manual-control-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	async function postAction(
+		pidfile: { controlPort: number; controlToken: string },
+		action: "stop" | "restart",
+		name: string,
+	): Promise<Response> {
+		return fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/${action}?name=${name}`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+	}
+
+	async function fetchStatus(pidfile: {
+		controlPort: number;
+		controlToken: string;
+	}): Promise<Response> {
+		return fetch(`http://127.0.0.1:${pidfile.controlPort}/api/status`, {
+			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+		});
+	}
+
+	it("stops one process by name via the control server, leaving the others (and the daemon) running", async () => {
+		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+		const onePid = pidfileWorker(pidfilePath, "one")?.pid as number;
+
+		expect((await postAction(pidfile, "stop", "one")).status).toBe(200);
+		await waitFor(() => !isPidAlive(onePid));
+
+		expect((await fetchStatus(pidfile)).status).toBe(200);
+		expect(isPidAlive(pidfileWorker(pidfilePath, "two")?.pid as number)).toBe(
+			true,
+		);
+
+		// stopFromPidfile, called in-process (as every test here does), can't tree-kill its own
+		// pid - it relies on the manager's natural "every worker has exited" shutdown, which stays
+		// deliberately suppressed while anything is manually-stopped (that's the very behavior this
+		// suite is testing). Bring "one" back first so cleanup's stopFromPidfile has a clean exit
+		// cascade to trigger, like every other test in this file gets for free.
+		await postAction(pidfile, "restart", "one");
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("does not shut the daemon down when the only configured process is manually stopped", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		expect((await postAction(pidfile, "stop", "solo")).status).toBe(200);
+
+		// Give shutdownIfEveryWorkerIsDone a moment to (wrongly) fire, if it were going to.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(existsSync(pidfilePath)).toBe(true);
+		expect((await fetchStatus(pidfile)).status).toBe(200);
+
+		// See the comment in the test above - bring "solo" back so cleanup can trigger a real exit.
+		await postAction(pidfile, "restart", "solo");
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("restarts a plain (non-watched) process by name, giving it a fresh pid", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const solo = pidfileWorker(pidfilePath, "solo");
+			return solo !== undefined && isPidAlive(solo.pid);
+		});
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		const before = pidfileWorker(pidfilePath, "solo")?.pid;
+
+		expect((await postAction(pidfile, "restart", "solo")).status).toBe(200);
+
+		const after = pidfileWorker(pidfilePath, "solo")?.pid;
+		expect(after).not.toBe(before);
+		expect(isPidAlive(after as number)).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("cascades to a dependsOn dependent after a manual restart, same as a watch-triggered one would", async () => {
+		const configs = [
+			keepAliveConfig("api"),
+			dependentConfig("client", ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		const clientBefore = pidfileWorker(pidfilePath, "client")?.pid;
+
+		expect((await postAction(pidfile, "restart", "api")).status).toBe(200);
+
+		await waitFor(
+			() => pidfileWorker(pidfilePath, "client")?.pid !== clientBefore,
+			{ timeoutMs: 10000 },
+		);
+		expect(
+			isPidAlive(pidfileWorker(pidfilePath, "client")?.pid as number),
+		).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("returns 409 busy for a second restart of the same name while the first is still running its onRestart hook", async () => {
+		const configs = [
+			{
+				...keepAliveConfig("api"),
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "slow-hook.js"), "500"],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const api = pidfileWorker(pidfilePath, "api");
+			return api !== undefined && isPidAlive(api.pid);
+		});
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		const first = postAction(pidfile, "restart", "api");
+		// Long enough after restartProcessByName's synchronous restarting.add(), well before the
+		// 500ms hook finishes - the second call should land squarely in the busy window.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect((await postAction(pidfile, "restart", "api")).status).toBe(409);
+		expect((await first).status).toBe(200);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("returns 404 for an unknown process name on both stop and restart", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		expect((await postAction(pidfile, "stop", "ghost")).status).toBe(404);
+		expect((await postAction(pidfile, "restart", "ghost")).status).toBe(404);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("restarting a manually-stopped process brings it back and un-marks it", async () => {
+		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		expect((await postAction(pidfile, "stop", "one")).status).toBe(200);
+		await waitFor(
+			() => !isPidAlive(pidfileWorker(pidfilePath, "one")?.pid as number),
+		);
+
+		expect((await postAction(pidfile, "restart", "one")).status).toBe(200);
+		expect(isPidAlive(pidfileWorker(pidfilePath, "one")?.pid as number)).toBe(
+			true,
+		);
+
+		// "one" is no longer manually-stopped after being restarted - stopping "two" next (the
+		// only *other* process) must not be mistaken for "everyone's finished" and shut the daemon
+		// down, since "one" is genuinely alive and running, not just excluded via the flag.
+		expect((await postAction(pidfile, "stop", "two")).status).toBe(200);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(existsSync(pidfilePath)).toBe(true);
+
+		// See the comment in this describe block's first test - bring "two" back too, so cleanup's
+		// stopFromPidfile (in-process, can't kill its own pid) has a real exit cascade to trigger.
+		await postAction(pidfile, "restart", "two");
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 10000);

@@ -6,6 +6,9 @@ export default defineConfig({
 		dir: ".braid/logs",
 	},
 	foreground: false,
+	// Check .braid/daemon.log (or the terminal, under --foreground) for the dashboard's
+	// open-this-URL line once the daemon's up.
+	plugins: ["@aip-tech/braid-plugin-ui"],
 	processes: [
 		{
 			// Plain `watch`, no hooks. Edit src/web.ts and save to see it restart.

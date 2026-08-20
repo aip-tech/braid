@@ -19,12 +19,13 @@ import {
 	registerPlugin,
 	safeEmit,
 } from "./plugin-runtime.js";
-import { linePrefixer } from "./prefix.js";
+import { braidTag, linePrefixer } from "./prefix.js";
 import type {
 	BraidConfig,
 	Pidfile,
 	PidfileWorker,
 	PluginConfigEntry,
+	ProcessActionResult,
 	ProcessConfig,
 	RestartHook,
 	WorkerStatusMessage,
@@ -211,6 +212,10 @@ export async function runManager(
 	const pidfileWorkers: PidfileWorker[] = [];
 	// Dependent names currently mid stop/hook/restart cycle, so an overlapping trigger is skipped.
 	const restarting = new Set<string>();
+	// Names deliberately stopped via stopProcessByName (not a crash, not a clean one-shot exit) -
+	// excluded from shutdownIfEveryWorkerIsDone's "everyone finished naturally" check, so stopping
+	// the only (or last) running process doesn't take the whole daemon down with it.
+	const manuallyStopped = new Set<string>();
 	// Process names whose "restart" message has fired but whose matching "started" hasn't yet -
 	// onRestart/dependsOn cascades wait here, rather than on "restart" itself, see handleFreshStart.
 	const awaitingFreshStart = new Set<string>();
@@ -236,6 +241,8 @@ export async function runManager(
 		controlServer,
 		getWorkers,
 		emitter,
+		stopProcess: (name) => stopProcessByName(name),
+		restartProcess: (name) => restartProcessByName(name),
 	});
 
 	// Options per core plugin, by name - not every core plugin needs config.
@@ -261,6 +268,14 @@ export async function runManager(
 		);
 	}
 	const { port: controlPort } = await controlServer.listen();
+	// Fired once, after every plugin has already had a chance to register an "controlServerReady"
+	// listener during its own register() - lets a plugin serving browser content (e.g. a web UI)
+	// construct and log a self-referencing URL without needing listen() reordered earlier.
+	void safeEmit(emitter, "controlServerReady", {
+		type: "controlServerReady",
+		port: controlPort,
+		token: controlServer.token,
+	});
 	const managerStartedAt = new Date().toISOString();
 
 	function upsertWorkerRecord(name: string, pid: number): void {
@@ -441,7 +456,7 @@ export async function runManager(
 	 * daemon.log, invisible to anyone just running `braid logs --follow`.
 	 */
 	function emitDiagnostic(config: ProcessConfig, message: string): void {
-		process.stderr.write(`[braid] "${config.name}": ${message}\n`);
+		process.stderr.write(`${braidTag()} "${config.name}": ${message}\n`);
 		logToProcess(config, message);
 	}
 
@@ -507,7 +522,7 @@ export async function runManager(
 			}
 			if (message.type === "crash" && !shuttingDown) {
 				process.stderr.write(
-					`[braid] "${config.name}" crashed, stopping all processes\n`,
+					`${braidTag()} "${config.name}" crashed, stopping all processes\n`,
 				);
 				void safeEmit(emitter, "processCrash", {
 					type: "processCrash",
@@ -520,7 +535,7 @@ export async function runManager(
 		child.on("error", (error) => {
 			if (!shuttingDown) {
 				process.stderr.write(
-					`[braid] "${config.name}" failed to start: ${error.message}\n`,
+					`${braidTag()} "${config.name}" failed to start: ${error.message}\n`,
 				);
 				void safeEmit(emitter, "processCrash", {
 					type: "processCrash",
@@ -551,7 +566,12 @@ export async function runManager(
 		const everyWorkerExited = [...children.values()].every(
 			(child) => child.exitCode !== null || child.signalCode !== null,
 		);
-		if (everyWorkerExited) void shutdown(0);
+		if (!everyWorkerExited) return;
+		// A process deliberately stopped via stopProcessByName isn't "finished on its own" - leave
+		// the daemon (and its control server) up so it can still be restarted later, rather than
+		// tearing down out from under whatever's watching it (e.g. a web UI).
+		if (manuallyStopped.size > 0) return;
+		void shutdown(0);
 	}
 
 	/**
@@ -639,8 +659,16 @@ export async function runManager(
 	 * hook keeps failing, since a dependent's own hook would otherwise run against whatever the
 	 * failed hook was supposed to freshen up. A `readyPattern` that never matches is logged and
 	 * treated as "proceed anyway" - it's a best-effort signal, not a hard gate.
+	 *
+	 * `lockHeld` is set by a caller (restartProcessByName) that already holds `restarting` for
+	 * `config.name` across its own entire stop->respawn->here sequence - skips re-acquiring (and
+	 * releasing) it here so the guard actually spans the whole operation instead of leaving a gap
+	 * between the respawn and this function's own hook-phase lock, or double-acquiring and no-op'ing.
 	 */
-	async function handleFreshStart(config: ProcessConfig): Promise<void> {
+	async function handleFreshStart(
+		config: ProcessConfig,
+		{ lockHeld = false }: { lockHeld?: boolean } = {},
+	): Promise<void> {
 		if (shuttingDown) return;
 		if (config.readyPattern) {
 			const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
@@ -665,8 +693,10 @@ export async function runManager(
 		}
 		// Shares `restarting` with restartDependent's dependent-keyed guard: both mean "don't
 		// start another restart cycle for this same process name while one's already in flight."
-		if (restarting.has(config.name)) return;
-		restarting.add(config.name);
+		if (!lockHeld) {
+			if (restarting.has(config.name)) return;
+			restarting.add(config.name);
+		}
 		try {
 			const ok = await runHookWithRetries(config.name, config.color, hook);
 			if (!ok) {
@@ -677,10 +707,63 @@ export async function runManager(
 				return;
 			}
 		} finally {
-			restarting.delete(config.name);
-			shutdownIfEveryWorkerIsDone();
+			if (!lockHeld) {
+				restarting.delete(config.name);
+				shutdownIfEveryWorkerIsDone();
+			}
 		}
 		onProcessRestarted(config.name);
+	}
+
+	/** Stops one named process. Returns "unknown" if it isn't configured or isn't currently
+	 * running, "busy" if a restart is already in progress for it. The whole daemon auto-shuts-down
+	 * once every process has exited, unless this (or another) name is manually stopped - see
+	 * `manuallyStopped`/`shutdownIfEveryWorkerIsDone`. */
+	async function stopProcessByName(name: string): Promise<ProcessActionResult> {
+		const config = configsByName.get(name);
+		if (!config) return "unknown";
+		if (restarting.has(name)) return "busy";
+		const current = children.get(name);
+		if (!current || current.exitCode !== null || current.signalCode !== null) {
+			return "unknown";
+		}
+		manuallyStopped.add(name);
+		logToProcess(config, "stopping (manual stop)");
+		await stopChild(current);
+		return "ok";
+	}
+
+	/**
+	 * Stops and respawns one named process (a full outer-worker re-fork, same as
+	 * `restartDependent`'s own respawn), then runs it through the exact same
+	 * readyPattern-wait/onRestart-hook/dependent-cascade sequence a watch-triggered restart gets, via
+	 * `handleFreshStart`. Held under `restarting` for the whole operation (see `handleFreshStart`'s
+	 * `lockHeld` param) so a second concurrent call for the same name - another manual restart, or a
+	 * `dependsOn` cascade - can't stop/respawn out from under this one; it just gets "busy" instead.
+	 */
+	async function restartProcessByName(
+		name: string,
+	): Promise<ProcessActionResult> {
+		const config = configsByName.get(name);
+		if (!config) return "unknown";
+		if (shuttingDown || restarting.has(name)) return "busy";
+		restarting.add(name);
+		try {
+			manuallyStopped.delete(name);
+			const current = children.get(name);
+			if (current && current.exitCode === null && current.signalCode === null) {
+				logToProcess(config, "stopping (manual restart)");
+				await stopChild(current);
+			}
+			if (shuttingDown) return "busy";
+			spawnWorker(config);
+			rewritePidfile();
+			await handleFreshStart(config, { lockHeld: true });
+			return "ok";
+		} finally {
+			restarting.delete(name);
+			shutdownIfEveryWorkerIsDone();
+		}
 	}
 
 	for (const config of configs) {

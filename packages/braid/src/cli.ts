@@ -18,6 +18,7 @@ import {
 	stopFromPidfile,
 } from "./manager.js";
 import { siblingModulePath, sourceExecArgv } from "./module-path.js";
+import { braidTag } from "./prefix.js";
 import type {
 	BraidConfig,
 	DaemonHandshakeMessage,
@@ -238,6 +239,41 @@ async function followLogs(pidfile: Pidfile): Promise<void> {
 }
 
 /**
+ * Calls the running daemon's per-process stop/restart route for `name`. Unlike bare `stop`
+ * (which falls back to killing PIDs straight from the pidfile), there's no fallback here - a
+ * per-name operation needs the manager's own in-process state (dependents, in-flight guards),
+ * not just a PID to signal - so an unreachable daemon is reported as a clear failure instead.
+ */
+async function postProcessAction(
+	pidfile: Pidfile,
+	action: "stop" | "restart",
+	name: string,
+): Promise<{ ok: boolean; message: string }> {
+	const url = new URL(
+		`http://127.0.0.1:${pidfile.controlPort}/api/processes/${action}`,
+	);
+	url.searchParams.set("name", name);
+	try {
+		const response = await fetch(url, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+		});
+		const text = (await response.text()).trim();
+		return {
+			ok: response.ok,
+			message: text || `HTTP ${response.status}`,
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			message: `couldn't reach the running daemon's control server (it may have crashed) - ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
+}
+
+/**
  * Runs every configured process attached to this terminal instead of forking a background daemon.
  * Ctrl-C is handled by runManager's own SIGINT listener, which stops every process before this
  * resolves.
@@ -256,7 +292,7 @@ async function runForeground(
 		cwd,
 		onReady: () => {
 			console.log(
-				`braid: running in foreground (pid ${process.pid}). Press Ctrl-C to stop.`,
+				`${braidTag()} running in foreground (pid ${process.pid}). Press Ctrl-C to stop.`,
 			);
 			const running = findRunningPidfile(pidfilePath);
 			if (running) following = followLogs(running);
@@ -287,10 +323,10 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			}
 			const outcome = await startDaemon(config, configPath, pidfilePath, cwd);
 			if (!outcome.ok) {
-				console.error(`braid: ${outcome.message}`);
+				console.error(`${braidTag()} ${outcome.message}`);
 				return 1;
 			}
-			console.log(`braid: started (pid ${outcome.pid})`);
+			console.log(`${braidTag()} started (pid ${outcome.pid})`);
 			return 0;
 		}
 		case "logs": {
@@ -315,7 +351,9 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 					signal: controller.signal,
 				});
 				if (!response.ok) {
-					console.error(`braid: ${response.status} ${await response.text()}`);
+					console.error(
+						`${braidTag()} ${response.status} ${await response.text()}`,
+					);
 					return 1;
 				}
 				if (response.body) {
@@ -333,6 +371,22 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			}
 		}
 		case "stop": {
+			if (processName) {
+				const running = findRunningPidfile(pidfilePath);
+				if (!running) {
+					console.log("Nothing running.");
+					return 0;
+				}
+				const { ok, message } = await postProcessAction(
+					running,
+					"stop",
+					processName,
+				);
+				console.log(
+					ok ? `Stopped: ${processName}` : `${braidTag()} ${message}`,
+				);
+				return ok ? 0 : 1;
+			}
 			const stopped = await stopFromPidfile(pidfilePath);
 			console.log(
 				stopped.length > 0
@@ -340,6 +394,26 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 					: "Nothing running.",
 			);
 			return 0;
+		}
+		case "restart": {
+			if (!processName) {
+				console.error("Usage: braid restart <name> [--config <path>]");
+				return 1;
+			}
+			const running = findRunningPidfile(pidfilePath);
+			if (!running) {
+				console.log("Nothing running.");
+				return 0;
+			}
+			const { ok, message } = await postProcessAction(
+				running,
+				"restart",
+				processName,
+			);
+			console.log(
+				ok ? `Restarted: ${processName}` : `${braidTag()} ${message}`,
+			);
+			return ok ? 0 : 1;
 		}
 		case "status": {
 			const statuses = statusFromPidfile(pidfilePath);
@@ -356,7 +430,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 		}
 		default: {
 			console.error(
-				"Usage: braid <start|stop|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
+				"Usage: braid <start|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
 			);
 			return 1;
 		}

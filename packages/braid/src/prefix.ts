@@ -15,6 +15,21 @@ export function colorize(text: string, color?: string): string {
 	return code ? `\x1b[${code}m${text}\x1b[0m` : text;
 }
 
+// Every process gets its own configured color for its "[name]" prefix - braid's own messages
+// (and plugins') use one fixed, neutral color instead, so they read as clearly "not a process"
+// wherever they appear alongside real process output (most visibly interleaved in `--foreground`).
+const INTERNAL_TAG_COLOR = "gray";
+
+/** The tag `emitDiagnostic`/crash/failure messages use: `colorize("[braid]", "gray")`. */
+export function braidTag(): string {
+	return colorize("[braid]", INTERNAL_TAG_COLOR);
+}
+
+/** The tag a plugin's own `ctx.log()` output uses: `colorize('[plugin:name]', "gray")`. */
+export function pluginTag(pluginName: string): string {
+	return colorize(`[plugin:${pluginName}]`, INTERNAL_TAG_COLOR);
+}
+
 export type LinePrefixer = {
 	/** Buffers partial lines across chunks and writes each complete line to `target`, prefixed. */
 	write(chunk: Buffer | string): void;

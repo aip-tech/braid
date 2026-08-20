@@ -23,6 +23,18 @@ const MIME_TYPES: Record<string, string> = {
 
 type StaticEntry = { prefix: string; dir: string };
 
+/** Reads `name`'s value out of a raw `Cookie` request header, if present. */
+function readCookie(req: IncomingMessage, name: string): string | undefined {
+	const header = req.headers.cookie;
+	if (!header) return undefined;
+	for (const part of header.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq === -1) continue;
+		if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+	}
+	return undefined;
+}
+
 export type ControlServer = {
 	registerRoute(method: string, path: string, handler: RouteHandler): void;
 	registerStatic(prefix: string, dir: string): void;
@@ -38,6 +50,11 @@ export function createControlServer(): ControlServer {
 	const routes = new Map<string, RouteHandler>();
 	const staticEntries: StaticEntry[] = [];
 	const upgrades = new Map<string, UpgradeHandler>();
+	// Set once listen() resolves and the real port is known. Scoped by port (not a bare name)
+	// because a browser's cookie jar for "127.0.0.1" isn't port-scoped (RFC 6265 has no port in its
+	// scoping) - two braid daemons for two different projects, each on their own ephemeral port,
+	// would otherwise silently overwrite each other's cookie.
+	let cookieName = "braid_token";
 
 	async function serveStatic(
 		entry: StaticEntry,
@@ -58,7 +75,14 @@ export function createControlServer(): ControlServer {
 		}
 		const contentType =
 			MIME_TYPES[extname(filePath)] ?? "application/octet-stream";
-		res.writeHead(200, { "content-type": contentType });
+		const headers: Record<string, string> = { "content-type": contentType };
+		// Belt-and-suspenders for the brief window (before the query-token redirect below fires)
+		// where a served HTML page's URL might still carry a `?token=` - an outbound request from
+		// that page (an <img>/beacon/external link) shouldn't leak it via Referer.
+		if (contentType.startsWith("text/html")) {
+			headers["referrer-policy"] = "no-referrer";
+		}
+		res.writeHead(200, headers);
 		createReadStream(filePath).pipe(res);
 	}
 
@@ -67,12 +91,41 @@ export function createControlServer(): ControlServer {
 		res: ServerResponse,
 	): Promise<void> {
 		const url = new URL(req.url ?? "/", "http://localhost");
-		if (req.headers.authorization !== `Bearer ${token}`) {
+		const method = req.method ?? "GET";
+
+		const headerToken = req.headers.authorization?.startsWith("Bearer ")
+			? req.headers.authorization.slice("Bearer ".length)
+			: undefined;
+		const cookieToken = readCookie(req, cookieName);
+		const queryToken = url.searchParams.get("token") ?? undefined;
+		const authenticated = headerToken === token || cookieToken === token;
+		// Only treated as a *fresh* query-token auth if header/cookie didn't already cover it - a
+		// stale `?token=` alongside a valid cookie shouldn't re-trigger the redirect below.
+		const viaQueryOnly = !authenticated && queryToken === token;
+		if (!authenticated && !viaQueryOnly) {
 			res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
 			return;
 		}
 
-		const routeHandler = routes.get(`${req.method ?? "GET"} ${url.pathname}`);
+		if (viaQueryOnly) {
+			// A plain browser navigation can't send an Authorization header, so a one-time `?token=`
+			// (mirroring the upgrade handler's own query-token carve-out below) establishes a session
+			// cookie instead - the page's own subsequent fetch()es then authenticate via that cookie
+			// without the secret needing to live in every URL.
+			res.setHeader(
+				"Set-Cookie",
+				`${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict`,
+			);
+			if (method === "GET") {
+				// Strip the token from the visible URL/history now that the cookie carries it - the
+				// browser re-navigates, this time cookie-authenticated.
+				url.searchParams.delete("token");
+				res.writeHead(302, { location: `${url.pathname}${url.search}` }).end();
+				return;
+			}
+		}
+
+		const routeHandler = routes.get(`${method} ${url.pathname}`);
 		if (routeHandler) {
 			try {
 				await routeHandler(req, res);
@@ -149,6 +202,7 @@ export function createControlServer(): ControlServer {
 						reject(new Error("braid: control server failed to bind a port"));
 						return;
 					}
+					cookieName = `braid_token_${address.port}`;
 					resolve({ port: address.port });
 				});
 			});

@@ -53,6 +53,14 @@ CI runs the same four steps on every push and PR; a green CI run is required bef
 - Sanity-check the package before publishing: `cd packages/braid && npm publish --dry-run` - review the tarball contents list (it should be `dist/`, `package.json`, `README.md`, `CHANGELOG.md`, `LICENSE` and nothing else) and confirm the version isn't already published.
 - `npm publish` (from `packages/braid`) runs `prepublishOnly` (a fresh build) automatically first.
 
+`packages/ui-plugin` (`@aip-tech/braid-plugin-ui`) is released independently, on its own version
+number - it doesn't need to move in lockstep with `@aip-tech/braid`. Same process, from its own
+directory: bump its `package.json` version, add a `packages/ui-plugin/CHANGELOG.md` entry,
+`npm publish --dry-run` (tarball should be `dist/` including `dist/public/` for the built
+frontend, plus `package.json`/`README.md`/`CHANGELOG.md`/`LICENSE`), then `npm publish`. If a
+braid release adds something this plugin depends on (a new `PluginContext` method, a new
+lifecycle event), bump its `peerDependencies["@aip-tech/braid"]` range to match.
+
 ## Reporting bugs / requesting features
 
 Use the issue templates under `.github/ISSUE_TEMPLATE/`. For security issues, see `SECURITY.md` instead of opening a public issue.
