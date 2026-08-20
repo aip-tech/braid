@@ -4,6 +4,7 @@ export default defineConfig({
 	logs: {
 		maxSizeBytes: DEFAULT_LOG_MAX_SIZE_BYTES,
 		dir: ".braid/logs",
+		timestamps: true,
 	},
 	foreground: false,
 	// Check .braid/daemon.log (or the terminal, under --foreground) for the dashboard's

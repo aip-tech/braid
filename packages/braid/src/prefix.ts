@@ -37,14 +37,33 @@ export type LinePrefixer = {
 	flush(): void;
 };
 
+function pad(n: number, width = 2): string {
+	return String(n).padStart(width, "0");
+}
+
+/** `HH:MM:SS.mmm` in local time - no date, since a rotated log's total retention is bounded to a
+ *  couple of megabytes either side of "now" (see DEFAULT_LOG_MAX_SIZE_BYTES), never spans enough
+ *  real time for the date to matter the way it would for long-term-archived logs. */
+function formatTimestamp(date: Date): string {
+	return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
+
 /** `sink` receives each already-prefixed, newline-terminated line - a real stream's `write`, or anything else. */
 export function linePrefixer(
 	sink: (line: string) => void,
 	name: string,
 	color?: string,
+	timestamps = false,
 ): LinePrefixer {
-	const prefix = `${colorize(`[${name}]`, color)} `;
+	const namePrefix = `${colorize(`[${name}]`, color)} `;
 	let buffer = "";
+
+	function prefixFor(): string {
+		if (!timestamps) return namePrefix;
+		// Computed per line, not once per chunk/flush - several lines can land in one chunk, each
+		// deserving its own real emission time rather than all sharing the chunk's arrival time.
+		return `${colorize(formatTimestamp(new Date()), "gray")} ${namePrefix}`;
+	}
 
 	return {
 		write(chunk) {
@@ -52,12 +71,12 @@ export function linePrefixer(
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) {
-				sink(`${prefix}${line}\n`);
+				sink(`${prefixFor()}${line}\n`);
 			}
 		},
 		flush() {
 			if (buffer.length > 0) {
-				sink(`${prefix}${buffer}\n`);
+				sink(`${prefixFor()}${buffer}\n`);
 				buffer = "";
 			}
 		},

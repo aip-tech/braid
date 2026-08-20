@@ -384,11 +384,13 @@ export async function runManager(
 				(line) => emitOutput("stdout", line),
 				logName,
 				color,
+				options.logs?.timestamps,
 			);
 			const stderrPrefixer = linePrefixer(
 				(line) => emitOutput("stderr", line),
 				logName,
 				color,
+				options.logs?.timestamps,
 			);
 
 			const hookChild = spawn(hook.command, hook.args ?? [], {
@@ -445,6 +447,7 @@ export async function runManager(
 				}),
 			config.name,
 			config.color,
+			options.logs?.timestamps,
 		);
 		prefixer.write(`braid: ${message}`);
 		prefixer.flush();
@@ -467,6 +470,9 @@ export async function runManager(
 				...process.env,
 				...config.env,
 				BRAID_CONFIG: JSON.stringify(config),
+				// A separate env var rather than folding into BRAID_CONFIG - it's a global logs
+				// setting, not part of this one process's own ProcessConfig shape.
+				BRAID_LOG_TIMESTAMPS: options.logs?.timestamps ? "1" : "",
 			},
 			execArgv: sourceExecArgv(import.meta.url),
 			stdio: ["ignore", "pipe", "pipe", "ipc"],

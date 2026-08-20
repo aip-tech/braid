@@ -107,6 +107,13 @@ export type BraidConfig = {
 		dir?: string;
 		/** Size-based rotation backstop, in bytes. @default 5242880 (5MB) */
 		maxSizeBytes?: number;
+		/**
+		 * Prepend a `HH:MM:SS.mmm` timestamp to every log line, in both the log files/API and the
+		 * `[name]` prefix shown in the terminal during `braid start` - they're the same bytes, see
+		 * `prefix.ts`'s `linePrefixer`, so there's no way to enable one without the other.
+		 * @default false
+		 */
+		timestamps?: boolean;
 	};
 	/**
 	 * Run `start` attached to the terminal instead of forking a background daemon. Overridable per

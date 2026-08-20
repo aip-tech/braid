@@ -20,6 +20,13 @@ type Destination = {
 	 *  itself asynchronously, so a still-running process's own output can otherwise arrive in the
 	 *  gap and throw "SonicBoom destroyed" trying to write to it. */
 	ended: boolean;
+	/**
+	 * Bumped on every rotation - lets a `/api/logs/history` cursor (which embeds the generation it
+	 * was issued under) detect whether "current"/"backup" still mean what they meant when the
+	 * client last asked, without a stat()-based staleness check that would false-positive on every
+	 * ordinary append (see the history route below for how a one-generation gap is reinterpreted).
+	 */
+	generation: number;
 };
 
 function rotateFileIfExists(filePath: string): void {
@@ -39,6 +46,39 @@ function tailLines(content: string, lines: number): string {
 	const allLines = content.split("\n");
 	if (allLines.at(-1) === "") allLines.pop();
 	return allLines.length ? `${allLines.slice(-lines).join("\n")}\n` : "";
+}
+
+// Default page size for /api/logs/history when the client omits `lines`.
+const DEFAULT_HISTORY_PAGE_LINES = 300;
+
+/** A `/api/logs/history` pagination cursor: "lines before index `lineIndex` in `file` (as of
+ *  `generation`) haven't been returned yet." Opaque to the client, round-tripped verbatim. */
+type HistoryCursor = {
+	file: "current" | "backup";
+	generation: number;
+	lineIndex: number;
+};
+
+function encodeCursor(cursor: HistoryCursor): string {
+	return `${cursor.file}:${cursor.generation}:${cursor.lineIndex}`;
+}
+
+function parseCursor(raw: string | null): HistoryCursor | undefined {
+	if (!raw) return undefined;
+	const match = /^(current|backup):(\d+):(\d+)$/.exec(raw);
+	if (!match) return undefined;
+	return {
+		file: match[1] as "current" | "backup",
+		generation: Number.parseInt(match[2], 10),
+		lineIndex: Number.parseInt(match[3], 10),
+	};
+}
+
+function readLogLines(filePath: string): string[] {
+	if (!existsSync(filePath)) return [];
+	const lines = readFileSync(filePath, "utf8").split("\n");
+	if (lines.at(-1) === "") lines.pop();
+	return lines;
 }
 
 export const loggerPlugin: BraidPlugin = {
@@ -86,6 +126,7 @@ export const loggerPlugin: BraidPlugin = {
 				filePath,
 				bytesWritten: 0,
 				ended: false,
+				generation: 0,
 			};
 			destinations.set(name, destination);
 			return destination;
@@ -97,6 +138,7 @@ export const loggerPlugin: BraidPlugin = {
 			renameSync(destination.filePath, `${destination.filePath}.1`);
 			destination.stream.reopen();
 			destination.bytesWritten = 0;
+			destination.generation += 1;
 		}
 
 		const heartbeat = setInterval(() => {
@@ -177,6 +219,111 @@ export const loggerPlugin: BraidPlugin = {
 				registerFollower(key, res);
 			} else {
 				res.end();
+			}
+		});
+
+		// Paginated *older* history, separate from the route above (which stays exactly as-is for
+		// `braid logs --follow` compatibility): the UI loads its initial view and any "scroll up for
+		// more" pages from here, then only uses the plain route's `follow=true` for the live tail
+		// going forward. JSON, not a kept-open stream - each call answers once and closes.
+		ctx.registerRoute("GET", "/api/logs/history", (req, res) => {
+			const url = new URL(req.url ?? "/", "http://localhost");
+			const name = url.searchParams.get("name");
+			const pageSize =
+				parseLines(url.searchParams) ?? DEFAULT_HISTORY_PAGE_LINES;
+
+			if (!name || !ctx.getProcesses().some((p) => p.name === name)) {
+				res
+					.writeHead(404, { "content-type": "text/plain" })
+					.end(`Unknown process "${name}"`);
+				return;
+			}
+
+			function respond(lines: string[], cursor: HistoryCursor | null): void {
+				res.writeHead(200, { "content-type": "application/json" });
+				res.end(
+					JSON.stringify({
+						lines,
+						cursor: cursor ? encodeCursor(cursor) : null,
+					}),
+				);
+			}
+
+			const destination = destinations.get(name);
+			const currentGeneration = destination?.generation ?? 0;
+			const currentPath = destination?.filePath ?? join(dir, `${name}.log`);
+			const backupPath = `${currentPath}.1`;
+
+			const cursor = parseCursor(url.searchParams.get("before"));
+
+			if (!cursor) {
+				const lines = readLogLines(currentPath);
+				const page = lines.slice(-pageSize);
+				const consumedFrom = lines.length - page.length;
+				if (consumedFrom > 0) {
+					respond(page, {
+						file: "current",
+						generation: currentGeneration,
+						lineIndex: consumedFrom,
+					});
+				} else if (existsSync(backupPath)) {
+					respond(page, {
+						file: "backup",
+						generation: currentGeneration,
+						lineIndex: readLogLines(backupPath).length,
+					});
+				} else {
+					respond(page, null);
+				}
+				return;
+			}
+
+			// A cursor only means what it says as of the generation it was issued under - a rotation
+			// renames "current" to "backup" (replacing whatever backup existed), so a cursor still
+			// pointing at "current" one generation back now refers to what's *become* "backup" (same
+			// bytes, same line indices, just renamed) - reinterpreted below rather than served as
+			// though nothing happened. Anything staler than that (two+ rotations since the cursor was
+			// issued, or a "backup" cursor whose generation no longer matches) refers to content
+			// that's genuinely gone - answered as "nothing more" rather than risking wrong data.
+			let targetFile = cursor.file;
+			if (
+				cursor.file === "current" &&
+				cursor.generation !== currentGeneration
+			) {
+				if (cursor.generation === currentGeneration - 1) {
+					targetFile = "backup";
+				} else {
+					respond([], null);
+					return;
+				}
+			} else if (
+				cursor.file === "backup" &&
+				cursor.generation !== currentGeneration
+			) {
+				respond([], null);
+				return;
+			}
+
+			const targetPath = targetFile === "current" ? currentPath : backupPath;
+			const lines = readLogLines(targetPath);
+			const endIndex = Math.min(cursor.lineIndex, lines.length);
+			const startIndex = Math.max(0, endIndex - pageSize);
+			const page = lines.slice(startIndex, endIndex);
+
+			if (startIndex > 0) {
+				respond(page, {
+					file: targetFile,
+					generation: currentGeneration,
+					lineIndex: startIndex,
+				});
+			} else if (targetFile === "current" && existsSync(backupPath)) {
+				respond(page, {
+					file: "backup",
+					generation: currentGeneration,
+					lineIndex: readLogLines(backupPath).length,
+				});
+			} else {
+				respond(page, null);
 			}
 		});
 	},

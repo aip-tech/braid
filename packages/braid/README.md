@@ -31,7 +31,7 @@ export default defineConfig({
 - `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
-- `logs`: `{ dir, maxSizeBytes }` — see [Logs](#logs).
+- `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
 - `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
 
 Full field list and defaults: [`src/types.ts`](./src/types.ts) (`ProcessConfig`, `BraidConfig`).
@@ -123,6 +123,8 @@ Without `readyPattern`, dependents are held off only until `api` has re-spawned 
 ## Logs
 
 Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a watch-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`; a `dependsOn`/`onRestart`/`beforeRestart` hook that keeps failing, or a `readyPattern` that never matches, is also logged into the relevant process's own log. A process also gets a `braid: stopping` line right before braid stops it for a `dependsOn` cascade or a watch-triggered restart (not yet for a plain `braid stop`).
+
+Set `logs.timestamps: true` to prepend a dimmed `HH:MM:SS.mmm` to every line, before the `[name]` tag. It's the same bytes wherever that line shows up — the log file, `braid logs`, the web UI, and the terminal during `braid start` all get it together. @default `false`
 
 ## Plugins
 

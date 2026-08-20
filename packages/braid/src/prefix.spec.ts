@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { braidTag, colorize, linePrefixer, pluginTag } from "./prefix.js";
 
 function collectingSink(): { lines: string[]; sink: (line: string) => void } {
@@ -73,5 +73,51 @@ describe("linePrefixer", () => {
 		prefixer.flush();
 
 		expect(lines).toEqual(["[api] complete line\n"]);
+	});
+
+	describe("timestamps", () => {
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("prepends a gray HH:MM:SS.mmm timestamp before the name prefix when enabled", () => {
+			vi.setSystemTime(new Date(2026, 0, 1, 9, 5, 3, 42));
+			const { lines, sink } = collectingSink();
+			const prefixer = linePrefixer(sink, "api", "blue", true);
+
+			prefixer.write("hello\n");
+
+			expect(lines).toEqual([
+				`${colorize("09:05:03.042", "gray")} ${colorize("[api]", "blue")} hello\n`,
+			]);
+		});
+
+		it("stamps each line in a multi-line chunk independently, not once per chunk", () => {
+			vi.setSystemTime(new Date(2026, 0, 1, 9, 5, 3, 0));
+			const { lines, sink } = collectingSink();
+			const prefixer = linePrefixer(sink, "api", undefined, true);
+
+			prefixer.write("first\n");
+			vi.setSystemTime(new Date(2026, 0, 1, 9, 5, 4, 0));
+			prefixer.write("second\n");
+
+			expect(lines).toEqual([
+				`${colorize("09:05:03.000", "gray")} [api] first\n`,
+				`${colorize("09:05:04.000", "gray")} [api] second\n`,
+			]);
+		});
+
+		it("leaves the prefix unchanged when timestamps is omitted (default false)", () => {
+			const { lines, sink } = collectingSink();
+			const prefixer = linePrefixer(sink, "api", "blue");
+
+			prefixer.write("hello\n");
+
+			expect(lines).toEqual([`${colorize("[api]", "blue")} hello\n`]);
+		});
 	});
 });

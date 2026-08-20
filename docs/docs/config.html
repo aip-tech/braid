@@ -195,6 +195,7 @@ export default defineConfig({
 	logs: {
 		dir: ".braid/logs",   // @default ".braid/logs"
 		maxSizeBytes: 5242880, // @default 5MB
+		timestamps: false,    // @default false
 	},
 });</code></pre>
 					<p>
@@ -204,6 +205,13 @@ export default defineConfig({
 						hook that keeps failing, or a <code>readyPattern</code> that never matches,
 						is also logged into the relevant process's own log &mdash; visible via
 						<code>braid logs</code>/<code>--follow</code>, not just <code>daemon.log</code>.
+					</p>
+					<p>
+						<code>logs.timestamps</code> prepends a dimmed <code>HH:MM:SS.mmm</code> to
+						every line, before the <code>[name]</code> tag. It's the same bytes wherever
+						that line shows up &mdash; a process's log file, the web UI's log view, and
+						the terminal during <code>braid start</code> all get it together, there's no
+						way to enable it in just one place.
 					</p>
 				</section>
 

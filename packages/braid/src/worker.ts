@@ -93,15 +93,20 @@ async function runHookWithRetries(
 }
 
 export function runWorker(config: ProcessConfig): void {
+	// A separate env var rather than a field on ProcessConfig itself - it's a global logs setting
+	// (see RunManagerOptions.logs), not something an individual process's own config carries.
+	const timestamps = process.env.BRAID_LOG_TIMESTAMPS === "1";
 	const stdoutPrefixer = linePrefixer(
 		(line) => process.stdout.write(line),
 		config.name,
 		config.color,
+		timestamps,
 	);
 	const stderrPrefixer = linePrefixer(
 		(line) => process.stderr.write(line),
 		config.name,
 		config.color,
+		timestamps,
 	);
 	const watched = Boolean(config.watch && config.watch.length > 0);
 

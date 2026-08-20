@@ -13,6 +13,7 @@ export function defineConfig(config: BraidConfig): BraidConfig {
 		logs: {
 			...config.logs,
 			maxSizeBytes: config.logs?.maxSizeBytes ?? DEFAULT_LOG_MAX_SIZE_BYTES,
+			timestamps: config.logs?.timestamps ?? false,
 		},
 	};
 }

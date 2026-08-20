@@ -5,6 +5,26 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.4.0] - 2026-08-20
+
+### Added
+
+- `GET /api/logs/history?name=&before=&lines=` - paginated access to a
+  process's older log history, beyond what the existing `follow=true`
+  tail replays. Returns `{ lines, cursor }`; `cursor` is an opaque
+  `<current|backup>:<generation>:<lineIndex>` token, round-tripped via
+  `before` to page further back. Reads only the current log file and its
+  one rotation backup (each capped at `logs.maxSizeBytes`), and
+  correctly re-targets a cursor into the renamed backup file if a
+  rotation happens between calls, rather than serving stale content.
+  Backs `@aip-tech/braid-plugin-ui`'s new scroll-to-load-older history in
+  its per-process log view.
+- `logs.timestamps` config option (`@default false`) - prepends a dimmed
+  `HH:MM:SS.mmm` to every log line. Applied once, in `prefix.ts`'s
+  `linePrefixer`, so the log file, `braid logs`, `@aip-tech/braid-plugin-ui`,
+  and the terminal during `braid start` all get the exact same
+  timestamped bytes - there's no way to enable it in just one of them.
+
 ## [0.3.1] - 2026-08-20
 
 ### Added

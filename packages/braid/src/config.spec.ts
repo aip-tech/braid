@@ -8,7 +8,23 @@ describe("defineConfig", () => {
 			plugins: ["some-plugin"],
 			logs: { maxSizeBytes: 1024 },
 		};
-		expect(defineConfig(config)).toEqual(config);
+		const result = defineConfig(config);
+		expect(result.processes).toEqual(config.processes);
+		expect(result.plugins).toEqual(config.plugins);
+		expect(result.logs?.maxSizeBytes).toBe(1024);
+	});
+
+	it("fills in logs.timestamps as false when omitted", () => {
+		const config = { processes: [{ name: "web", command: "pnpm" }] };
+		expect(defineConfig(config).logs?.timestamps).toBe(false);
+	});
+
+	it("passes an explicit logs.timestamps through unchanged", () => {
+		const config = {
+			processes: [{ name: "web", command: "pnpm" }],
+			logs: { timestamps: true },
+		};
+		expect(defineConfig(config).logs?.timestamps).toBe(true);
 	});
 
 	it("fills in logs.maxSizeBytes when omitted", () => {
