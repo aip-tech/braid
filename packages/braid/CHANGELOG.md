@@ -5,6 +5,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.2.8] - 2026-08-20
+
+### Fixed
+
+- A `braid start --foreground` shutdown could take a stray ~2 extra
+  seconds to actually exit (`SHUTDOWN_EVENT_TIMEOUT_MS`) even after
+  every process had already stopped - the `setTimeout` backing that
+  race's fallback branch was never cleared once the race resolved via
+  the other branch, so the still-pending timer kept the event loop (and
+  the whole process) alive until it eventually fired on its own.
+  Invisible in a daemonized `start` (the CLI already returns before
+  this ever runs) and in tests (`runManager` runs alongside an
+  already-busy test-runner event loop) - only a standalone
+  `--foreground` process's own natural exit was ever actually blocked
+  by it.
+
 ## [0.2.7] - 2026-08-20
 
 ### Added

@@ -321,10 +321,20 @@ export async function runManager(
 			}
 		}
 
+		// The timer backing this race's fallback branch isn't cleared just because the *other*
+		// branch wins - Promise.race abandons the loser's continuation, but the underlying
+		// setTimeout keeps running regardless, holding the event loop (and this whole process)
+		// open for the rest of SHUTDOWN_EVENT_TIMEOUT_MS even after everything else is done.
+		// Invisible in a daemonized `start` (the CLI already returned before this ever runs), but
+		// directly, visibly stalls a `--foreground` Ctrl-C from actually returning control.
+		let shutdownEventTimer: NodeJS.Timeout | undefined;
 		await Promise.race([
 			safeEmit(emitter, "daemonShutdown", { type: "daemonShutdown" }),
-			new Promise((resolve) => setTimeout(resolve, SHUTDOWN_EVENT_TIMEOUT_MS)),
+			new Promise((resolve) => {
+				shutdownEventTimer = setTimeout(resolve, SHUTDOWN_EVENT_TIMEOUT_MS);
+			}),
 		]);
+		clearTimeout(shutdownEventTimer);
 
 		await Promise.all([
 			...[...children.values()].map((child) => stopChild(child)),

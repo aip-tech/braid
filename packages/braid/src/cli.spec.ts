@@ -1,3 +1,4 @@
+import { fork } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -20,6 +21,7 @@ import {
 	runCli,
 } from "./cli.js";
 import { stopFromPidfile } from "./manager.js";
+import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__");
@@ -387,6 +389,47 @@ describe("runCli", () => {
 
 		await stopFromPidfile(pidfilePath);
 		logSpy.mockRestore();
+	}, 10000);
+
+	it("exits a real --foreground process promptly on SIGINT, not after SHUTDOWN_EVENT_TIMEOUT_MS", async () => {
+		// runCli("start", "--foreground") in-process (as the other foreground tests do) can't catch
+		// this: the bug was a dangling setTimeout that only blocks a *standalone* process's own
+		// natural exit, invisible when runManager just runs alongside a busy test-runner event
+		// loop. This forks cli.ts as a real separate process, the same way `start` forks daemon.ts.
+		const child = fork(
+			siblingModulePath(import.meta.url, "cli"),
+			["start", "--foreground"],
+			{
+				cwd: tmpDir,
+				execArgv: sourceExecArgv(import.meta.url),
+				stdio: ["ignore", "pipe", "pipe", "ipc"],
+			},
+		);
+		try {
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+			await waitFor(() => existsSync(pidfilePath));
+			// runManager writes the pidfile, then calls onReady, then registers its own SIGINT
+			// handler - all synchronous, but "pidfile exists" is observable from this separate
+			// process a hair before "handler registered" is guaranteed to be true. Same class of
+			// gap triggerWatchedRestart settles for elsewhere in this suite.
+			await new Promise((resolve) => setTimeout(resolve, 100));
+
+			const triggeredAt = Date.now();
+			child.kill("SIGINT");
+			const [code, signal] = await new Promise<
+				[number | null, NodeJS.Signals | null]
+			>((resolve) => child.once("exit", (c, s) => resolve([c, s])));
+			const elapsedMs = Date.now() - triggeredAt;
+
+			expect(signal).toBeNull();
+			expect(code).toBe(0);
+			// The bug this guards made this take ~SHUTDOWN_EVENT_TIMEOUT_MS (2000ms); a real exit
+			// lands in well under 100ms. Generous margin for slow CI without masking a regression.
+			expect(elapsedMs).toBeLessThan(1000);
+		} finally {
+			if (child.exitCode === null && child.signalCode === null)
+				child.kill("SIGKILL");
+		}
 	}, 10000);
 
 	it("surfaces a useful error, including the daemon.log tail, when the daemon fails to start", async () => {
