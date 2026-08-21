@@ -5,9 +5,11 @@
 	--border: #d8d8d8;
 	--muted: #6b6b6b;
 	--accent: #2563eb;
+	--accent-bg: #dbeafe;
 	--danger: #b91c1c;
 	--danger-bg: #fee2e2;
 	--ok: #15803d;
+	--ok-bg: #dcfce7;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -17,9 +19,11 @@
 		--border: #33363d;
 		--muted: #9aa0a6;
 		--accent: #5b9dff;
+		--accent-bg: #16233d;
 		--danger: #ff8585;
 		--danger-bg: #3a1414;
 		--ok: #4ade80;
+		--ok-bg: #0f2a1a;
 	}
 }
 
@@ -116,11 +120,34 @@ th {
 	font-weight: 500;
 }
 
-.status-running {
+/* ---------- Badges (PID, running/stopped) ---------- */
+
+.badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.15rem 0.55rem;
+	border-radius: 999px;
+	font-size: 0.78rem;
+	line-height: 1.4;
+}
+
+.badge-pid {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	background: var(--border);
+	color: var(--muted);
+}
+
+.badge-status {
+	font-weight: 600;
+}
+
+.badge-status.status-running {
+	background: var(--ok-bg);
 	color: var(--ok);
 }
 
-.status-stopped {
+.badge-status.status-stopped {
+	background: var(--border);
 	color: var(--muted);
 }
 
@@ -145,6 +172,46 @@ button:disabled {
 	cursor: default;
 }
 
+/* ---------- Icon buttons (Stop/Restart/Load older) ---------- */
+
+/* `:not([hidden])` rather than a bare `display` rule - see .load-older's own comment below for why
+ * an author `display` rule on an element also toggled via the `hidden` attribute is a real footgun
+ * (fixed once already, in 0.2.1). Scoping to :not([hidden]) means this rule simply doesn't exist
+ * while hidden, so there's nothing to out-cascade the UA `[hidden] { display: none }` rule with. */
+.btn-icon:not([hidden]) {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.icon {
+	width: 13px;
+	height: 13px;
+	flex-shrink: 0;
+}
+
+.btn-stop {
+	border-color: var(--danger);
+	color: var(--danger);
+}
+
+.btn-stop:hover:not(:disabled) {
+	background: var(--danger-bg);
+	border-color: var(--danger);
+	color: var(--danger);
+}
+
+.btn-restart {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.btn-restart:hover:not(:disabled) {
+	background: var(--accent-bg);
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
 .row-error {
 	color: var(--danger);
 	font-size: 0.8rem;
@@ -166,6 +233,9 @@ button:disabled {
 }
 
 .detail-back a {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3rem;
 	color: var(--muted);
 	text-decoration: none;
 	font-size: 0.85rem;
@@ -247,13 +317,13 @@ button:disabled {
 	margin: 0;
 }
 
-/* Sized to the virtualizer's own getTotalSize() via inline style - see main.ts. */
+/* Sized to the virtualizer's own getTotalSize() via inline style - see log-controller.ts. */
 .log-pane-inner {
 	position: relative;
 	width: 100%;
 }
 
-/* Positioned via an inline transform (item.start) - see main.ts. */
+/* Positioned via an inline transform (item.start) - see log-controller.ts. */
 .log-line {
 	position: absolute;
 	top: 0;

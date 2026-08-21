@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.3.0] - 2026-08-21
+
+### Changed
+
+- Rewrote the frontend from vanilla DOM manipulation onto **Preact**:
+  routing, the process table, and the detail toolbar are now real
+  components (`app.tsx`, `table-view.tsx`, `detail-view.tsx`). The log
+  pane's virtualizer and streaming logic stayed a plain, framework-
+  agnostic class (`log-controller.ts`, was `main.ts`'s "Log streaming"
+  section) wrapped by a thin component that owns its mount/unmount
+  lifecycle - a headless virtualizer plus hand-rolled DOM writes is the
+  same shape a React/Preact integration reaches for anyway. One side
+  effect: the detail view now mounts/unmounts on navigation instead of
+  being toggled with `hidden`, which removes the old "pane was hidden,
+  belt-and-suspenders refresh on unhide" workaround entirely.
+- The process table and detail toolbar got a visual pass: custom stroke
+  icons on the Stop/Restart/"Load older lines" buttons, Stop styled as a
+  danger action and Restart as an accent one, and PID/status shown as
+  pill badges instead of plain text.
+
 ## [0.2.2] - 2026-08-21
 
 ### Fixed

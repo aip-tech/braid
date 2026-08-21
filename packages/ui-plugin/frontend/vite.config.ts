@@ -10,6 +10,10 @@ export default defineConfig({
 	// prefix (UiPluginOptions.path), not just "/", and a relative base works under all of them
 	// without needing to know the prefix at build time.
 	base: "./",
+	esbuild: {
+		jsx: "automatic",
+		jsxImportSource: "preact",
+	},
 	build: {
 		outDir: resolve(__dirname, "../dist/public"),
 		emptyOutDir: true,
