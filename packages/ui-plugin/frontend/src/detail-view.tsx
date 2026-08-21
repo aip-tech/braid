@@ -1,11 +1,19 @@
-import { formatStarted, type ProcessStatus } from "./api.js";
+import {
+	formatCpu,
+	formatMemory,
+	formatStarted,
+	type HistorySample,
+	type ProcessStatus,
+} from "./api.js";
 import { BackIcon, RestartIcon, StopIcon } from "./icons.js";
 import { LogPane } from "./log-pane.js";
+import { Sparkline } from "./sparkline.js";
 
 type DetailViewProps = {
 	name: string;
 	process: ProcessStatus | undefined;
 	statusLoaded: boolean;
+	history: HistorySample[];
 	pending: Set<string>;
 	rowErrors: Map<string, string>;
 	onAction: (action: "stop" | "restart", name: string) => void;
@@ -15,6 +23,7 @@ export function DetailView({
 	name,
 	process,
 	statusLoaded,
+	history,
 	pending,
 	rowErrors,
 	onAction,
@@ -80,6 +89,28 @@ export function DetailView({
 			<p class="row-error" hidden={!rowError}>
 				{rowError}
 			</p>
+			{history.length > 1 && (
+				<div class="charts">
+					<div class="chart-card">
+						<div class="chart-label">
+							<span>CPU</span>
+							<span class="chart-value">
+								{formatCpu(history[history.length - 1].cpu)}
+							</span>
+						</div>
+						<Sparkline values={history.map((sample) => sample.cpu)} />
+					</div>
+					<div class="chart-card">
+						<div class="chart-label">
+							<span>Memory</span>
+							<span class="chart-value">
+								{formatMemory(history[history.length - 1].memory)}
+							</span>
+						</div>
+						<Sparkline values={history.map((sample) => sample.memory)} />
+					</div>
+				</div>
+			)}
 			<LogPane name={name} />
 		</div>
 	);

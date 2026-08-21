@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { fetchBraidVersion, type ProcessStatus, postAction } from "./api.js";
+import {
+	fetchBraidVersion,
+	type HistorySample,
+	type ProcessStatus,
+	postAction,
+} from "./api.js";
 import { DetailView } from "./detail-view.js";
 import { TableView } from "./table-view.js";
 
 const POLL_INTERVAL_MS = 2000;
+// ~1 minute of history at the poll cadence above - enough for a sparkline to show a real trend
+// without growing unbounded for a long-running dashboard tab.
+const HISTORY_LENGTH = 30;
 
 type Route = { view: "table" } | { view: "detail"; name: string };
 
@@ -31,6 +39,12 @@ export function App() {
 	const route = useRoute();
 	const [processes, setProcesses] = useState<ProcessStatus[]>([]);
 	const [statusLoaded, setStatusLoaded] = useState(false);
+	// Per-process rolling cpu/memory samples, fed to the detail view's sparklines. A fresh Map is
+	// built on every append (not mutated in place) so this state update stands on its own rather
+	// than silently riding on the unrelated setProcesses() call's re-render.
+	const [history, setHistory] = useState<Map<string, HistorySample[]>>(
+		new Map(),
+	);
 	const [banner, setBanner] = useState<string | undefined>(undefined);
 	// Names with a stop/restart request currently in flight - their row's/toolbar's buttons stay
 	// disabled and a fast refresh runs right after, rather than waiting for the next poll tick.
@@ -63,8 +77,25 @@ export function App() {
 			return;
 		}
 		setBanner(undefined);
-		setProcesses((await res.json()) as ProcessStatus[]);
+		const data = (await res.json()) as ProcessStatus[];
+		setProcesses(data);
 		setStatusLoaded(true);
+		setHistory((prev) => {
+			const next = new Map(prev);
+			for (const process of data) {
+				if (process.cpu === undefined || process.memory === undefined) {
+					continue;
+				}
+				const samples = next.get(process.name) ?? [];
+				next.set(
+					process.name,
+					[...samples, { cpu: process.cpu, memory: process.memory }].slice(
+						-HISTORY_LENGTH,
+					),
+				);
+			}
+			return next;
+		});
 	}, []);
 
 	useEffect(() => {
@@ -143,6 +174,7 @@ export function App() {
 						name={route.name}
 						process={processes.find((p) => p.name === route.name)}
 						statusLoaded={statusLoaded}
+						history={history.get(route.name) ?? []}
 						pending={pending}
 						rowErrors={rowErrors}
 						onAction={runAction}

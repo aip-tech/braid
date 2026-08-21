@@ -1,4 +1,9 @@
-import { formatStarted, type ProcessStatus } from "./api.js";
+import {
+	formatCpu,
+	formatMemory,
+	formatStarted,
+	type ProcessStatus,
+} from "./api.js";
 import { RestartIcon, StopIcon } from "./icons.js";
 
 type TableViewProps = {
@@ -22,6 +27,8 @@ export function TableView({
 					<th>Name</th>
 					<th>PID</th>
 					<th>Status</th>
+					<th>CPU</th>
+					<th>Mem</th>
 					<th>Started</th>
 					<th />
 				</tr>
@@ -49,6 +56,14 @@ export function TableView({
 								>
 									{process.alive ? "running" : "stopped"}
 								</span>
+							</td>
+							<td class="stat-cell">
+								{process.cpu !== undefined ? formatCpu(process.cpu) : "–"}
+							</td>
+							<td class="stat-cell">
+								{process.memory !== undefined
+									? formatMemory(process.memory)
+									: "–"}
 							</td>
 							<td>{formatStarted(process.startedAt)}</td>
 							<td>

@@ -5,6 +5,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.5.0] - 2026-08-21
+
+### Added
+
+- Per-process CPU/memory sampling via `pidusage`, polled every
+  `statsPollIntervalMs` (new `BraidConfig` option, `@default 2000`) and
+  surfaced as optional `cpu`/`memory` fields on
+  `PluginContext.getProcesses()` - so `GET /api/status` (and anything
+  that already reads it, e.g. `@aip-tech/braid-plugin-ui`'s dashboard)
+  gets them for free. `braid status` also shows a `cpu X.X% mem Y MB`
+  suffix per process when the daemon is reachable, falling back to
+  today's plain pidfile-only output otherwise.
+
 ## [0.4.0] - 2026-08-20
 
 ### Added

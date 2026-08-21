@@ -342,6 +342,32 @@ describe("runManager plugin support", () => {
 		});
 	}
 
+	type StatusEntry = {
+		name: string;
+		pid: number;
+		alive: boolean;
+		cpu?: number;
+		memory?: number;
+	};
+
+	/** Polls /api/status until `predicate` matches, returning the body that satisfied it. */
+	async function waitForStatus(
+		pidfile: { controlPort: number; controlToken: string },
+		predicate: (body: StatusEntry[]) => boolean,
+		{ timeoutMs = 4000, intervalMs = 25 } = {},
+	): Promise<StatusEntry[]> {
+		const start = Date.now();
+		while (true) {
+			const res = await fetchWithToken(pidfile, "/api/status");
+			const body = (await res.json()) as StatusEntry[];
+			if (predicate(body)) return body;
+			if (Date.now() - start > timeoutMs) {
+				throw new Error("waitForStatus: timed out");
+			}
+			await new Promise((resolve) => setTimeout(resolve, intervalMs));
+		}
+	}
+
 	it("records controlPort/controlToken in the pidfile and serves the core /api/status route", async () => {
 		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
 		const managerPromise = runManager(configs, pidfilePath);
@@ -367,6 +393,108 @@ describe("runManager plugin support", () => {
 				.map((w) => ({ name: w.name, alive: w.alive }))
 				.sort((a, b) => a.name.localeCompare(b.name)),
 		).toEqual(expected);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("polls cpu/memory via pidusage and surfaces them on /api/status, clearing them once stopped", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			statsPollIntervalMs: 50,
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		const withStats = await waitForStatus(pidfile, (body) => {
+			const solo = body.find((w) => w.name === "solo");
+			return (
+				solo !== undefined &&
+				typeof solo.cpu === "number" &&
+				typeof solo.memory === "number"
+			);
+		});
+		const solo = withStats.find((w) => w.name === "solo");
+		expect(solo?.memory).toBeGreaterThan(0);
+
+		const stopRes = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/stop?name=solo`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		expect(stopRes.status).toBe(200);
+
+		await waitForStatus(pidfile, (body) => {
+			const stopped = body.find((w) => w.name === "solo");
+			return (
+				stopped !== undefined && !stopped.alive && stopped.cpu === undefined
+			);
+		});
+
+		// stopFromPidfile (called in-process, as every test here does) can't tree-kill its own pid -
+		// it relies on the manager's natural "every worker has exited" shutdown, which stays
+		// deliberately suppressed while anything is manually-stopped (see the "manual process
+		// control" describe block below). Bring "solo" back first so cleanup has a real exit
+		// cascade to trigger.
+		await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/restart?name=solo`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("doesn't leak a restarted process's old cpu/memory onto its new pid", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			statsPollIntervalMs: 50,
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		const beforeRestart = await waitForStatus(pidfile, (body) => {
+			const solo = body.find((w) => w.name === "solo");
+			return solo !== undefined && typeof solo.cpu === "number";
+		});
+		const oldPid = beforeRestart.find((w) => w.name === "solo")?.pid;
+
+		const restartRes = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/restart?name=solo`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		expect(restartRes.status).toBe(200);
+
+		// The fix under test: spawnWorker clears this name's cached stats the moment it assigns the
+		// new pid, so the row right after a restart resolves must show no stats yet - never the
+		// predecessor's - until a fresh poll tick actually samples the new pid.
+		const rightAfterRestart = await fetchWithToken(pidfile, "/api/status");
+		const soloRightAfter = (
+			(await rightAfterRestart.json()) as StatusEntry[]
+		).find((w) => w.name === "solo");
+		expect(soloRightAfter?.pid).not.toBe(oldPid);
+		expect(soloRightAfter?.cpu).toBeUndefined();
+		expect(soloRightAfter?.memory).toBeUndefined();
+
+		await waitForStatus(pidfile, (body) => {
+			const solo = body.find((w) => w.name === "solo");
+			return solo !== undefined && typeof solo.cpu === "number";
+		});
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;

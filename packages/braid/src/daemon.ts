@@ -12,6 +12,7 @@ type DaemonInput = {
 	configPath?: string;
 	logs?: { dir?: string; maxSizeBytes?: number };
 	pidfilePath: string;
+	statsPollIntervalMs?: number;
 };
 
 function loadInput(): DaemonInput {
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
 		plugins: input.plugins,
 		configPath: input.configPath,
 		logs: input.logs,
+		statsPollIntervalMs: input.statsPollIntervalMs,
 		onReady: () => send({ type: "ready" }),
 	});
 	process.exit(exitCode);

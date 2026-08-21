@@ -109,7 +109,7 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	}
 
 	if (exported && typeof exported === "object") {
-		const { processes, plugins, logs, foreground } =
+		const { processes, plugins, logs, foreground, statsPollIntervalMs } =
 			exported as Partial<BraidConfig>;
 		if (!Array.isArray(processes) || processes.length === 0) {
 			throw new Error(CONFIG_SHAPE_ERROR(configPath));
@@ -124,6 +124,7 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 			plugins,
 			logs,
 			foreground,
+			statsPollIntervalMs,
 		};
 	}
 
@@ -154,6 +155,7 @@ async function startDaemon(
 		plugins: config.plugins,
 		configPath,
 		logs: config.logs,
+		statsPollIntervalMs: config.statsPollIntervalMs,
 		pidfilePath,
 	};
 
@@ -258,6 +260,43 @@ async function followLogs(pidfile: Pidfile): Promise<void> {
 	}
 }
 
+/** Matches what `PluginContext.getProcesses()` (and so `GET /api/status`) returns per process. */
+type LiveProcessStatus = {
+	name: string;
+	pid: number | undefined;
+	alive: boolean;
+	startedAt: string;
+	cpu?: number;
+	memory?: number;
+};
+
+function formatBytes(bytes: number): string {
+	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Fetches live cpu/memory-enriched status straight from the running daemon's own `/api/status`
+ * (the same route the dashboard polls). Returns `undefined` on any failure - network error,
+ * non-200 (including a stale-token 401, collapsed into the same fallback here: a much tighter
+ * race for a short-lived CLI process re-reading the pidfile fresh each invocation than the
+ * browser's stale-long-session case, so distinct messaging isn't worth building for this path) -
+ * so the caller can fall back to today's pidfile-only status with no cpu/memory.
+ */
+async function fetchLiveStatus(
+	pidfile: Pidfile,
+): Promise<LiveProcessStatus[] | undefined> {
+	try {
+		const response = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/status`,
+			{ headers: { Authorization: `Bearer ${pidfile.controlToken}` } },
+		);
+		if (!response.ok) return undefined;
+		return (await response.json()) as LiveProcessStatus[];
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Calls the running daemon's per-process stop/restart route for `name`. Unlike bare `stop`
  * (which falls back to killing PIDs straight from the pidfile), there's no fallback here - a
@@ -309,6 +348,7 @@ async function runForeground(
 		plugins: config.plugins,
 		configPath,
 		logs: config.logs,
+		statsPollIntervalMs: config.statsPollIntervalMs,
 		cwd,
 		onReady: () => {
 			console.log(
@@ -436,14 +476,27 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			return ok ? 0 : 1;
 		}
 		case "status": {
-			const statuses = statusFromPidfile(pidfilePath);
+			// Not gated on findRunningPidfile the way stop/restart are: that returns undefined for a
+			// stale-but-present pidfile (every pid dead) too, and today's "show stopped workers"
+			// behavior below depends on statusFromPidfile's own result length deciding "Nothing
+			// running.", not a separate liveness check - gating the whole command on it would regress
+			// that case. findRunningPidfile is only used here to decide whether it's worth trying to
+			// reach a daemon at all.
+			const running = findRunningPidfile(pidfilePath);
+			const live = running ? await fetchLiveStatus(running) : undefined;
+			const statuses: LiveProcessStatus[] =
+				live ?? statusFromPidfile(pidfilePath);
 			if (statuses.length === 0) {
 				console.log("Nothing running.");
 				return 0;
 			}
 			for (const status of statuses) {
+				const stats =
+					status.cpu !== undefined && status.memory !== undefined
+						? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
+						: "";
 				console.log(
-					`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}`,
+					`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}`,
 				);
 			}
 			return 0;

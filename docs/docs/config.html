@@ -16,7 +16,8 @@
 				<h1>Config</h1>
 				<p class="lede">
 					<code>braid.config.ts</code> default-exports a <code>{ processes, plugins?,
-					logs?, foreground? }</code> object (or a bare <code>ProcessConfig[]</code>, treated the
+					logs?, foreground?, statsPollIntervalMs? }</code> object (or a bare
+					<code>ProcessConfig[]</code>, treated the
 					same way). Full field list and defaults live in
 					<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/src/types.ts"><code>src/types.ts</code></a>.
 				</p>
@@ -30,6 +31,7 @@
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
+					<li><a href="#stats">Process stats</a></li>
 				</ul>
 
 				<section id="basics">
@@ -231,6 +233,28 @@ export default defineConfig({
 					<p>
 						Override this per invocation with <code>braid start --foreground</code> or
 						<code>braid start --daemon</code>, regardless of what the config says.
+					</p>
+				</section>
+
+				<section id="stats">
+					<h2>Process stats</h2>
+					<p>
+						Each process's CPU (percent of one core) and memory (RSS) usage is
+						sampled on a timer via <a href="https://www.npmjs.com/package/pidusage"><code>pidusage</code></a>,
+						surfaced through <code>PluginContext.getProcesses()</code> (so
+						<code>GET /api/status</code> and <code>@aip-tech/braid-plugin-ui</code>'s
+						dashboard get it for free) and in <code>braid status</code>'s own output
+						once the daemon has sampled it. Adjust the polling cadence at the top
+						level of the config:
+					</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [ /* ... */ ],
+	statsPollIntervalMs: 2000, // @default 2000
+});</code></pre>
+					<p>
+						A process that's stopped (or hasn't been sampled yet) simply has no
+						<code>cpu</code>/<code>memory</code> fields, rather than stale or zeroed
+						values.
 					</p>
 				</section>
 			</main>

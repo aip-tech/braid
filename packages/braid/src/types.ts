@@ -120,6 +120,13 @@ export type BraidConfig = {
 	 * invocation with `--foreground`/`--daemon`. @default false
 	 */
 	foreground?: boolean;
+	/**
+	 * How often to sample every running process's CPU/memory (via `pidusage`), surfaced through
+	 * `PluginContext.getProcesses()`/`GET /api/status`/`braid status`. Lower values react faster
+	 * but poll more often; a persistently CPU-heavy `ps`/`/proc` read isn't likely at typical
+	 * process counts, but this is here to tune if it ever matters. @default 2000
+	 */
+	statsPollIntervalMs?: number;
 };
 
 /** Lifecycle events plugins can subscribe to via PluginContext.on(). */
@@ -208,6 +215,10 @@ export type PluginContext = {
 		pid: number | undefined;
 		alive: boolean;
 		startedAt: string;
+		/** Percent of one CPU core, sampled every `statsPollIntervalMs`. Absent until the first sample. */
+		cpu?: number;
+		/** RSS in bytes, sampled every `statsPollIntervalMs`. Absent until the first sample. */
+		memory?: number;
 	}>;
 	/**
 	 * Stops one named process. Available to any plugin, not just core - a plugin can stop/restart

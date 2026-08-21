@@ -8,6 +8,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import pidusage from "pidusage";
 import treeKill from "tree-kill";
 import { createControlServer } from "./control-server.js";
 import { CORE_PLUGINS } from "./core-plugins/index.js";
@@ -42,6 +43,9 @@ const DEFAULT_READY_TIMEOUT_MS = 10_000;
 // Bounds the rolling buffer readyPattern is tested against, so a chatty process before it's
 // actually ready can't grow this without bound while still letting a match span two chunks.
 const READY_PATTERN_BUFFER_BYTES = 8192;
+// Matches the dashboard's own existing poll cadence (frontend/src/app.tsx), per the roadmap's
+// preference to reuse it rather than add a second one.
+const STATS_POLL_INTERVAL_MS = 2000;
 
 export type RunManagerOptions = {
 	/** External plugins to load, resolved relative to configPath. */
@@ -58,6 +62,8 @@ export type RunManagerOptions = {
 	cwd?: string;
 	/** Called once every process has forked and the pidfile is written, before awaiting exit. */
 	onReady?: () => void;
+	/** How often to sample CPU/memory via `pidusage`. See `BraidConfig.statsPollIntervalMs`. @default 2000 */
+	statsPollIntervalMs?: number;
 };
 
 function readPidfile(pidfilePath: string): Pidfile | undefined {
@@ -230,13 +236,29 @@ export async function runManager(
 
 	const emitter = new EventEmitter();
 	const controlServer = createControlServer();
+	// Latest cpu/memory sample per process name, refreshed by pollStats() below - kept separate
+	// from pidfileWorkers since it's sampled on its own cadence, not tied to a worker (re)starting.
+	const statsByName = new Map<string, { cpu: number; memory: number }>();
+	// Guards against two pollStats() ticks overlapping if a `ps`/`/proc` read is ever slow -
+	// pidusage keeps an unlocked, module-level history keyed by pid, so overlapping calls against
+	// the same pid could corrupt a delta calculation.
+	let statsPollInFlight = false;
+	// Logs a pollStats() failure once (not every tick) until it succeeds again, so a structurally
+	// broken setup (missing `ps`, unsupported platform) doesn't stay silent forever.
+	let statsFailureLogged = false;
+	let statsInterval: NodeJS.Timeout | undefined;
 	const getWorkers = () =>
-		pidfileWorkers.map((worker) => ({
-			name: worker.name,
-			pid: worker.pid,
-			alive: isAlive(worker.pid),
-			startedAt: worker.startedAt,
-		}));
+		pidfileWorkers.map((worker) => {
+			const alive = isAlive(worker.pid);
+			const stats = alive ? statsByName.get(worker.name) : undefined;
+			return {
+				name: worker.name,
+				pid: worker.pid,
+				alive,
+				startedAt: worker.startedAt,
+				...(stats ? { cpu: stats.cpu, memory: stats.memory } : {}),
+			};
+		});
 	const contextFor = createPluginContextFactory({
 		controlServer,
 		getWorkers,
@@ -278,6 +300,57 @@ export async function runManager(
 	});
 	const managerStartedAt = new Date().toISOString();
 
+	/**
+	 * Refreshes `statsByName` for every currently-alive worker via one batched `pidusage()` call.
+	 * Always deletes a no-longer-alive name's cached stats regardless of whether the call below
+	 * succeeds - that's what makes a stopped process's cpu/memory disappear. `pidusage`'s own CPU%
+	 * is delta-based (its module-level history is keyed by pid): a pid's first-ever sample is a
+	 * lifetime average since start, every subsequent sample against the same pid is an accurate
+	 * since-last-call delta - exactly right for this function's own repeated-polling use, wrong if
+	 * called just once. There is no per-pid `pidusage.clear()` (confirmed by reading its source) -
+	 * only a global one wiping every pid's history at once - so this never calls it; a dead pid's
+	 * history entry simply expires on its own after pidusage's default 60s `maxage`.
+	 */
+	async function pollStats(): Promise<void> {
+		if (statsPollInFlight) return;
+		const aliveWorkers: PidfileWorker[] = [];
+		for (const worker of pidfileWorkers) {
+			if (isAlive(worker.pid)) aliveWorkers.push(worker);
+			else statsByName.delete(worker.name);
+		}
+		if (aliveWorkers.length === 0) return;
+		statsPollInFlight = true;
+		try {
+			const stats = await pidusage(aliveWorkers.map((worker) => worker.pid));
+			for (const worker of aliveWorkers) {
+				const stat = stats[worker.pid];
+				if (stat) {
+					statsByName.set(worker.name, {
+						cpu: Math.round(stat.cpu * 10) / 10,
+						memory: stat.memory,
+					});
+				}
+			}
+			statsFailureLogged = false;
+		} catch (error) {
+			if (!statsFailureLogged) {
+				statsFailureLogged = true;
+				process.stderr.write(
+					`${braidTag()} process stats polling failed (will keep retrying): ${
+						error instanceof Error ? error.message : String(error)
+					}\n`,
+				);
+			}
+		} finally {
+			statsPollInFlight = false;
+		}
+	}
+	void pollStats();
+	statsInterval = setInterval(
+		() => void pollStats(),
+		options.statsPollIntervalMs ?? STATS_POLL_INTERVAL_MS,
+	);
+
 	function upsertWorkerRecord(name: string, pid: number): void {
 		const record = { name, pid, startedAt: new Date().toISOString() };
 		const index = pidfileWorkers.findIndex((worker) => worker.name === name);
@@ -315,6 +388,12 @@ export async function runManager(
 		if (shuttingDown) return;
 		shuttingDown = true;
 		exitCode = code;
+		// Cleared first, unconditionally: SHUTDOWN_EVENT_TIMEOUT_MS is also 2000ms, so a pollStats()
+		// tick firing mid-shutdown (while children are being tree-killed) is a near-certainty, not
+		// an edge case, if this waited until the teardown Promise.all below. Also required for a
+		// clean exit in --foreground/tests, which never call process.exit() and rely on every timer
+		// being cleared.
+		clearInterval(statsInterval);
 		// Deliberately NOT removed here: a graceful shutdown with several processes to tree-kill
 		// can take a moment, and a second SIGINT/SIGTERM in that window (an impatient repeat
 		// Ctrl-C, or some terminals/shells delivering it twice) needs to land on this same
@@ -480,6 +559,9 @@ export async function runManager(
 		children.set(config.name, child);
 		if (typeof child.pid === "number") {
 			upsertWorkerRecord(config.name, child.pid);
+			// A restart's new pid invalidates any cached stats keyed by this name - without this,
+			// the new process's row would show its predecessor's cpu/memory for up to one poll tick.
+			statsByName.delete(config.name);
 			void safeEmit(emitter, "processStart", {
 				type: "processStart",
 				name: config.name,

@@ -283,6 +283,76 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 10000);
 
+	it("status shows live cpu/mem once the daemon has sampled it", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+
+		// The first pidusage sample after a fresh start can lag a poll tick behind - retry status
+		// until it shows up rather than asserting on the very first call. `waitFor` itself only
+		// supports a sync predicate, so this polls by hand instead of misusing it with an async one.
+		const deadline = Date.now() + 4000;
+		let sawStats = false;
+		while (Date.now() < deadline) {
+			logSpy.mockClear();
+			await runCli(["status"], tmpDir);
+			sawStats = logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("solo") &&
+					String(call[0]).includes("cpu") &&
+					String(call[0]).includes("mem"),
+			);
+			if (sawStats) break;
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		expect(sawStats).toBe(true);
+
+		await runCli(["stop"], tmpDir);
+		await startPromise;
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("status falls back to plain pidfile output (no cpu/mem) when the daemon can't be reached", async () => {
+		// Same unreachable-daemon fixture as the stop/restart test below: a synthetic pidfile
+		// pointing at a real (but otherwise unrelated) alive process, so findRunningPidfile
+		// considers it "running", and a control port nothing listens on.
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 1,
+				controlToken: "wrong",
+			}),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["status"], tmpDir)).toBe(0);
+		expect(
+			logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("solo") &&
+					String(call[0]).includes("running") &&
+					!String(call[0]).includes("cpu"),
+			),
+		).toBe(true);
+		logSpy.mockRestore();
+
+		dummy.kill();
+	}, 10000);
+
 	it("refuses a second start while one is already running", async () => {
 		const errorSpy = vi
 			.spyOn(console, "error")

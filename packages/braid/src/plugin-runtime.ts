@@ -13,6 +13,8 @@ type WorkerSnapshot = {
 	pid: number | undefined;
 	alive: boolean;
 	startedAt: string;
+	cpu?: number;
+	memory?: number;
 };
 
 type ContextFactoryOptions = {

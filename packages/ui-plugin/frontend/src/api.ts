@@ -3,7 +3,21 @@ export type ProcessStatus = {
 	pid: number | undefined;
 	alive: boolean;
 	startedAt: string;
+	/** Percent of one CPU core. Absent until the daemon's first sample, or while stopped. */
+	cpu?: number;
+	/** RSS in bytes. Absent until the daemon's first sample, or while stopped. */
+	memory?: number;
 };
+
+export function formatCpu(cpu: number): string {
+	return `${cpu.toFixed(1)}%`;
+}
+
+export function formatMemory(bytes: number): string {
+	return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+}
+
+export type HistorySample = { cpu: number; memory: number };
 
 export function formatStarted(iso: string): string {
 	const date = new Date(iso);

@@ -82,9 +82,12 @@
 				<section id="what-it-shows">
 					<h2>What it shows</h2>
 					<p>
-						Every configured process's name, pid, running/stopped status, and
-						start time, polling every 2 seconds &mdash; the same data
-						<code>braid status</code> prints. Stop and Restart buttons per
+						Every configured process's name, pid, running/stopped status, CPU
+						(percent of one core) and memory (RSS), and start time, polling
+						every 2 seconds &mdash; the same data <code>braid status</code>
+						prints. CPU/memory need <code>@aip-tech/braid</code>
+						<code>&gt;=0.5.0</code>; on an older version those two columns
+						just show as empty. Stop and Restart buttons per
 						process, backed by the same
 						<code>braid stop &lt;name&gt;</code>/<code>restart &lt;name&gt;</code>
 						routes the CLI itself uses. A top bar shows the host project's
@@ -92,11 +95,13 @@
 					</p>
 					<p>
 						Click a process's name for its own page: a toolbar with the same
-						Stop/Restart actions, and its log output streaming live
-						underneath, off the same <code>/api/logs</code> endpoint
-						<code>braid logs --follow</code> uses. It starts with the last
-						300 lines, renders the same ANSI colors your terminal would, and
-						keeps the connection open, reconnecting on its own if it drops.
+						Stop/Restart actions, two small rolling charts of its recent CPU
+						and memory usage (a browser-side history, so they start empty on
+						page load and fill in over the next minute), and its log output
+						streaming live underneath, off the same <code>/api/logs</code>
+						endpoint <code>braid logs --follow</code> uses. It starts with the
+						last 300 lines, renders the same ANSI colors your terminal would,
+						and keeps the connection open, reconnecting on its own if it drops.
 					</p>
 					<p>
 						A "Load older lines" button loads further back into that

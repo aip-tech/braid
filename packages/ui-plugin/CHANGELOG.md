@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.4.0] - 2026-08-21
+
+### Added
+
+- CPU and Mem columns in the process table, and two small rolling
+  sparkline charts (CPU%, memory) on the per-process detail page - fed
+  by `@aip-tech/braid`'s new `pidusage`-based sampling on `/api/status`
+  (requires `@aip-tech/braid` 0.5.0+ for live numbers; on an older core
+  the new columns/charts just show as empty, no hard dependency bump).
+  Hand-rolled inline-SVG charts, not a charting library - two passive
+  ~30-point series redrawn every couple of seconds didn't clear this
+  project's dependency bar.
+
 ## [0.3.0] - 2026-08-21
 
 ### Changed
