@@ -29,6 +29,7 @@
 					<li><a href="#post-restart-hooks">Post-restart hooks</a></li>
 					<li><a href="#pre-restart-hooks">Pre-restart hooks</a></li>
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
+					<li><a href="#waiting-to-start">Waiting to start</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
 					<li><a href="#stats">Process stats</a></li>
@@ -181,6 +182,42 @@ export default defineConfig({
 						<code>readyTimeoutMs</code>, braid logs why (in <code>api</code>'s own log)
 						and proceeds anyway, rather than holding dependents off forever on a
 						misconfigured pattern.
+					</p>
+				</section>
+
+				<section id="waiting-to-start">
+					<h2>Waiting to start</h2>
+					<p>
+						<code>readyPattern</code>/<code>dependsOn</code> both govern
+						<em>restarts</em> &mdash; braid still forks every configured process at
+						once on <code>start</code>, regardless of what any of them need to talk
+						to. <code>startAfter</code> delays a process's very first fork until the
+						processes it names are ready:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	readyPattern: "Server listening",
+},
+{
+	name: "client",
+	command: "pnpm",
+	args: ["--filter", "./client", "run", "dev"],
+	startAfter: { processes: ["api"] },
+},</code></pre>
+					<p>
+						<code>client</code> isn't forked until <code>api</code>'s own
+						<code>readyPattern</code> matches (or its <code>readyTimeoutMs</code>
+						elapses &mdash; same best-effort semantics as above); if <code>api</code>
+						sets no <code>readyPattern</code>, <code>client</code> forks as soon as
+						<code>api</code> has been forked. This only affects each process's first
+						spawn &mdash; once everything is up, later watch-triggered/
+						<code>dependsOn</code>/manual restarts are entirely unaffected, and
+						<code>start</code> itself doesn't wait around for a slow
+						<code>startAfter</code> chain to finish before returning. A
+						<code>startAfter</code> chain that loops back on itself is rejected at
+						startup, same as a circular <code>dependsOn</code>.
 					</p>
 				</section>
 

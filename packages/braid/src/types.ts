@@ -56,6 +56,24 @@ export type ProcessConfig = {
 		run?: RestartHook;
 	};
 	/**
+	 * Wait for these other configured processes to be ready before forking this one for the first
+	 * time - e.g. a client that talks to an API on boot shouldn't fork until that API is actually
+	 * up, not just started. "Ready" means the named process's own `readyPattern` has matched (or
+	 * its `readyTimeoutMs` elapsed - same best-effort semantics `readyPattern` already has for
+	 * restarts), or simply that it has been forked if it sets no `readyPattern`. Note this means a
+	 * process named here newly has its own `readyPattern` evaluated at its initial spawn too, not
+	 * just on restart, but only because something depends on it this way - `readyPattern` is still
+	 * restart-only for any process nothing depends on via `startAfter`. Only affects each process's
+	 * very first spawn - later watch-triggered/`dependsOn`/manual restarts are unaffected. Distinct
+	 * from `dependsOn`: that restarts a process when a dependency restarts, this only delays an
+	 * initial start. Referencing an unknown process, itself, or a chain that loops back on itself
+	 * is rejected at startup.
+	 */
+	startAfter?: {
+		/** Names of other processes in this same config; this one won't spawn until all are ready. */
+		processes: string[];
+	};
+	/**
 	 * Run a command after this process itself restarts (a `watch`-triggered restart) - e.g.
 	 * rebuilding a shared workspace package other processes read from without themselves needing
 	 * to restart. Dependents (via `dependsOn`) aren't notified of this restart until the hook

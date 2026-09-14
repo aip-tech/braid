@@ -1,11 +1,12 @@
 import type { ProcessConfig } from "./types.js";
 
-/** Returns the first cycle found (as a name path, e.g. `["web", "api", "web"]`), if any. */
-export function findDependencyCycle(
+/** Shared DFS cycle-detector over whatever edge set `edgesOf` returns for each config. */
+function findCycle(
 	configs: ProcessConfig[],
+	edgesOf: (config: ProcessConfig) => string[],
 ): string[] | undefined {
-	const dependsOn = new Map<string, string[]>(
-		configs.map((config) => [config.name, config.dependsOn?.processes ?? []]),
+	const edges = new Map<string, string[]>(
+		configs.map((config) => [config.name, edgesOf(config)]),
 	);
 
 	const UNVISITED = 0;
@@ -19,7 +20,7 @@ export function findDependencyCycle(
 	function visit(name: string): string[] | undefined {
 		state.set(name, IN_PROGRESS);
 		path.push(name);
-		for (const dependency of dependsOn.get(name) ?? []) {
+		for (const dependency of edges.get(name) ?? []) {
 			if (state.get(dependency) === IN_PROGRESS) {
 				return [...path.slice(path.indexOf(dependency)), dependency];
 			}
@@ -40,6 +41,20 @@ export function findDependencyCycle(
 		}
 	}
 	return undefined;
+}
+
+/** Returns the first cycle found in `dependsOn` (as a name path, e.g. `["web", "api", "web"]`), if any. */
+export function findDependencyCycle(
+	configs: ProcessConfig[],
+): string[] | undefined {
+	return findCycle(configs, (config) => config.dependsOn?.processes ?? []);
+}
+
+/** Returns the first cycle found in `startAfter` (as a name path, e.g. `["web", "api", "web"]`), if any. */
+export function findStartAfterCycle(
+	configs: ProcessConfig[],
+): string[] | undefined {
+	return findCycle(configs, (config) => config.startAfter?.processes ?? []);
 }
 
 /**
@@ -68,6 +83,37 @@ export function validateDependsOn(configs: ProcessConfig[]): void {
 	if (cycle) {
 		throw new Error(
 			`braid: circular restart dependency: ${cycle.join(" -> ")}`,
+		);
+	}
+}
+
+/**
+ * Throws if any `startAfter.processes` entry names a process that isn't configured, names the
+ * process itself, or the graph as a whole loops back on itself (which would deadlock startup,
+ * since none of the processes in the cycle could ever be considered ready to fork).
+ */
+export function validateStartAfter(configs: ProcessConfig[]): void {
+	const names = new Set(configs.map((config) => config.name));
+
+	for (const config of configs) {
+		for (const dependency of config.startAfter?.processes ?? []) {
+			if (dependency === config.name) {
+				throw new Error(
+					`braid: process "${config.name}" cannot start after itself`,
+				);
+			}
+			if (!names.has(dependency)) {
+				throw new Error(
+					`braid: process "${config.name}" starts after unknown process "${dependency}"`,
+				);
+			}
+		}
+	}
+
+	const cycle = findStartAfterCycle(configs);
+	if (cycle) {
+		throw new Error(
+			`braid: circular startup dependency: ${cycle.join(" -> ")}`,
 		);
 	}
 }

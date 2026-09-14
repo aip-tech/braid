@@ -30,6 +30,7 @@ export default defineConfig({
 - `onRestart`: run a command after this process itself restarts, e.g. rebuilding a shared workspace package. See [Post-restart hooks](#post-restart-hooks).
 - `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
+- `startAfter`: `{ processes }` — don't fork this process for the first time until `processes` are themselves ready. See [Waiting to start](#waiting-to-start).
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
 - `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
@@ -119,6 +120,27 @@ Re-spawning a process isn't the same as it being ready — an API might take a m
 ```
 
 Without `readyPattern`, dependents are held off only until `api` has re-spawned (not exited/killed while restarting, but not necessarily done starting up either) — a `run`/`onRestart` hook's own retry is what bridges the rest of that gap. If `readyPattern` never matches within `readyTimeoutMs`, braid logs why and proceeds anyway rather than holding dependents off forever on a misconfigured pattern.
+
+## Waiting to start
+
+`readyPattern`/`dependsOn` both govern *restarts* — braid still forks every configured process at once on `start`, regardless of what any of them need to talk to. `startAfter` delays a process's very first fork until the processes it names are ready:
+
+```ts
+{
+	name: "api",
+	command: "pnpm",
+	args: ["--filter", "./api", "run", "dev"],
+	readyPattern: "Server listening",
+},
+{
+	name: "client",
+	command: "pnpm",
+	args: ["--filter", "./client", "run", "dev"],
+	startAfter: { processes: ["api"] },
+},
+```
+
+`client` isn't forked until `api`'s own `readyPattern` matches (or its `readyTimeoutMs` elapses — same best-effort semantics as above); if `api` sets no `readyPattern`, `client` forks as soon as `api` has been forked. This only affects each process's first spawn — once everything is up, later watch-triggered/`dependsOn`/manual restarts are entirely unaffected, and `start` itself doesn't wait around for a slow `startAfter` chain to finish before returning. A `startAfter` chain that loops back on itself is rejected at startup, same as a circular `dependsOn`.
 
 ## Logs
 

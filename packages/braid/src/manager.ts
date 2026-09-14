@@ -12,7 +12,7 @@ import pidusage from "pidusage";
 import treeKill from "tree-kill";
 import { createControlServer } from "./control-server.js";
 import { CORE_PLUGINS } from "./core-plugins/index.js";
-import { validateDependsOn } from "./dependency-graph.js";
+import { validateDependsOn, validateStartAfter } from "./dependency-graph.js";
 import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import { loadExternalPlugins } from "./plugin-loader.js";
 import {
@@ -199,6 +199,7 @@ export async function runManager(
 		);
 	}
 	validateDependsOn(configs);
+	validateStartAfter(configs);
 	for (const config of configs) {
 		if (config.beforeRestart && !(config.watch && config.watch.length > 0)) {
 			throw new Error(
@@ -226,6 +227,30 @@ export async function runManager(
 	// onRestart/dependsOn cascades wait here, rather than on "restart" itself, see handleFreshStart.
 	const awaitingFreshStart = new Set<string>();
 	const dependentsByTrigger = computeDependents(configs);
+	// Every config that either declares `startAfter` itself or is named as a target of someone
+	// else's - spawned via ensureReady() below instead of the plain immediate loop. Anything not in
+	// this set is entirely unaffected by the startAfter feature.
+	const startAfterNames = new Set<string>();
+	for (const config of configs) {
+		if (config.startAfter?.processes.length) {
+			startAfterNames.add(config.name);
+			for (const dependency of config.startAfter.processes) {
+				startAfterNames.add(dependency);
+			}
+		}
+	}
+	const immediateConfigs = configs.filter(
+		(config) => !startAfterNames.has(config.name),
+	);
+	const orderedConfigs = configs.filter((config) =>
+		startAfterNames.has(config.name),
+	);
+	// Ordered config names not yet forked - guards shutdownIfEveryWorkerIsDone against deciding
+	// "nothing left running" while one of these hasn't even spawned yet (so it's simply absent from
+	// `children`, not "exited").
+	const pendingStartAfter = new Set(
+		orderedConfigs.map((config) => config.name),
+	);
 	let shuttingDown = false;
 	let exitCode = 0;
 
@@ -650,7 +675,9 @@ export async function runManager(
 	 * dependsOn stop/restart cycle, there's nothing left running and the manager should wind down.
 	 */
 	function shutdownIfEveryWorkerIsDone(): void {
-		if (shuttingDown || restarting.size > 0) return;
+		if (shuttingDown || restarting.size > 0 || pendingStartAfter.size > 0) {
+			return;
+		}
 		const everyWorkerExited = [...children.values()].every(
 			(child) => child.exitCode !== null || child.signalCode !== null,
 		);
@@ -854,8 +881,55 @@ export async function runManager(
 		}
 	}
 
-	for (const config of configs) {
+	// Memoized per name - see ensureReady below for why setting this synchronously (no `await`
+	// between creating the promise and storing it) is what makes it safe against a diamond
+	// dependency or the top-level loop below calling ensureReady for the same name twice.
+	const startAfterReady = new Map<string, Promise<void>>();
+
+	/**
+	 * Forks `name` for the first time once every process it `startAfter`s is itself ready (its own
+	 * `readyPattern` matched, or immediately if it sets none) - recursing for a multi-hop chain.
+	 * Deliberately not awaited by the caller below: a slow chain must not delay `onReady`/the
+	 * pidfile write past the daemon's own CLI handshake timeout, so it resolves in the background
+	 * exactly like a dependsOn restart cascade already does.
+	 */
+	function ensureReady(name: string): Promise<void> {
+		const existing = startAfterReady.get(name);
+		if (existing) return existing;
+		const config = configsByName.get(name) as ProcessConfig;
+		const promise = (async () => {
+			const dependencies = config.startAfter?.processes ?? [];
+			if (dependencies.length > 0) {
+				await Promise.all(dependencies.map(ensureReady));
+			}
+			if (shuttingDown) return;
+			spawnWorker(config);
+			pendingStartAfter.delete(name);
+			rewritePidfile();
+			if (config.readyPattern) {
+				const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+				const ready = await waitForReadyPattern(
+					config.name,
+					new RegExp(config.readyPattern),
+					timeoutMs,
+				);
+				if (!ready) {
+					emitDiagnostic(
+						config,
+						`readyPattern never matched within ${timeoutMs}ms; starting dependents anyway`,
+					);
+				}
+			}
+		})();
+		startAfterReady.set(name, promise);
+		return promise;
+	}
+
+	for (const config of immediateConfigs) {
 		spawnWorker(config);
+	}
+	for (const config of orderedConfigs) {
+		void ensureReady(config.name);
 	}
 
 	rewritePidfile();

@@ -95,6 +95,23 @@ function dependentConfig(
 	};
 }
 
+/** A plain (unwatched) process that prints "ready-marker <pid>" `delayMs` after it starts. */
+function slowConfig(name: string, delayMs: number): ProcessConfig {
+	return {
+		name,
+		command: "node",
+		args: [join(FIXTURES, "slow-start.js"), String(delayMs)],
+	};
+}
+
+/** Wraps any base config with a `startAfter` on `processes`. */
+function startAfterConfig(
+	base: ProcessConfig,
+	processes: string[],
+): ProcessConfig {
+	return { ...base, startAfter: { processes } };
+}
+
 function pidfileWorker(
 	pidfilePath: string,
 	name: string,
@@ -1220,6 +1237,174 @@ describe("runManager readyPattern", () => {
 		);
 
 		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+});
+
+describe("runManager startAfter", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-start-after-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("rejects a circular startAfter chain before spawning anything", async () => {
+		const configs = [
+			startAfterConfig(keepAliveConfig("a"), ["b"]),
+			startAfterConfig(keepAliveConfig("b"), ["a"]),
+		];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/circular startup dependency/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("rejects a startAfter.processes entry naming an unconfigured process", async () => {
+		const configs = [
+			startAfterConfig(keepAliveConfig("client"), ["missing-api"]),
+		];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/starts after unknown process "missing-api"/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("does not spawn a dependent until its startAfter dependency's readyPattern matches", async () => {
+		const readyDelayMs = 1500;
+		const configs = [
+			{ ...slowConfig("api", readyDelayMs), readyPattern: "ready-marker" },
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+		const startedAt = Date.now();
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return client !== undefined && isPidAlive(client.pid);
+			},
+			{ timeoutMs: 10000 },
+		);
+
+		// Some slack for scheduling jitter, but this proves "client" waited for "api"'s own
+		// readiness rather than spawning the instant "api" itself was forked.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(readyDelayMs - 300);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("spawns a dependent once its dependency has forked, when the dependency sets no readyPattern", async () => {
+		const configs = [
+			keepAliveConfig("api"),
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	});
+
+	it("logs and spawns the dependent anyway once readyTimeoutMs elapses without a match", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const configs = [
+			{
+				...keepAliveConfig("api"),
+				readyPattern: "this-will-never-appear-in-output",
+				readyTimeoutMs: 300,
+			},
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(
+			() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						'"api": readyPattern never matched within 300ms; starting dependents anyway',
+					),
+				),
+			{ timeoutMs: 10000 },
+		);
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("fires onReady promptly even with a slow startAfter chain still in flight", async () => {
+		const readyDelayMs = 2000;
+		const configs = [
+			{ ...slowConfig("api", readyDelayMs), readyPattern: "ready-marker" },
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+		let readyAt: number | undefined;
+		const startedAt = Date.now();
+		const managerPromise = runManager(configs, pidfilePath, {
+			onReady: () => {
+				readyAt = Date.now();
+			},
+		});
+
+		await waitFor(() => readyAt !== undefined);
+		expect((readyAt as number) - startedAt).toBeLessThan(readyDelayMs - 500);
+
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return client !== undefined && isPidAlive(client.pid);
+			},
+			{ timeoutMs: 10000 },
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("does not shut down while a startAfter-gated process is still pending, even once an unrelated one-shot process has exited", async () => {
+		const readyDelayMs = 1500;
+		const configs = [
+			{ name: "oneshot", command: "node", args: ["-e", "process.exit(0)"] },
+			{ ...slowConfig("api", readyDelayMs), readyPattern: "ready-marker" },
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		// Give the one-shot process plenty of time to have exited well before "client" spawns.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return client !== undefined && isPidAlive(client.pid);
+			},
+			{ timeoutMs: 10000 },
+		);
+
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);

@@ -5,6 +5,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.6.0] - 2026-09-14
+
+### Added
+
+- `startAfter: { processes }` on `ProcessConfig` - don't fork a process for
+  the first time until the named processes are themselves ready (their own
+  `readyPattern` has matched, or immediately if they set none). Only
+  affects each process's very first spawn; later watch-triggered/
+  `dependsOn`/manual restarts are unaffected, and `start` doesn't block on
+  a slow `startAfter` chain before returning. A chain that loops back on
+  itself is rejected at startup, same as a circular `dependsOn`. See
+  [Waiting to start](./README.md#waiting-to-start).
+
 ## [0.5.0] - 2026-08-21
 
 ### Added
