@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.6.0] - 2026-09-15
+
+### Fixed
+
+- The live log pane's reconnect logic no longer silently drops a run of
+  repeating identical lines (e.g. a periodic health-check message) as
+  "already seen" - it only ever safely assumes a single line is a
+  duplicate, favoring an occasional visible duplicate over losing real
+  output. `dropAlreadySeenPrefix` is now exported standalone from
+  `log-controller.ts` and unit-tested.
+- A partial (no trailing newline) log line still buffered when a
+  connection dropped mid-line is now flushed on the next reconnect instead
+  of being silently discarded.
+- The dashboard's status poll no longer risks an unhandled promise
+  rejection when `/api/status` returns a 200 with a truncated/malformed
+  body - `res.json()` is now wrapped the same way the fetch-throws case
+  already was, skipping that tick silently and self-healing next poll.
+
+### Added
+
+- Real test coverage for this package, which previously had none: the Node
+  plugin (`src/index.ts`), `api.ts`'s formatting/fetch helpers, the log
+  reconnect/dedup logic, and the `App`/`TableView`/`DetailView`/`Sparkline`
+  components (via `preact/test-utils` + jsdom).
+
 ## [0.5.1] - 2026-09-15
 
 ### Fixed

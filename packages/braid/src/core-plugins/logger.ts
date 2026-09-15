@@ -182,7 +182,13 @@ export const loggerPlugin: BraidPlugin = {
 
 		ctx.registerRoute("GET", "/api/logs", (req, res) => {
 			const url = new URL(req.url ?? "/", "http://localhost");
-			const name = url.searchParams.get("name") ?? undefined;
+			// `|| undefined`, not `?? undefined` - an explicit but empty `?name=` must be treated the
+			// same as an omitted one everywhere below (the unknown-process check, which follower key
+			// a `follow=true` connection registers under, and which log content is served), not just
+			// by the falsy-name branches that already happen to read right. `??` alone would leave
+			// `name` as "" (a string, not null/undefined), landing this connection under a follower
+			// key nothing ever dispatches to - a dead connection, held open until shutdown.
+			const name = url.searchParams.get("name") || undefined;
 			const follow = url.searchParams.get("follow") === "true";
 			const lines = parseLines(url.searchParams);
 			const key = name ?? ALL_PROCESSES_KEY;

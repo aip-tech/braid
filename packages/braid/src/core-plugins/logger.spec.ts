@@ -180,6 +180,31 @@ describe("core:logger plugin", () => {
 			await h.cleanup();
 		});
 
+		it("treats an explicit but empty ?name= the same as an omitted one for a follow request", async () => {
+			const h = await createHarness();
+			const res = await fetch(
+				`http://127.0.0.1:${h.port}/api/logs?name=&follow=true`,
+				{ headers: { Authorization: `Bearer ${h.token}` } },
+			);
+			expect(res.status).toBe(200);
+			const reader = res.body?.getReader();
+			if (!reader) throw new Error("expected a readable response body");
+
+			// The real regression: this connection must be registered under the same follower key an
+			// omitted `name` would use, not the literal empty string (which nothing ever dispatches
+			// to, leaving it a dead connection open until shutdown) - proven by it actually receiving
+			// output emitted after the request.
+			emitOutput(h.emitter, "web", "live chunk\n");
+			const { value, done } = await reader.read();
+			expect(done).toBe(false);
+			expect(Buffer.from(value ?? new Uint8Array()).toString()).toBe(
+				"live chunk\n",
+			);
+
+			h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+			await h.cleanup();
+		});
+
 		it("streams live processOutput chunks to a follow request", async () => {
 			const h = await createHarness();
 			const res = await fetch(

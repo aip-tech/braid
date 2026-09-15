@@ -14,6 +14,8 @@ const DEFAULT_EXT = "ts,js,json";
 const RESTART_DEBOUNCE_MS = 100;
 const DEFAULT_HOOK_RETRIES = 5;
 const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
+// How long a watch-triggered restart waits after SIGTERM before escalating to SIGKILL.
+const DEFAULT_STOP_TIMEOUT_MS = 5000;
 // Mirrors nodemon's own default ignore list (its `ignore-by-default` dependency) - deliberately
 // not extended with dotfile exclusion, which nodemon does *not* do by default either, so a
 // config watching a dotfile (.env, .eslintrc.js) keeps working.
@@ -48,10 +50,13 @@ function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Sends SIGTERM to `pid`'s whole process tree and resolves once the kill signal has been sent. */
-function killTree(pid: number): Promise<void> {
+/** Sends `signal` to `pid`'s whole process tree and resolves once it has been sent. */
+function killTree(
+	pid: number,
+	signal: "SIGTERM" | "SIGKILL" = "SIGTERM",
+): Promise<void> {
 	return new Promise((resolveKill) =>
-		treeKill(pid, "SIGTERM", () => resolveKill()),
+		treeKill(pid, signal, () => resolveKill()),
 	);
 }
 
@@ -191,10 +196,29 @@ export function runWorker(config: ProcessConfig): void {
 				const pid = child?.pid;
 				if (typeof pid === "number") {
 					stderrPrefixer.write("braid: stopping (restarting)\n");
-					await new Promise<void>((resolveExit) => {
+					const exited = new Promise<void>((resolveExit) => {
 						awaitingExit = resolveExit;
-						void killTree(pid);
 					});
+					void killTree(pid, "SIGTERM");
+					// Without this, an app that traps/ignores SIGTERM would hang this restart forever -
+					// `restarting` never clears, so every later file change is silently swallowed too.
+					const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+					let timer: NodeJS.Timeout | undefined;
+					const timedOut = new Promise<boolean>((resolveTimeout) => {
+						timer = setTimeout(() => resolveTimeout(true), timeoutMs);
+					});
+					const didTimeOut = await Promise.race([
+						exited.then(() => false),
+						timedOut,
+					]);
+					clearTimeout(timer);
+					if (didTimeOut) {
+						stderrPrefixer.write(
+							`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+						);
+						void killTree(pid, "SIGKILL");
+						await exited;
+					}
 				}
 				if (config.beforeRestart) {
 					const ok = await runHookWithRetries(

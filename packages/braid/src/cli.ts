@@ -143,12 +143,15 @@ async function startDaemon(
 	cwd: string,
 ): Promise<DaemonStartOutcome> {
 	const braidDir = dirname(pidfilePath);
-	mkdirSync(braidDir, { recursive: true });
+	// mode: 0o700 - this directory ends up holding the pidfile's control-server bearer token (see
+	// manager.ts's own matching mkdirSync/chmodSync), and this is the first thing to create it in
+	// the real (daemonized) `braid start` path, ahead of the daemon process itself even forking.
+	mkdirSync(braidDir, { recursive: true, mode: 0o700 });
 	const daemonLogPath = join(braidDir, "daemon.log");
 	if (existsSync(daemonLogPath)) {
 		renameSync(daemonLogPath, `${daemonLogPath}.1`);
 	}
-	const daemonLogFd = openSync(daemonLogPath, "a");
+	const daemonLogFd = openSync(daemonLogPath, "a", 0o600);
 
 	const daemonInput = {
 		processes: config.processes,

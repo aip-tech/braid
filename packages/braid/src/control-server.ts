@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import {
 	createServer,
@@ -7,7 +7,19 @@ import {
 	type ServerResponse,
 } from "node:http";
 import { extname, join, resolve as resolvePath, sep } from "node:path";
+import { braidTag } from "./prefix.js";
 import type { RouteHandler, UpgradeHandler } from "./types.js";
+
+/**
+ * Constant-time string comparison - a bearer/cookie/query token check against `a === b` would
+ * short-circuit on the first mismatched byte, letting a local attacker who can send enough timed
+ * requests recover the secret one byte at a time from response-timing differences.
+ */
+function safeEqual(a: string, b: string): boolean {
+	const bufA = Buffer.from(a);
+	const bufB = Buffer.from(b);
+	return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
 
 const MIME_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -98,10 +110,12 @@ export function createControlServer(): ControlServer {
 			: undefined;
 		const cookieToken = readCookie(req, cookieName);
 		const queryToken = url.searchParams.get("token") ?? undefined;
-		const authenticated = headerToken === token || cookieToken === token;
+		const authenticated =
+			safeEqual(headerToken ?? "", token) ||
+			safeEqual(cookieToken ?? "", token);
 		// Only treated as a *fresh* query-token auth if header/cookie didn't already cover it - a
 		// stale `?token=` alongside a valid cookie shouldn't re-trigger the redirect below.
-		const viaQueryOnly = !authenticated && queryToken === token;
+		const viaQueryOnly = !authenticated && safeEqual(queryToken ?? "", token);
 		if (!authenticated && !viaQueryOnly) {
 			res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
 			return;
@@ -130,12 +144,21 @@ export function createControlServer(): ControlServer {
 			try {
 				await routeHandler(req, res);
 			} catch (error) {
+				// Logged here (not echoed to the client below) - anyone holding the token can reach
+				// this, and the token itself isn't the only thing that can leak (a shared machine, a
+				// stale world-readable pidfile from before that was fixed), so route handler internals
+				// (file paths, module names) shouldn't ride along in the response body too.
+				process.stderr.write(
+					`${braidTag()} route handler for ${method} ${url.pathname} threw: ${
+						error instanceof Error
+							? (error.stack ?? error.message)
+							: String(error)
+					}\n`,
+				);
 				if (!res.headersSent) {
 					res.writeHead(500, { "content-type": "text/plain" });
 				}
-				res.end(
-					`Internal error: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				res.end("Internal error");
 			}
 			return;
 		}
@@ -157,10 +180,9 @@ export function createControlServer(): ControlServer {
 
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
-		const handler =
-			url.searchParams.get("token") === token
-				? upgrades.get(url.pathname)
-				: undefined;
+		const handler = safeEqual(url.searchParams.get("token") ?? "", token)
+			? upgrades.get(url.pathname)
+			: undefined;
 		if (!handler) {
 			socket.destroy();
 			return;

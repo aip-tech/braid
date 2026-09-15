@@ -5,6 +5,57 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.9.0] - 2026-09-15
+
+A batch of fixes from a full code-security/quality review of the package.
+
+### Added
+
+- `stopTimeoutMs?: number` on `ProcessConfig` — how long to wait after
+  sending SIGTERM (to a process's whole tree) before escalating to SIGKILL.
+  Applies to every stop of that process: a manual `stop`/`restart`, a
+  `dependsOn` cascade, a watch-triggered restart, and daemon shutdown.
+  @default 5000
+
+### Fixed
+
+- A process that ignores or doesn't forward SIGTERM (a wrapper script, or
+  one that traps it) no longer hangs `stop`/`restart`/shutdown forever —
+  `stopChild` (and the worker's own watch-triggered restart) now escalate
+  to SIGKILL after `stopTimeoutMs`.
+- An invalid `readyPattern` regex (a typo like `"("`) is now rejected at
+  startup with a clear error, instead of surfacing later as an unhandled
+  rejection that crashes the whole daemon on that process's first restart.
+- The control server's bearer/cookie/query token is now compared with a
+  constant-time check (`crypto.timingSafeEqual`) instead of `===`, so a
+  local attacker able to send many timed requests can't recover it
+  byte-by-byte from response-timing differences.
+- The pidfile (`.braid/run.json`, which carries that same control-server
+  token) and its directory are now written with owner-only permissions
+  (`0o600`/`0o700`) instead of inheriting the process umask — on a shared
+  host, another local user could previously just read the token off disk.
+- A route handler error is no longer echoed back to the HTTP client
+  verbatim; it's logged server-side instead, and the client gets a generic
+  "Internal error" — defense-in-depth against leaking internal detail
+  (paths, module names) to anyone who does obtain the token.
+- A dependency-cascaded restart (via `dependsOn`) now runs the restarted
+  process's own `readyPattern` wait and `onRestart` hook before notifying
+  its own dependents in turn, exactly like a direct restart does. Fixes a
+  multi-hop chain (`grandchild -> client -> api`) cascading to `grandchild`
+  the instant `client` respawns, instead of waiting on `client`'s own
+  readiness/hook first.
+- CPU/memory stats no longer briefly show a restarted process's
+  predecessor's values when a `pollStats()` tick's `pidusage()` call is
+  still in flight at the moment of the restart.
+- Two processes sharing the same `name` are now rejected at startup,
+  instead of both being spawned with every by-name operation (stop,
+  restart, the per-process log file) silently resolving to only one of
+  them.
+- `GET /api/logs?name=` (an explicit but empty value) now behaves exactly
+  like an omitted `name` for a `follow=true` request - it used to register
+  the connection under a follower key nothing ever dispatches to, leaving
+  it open and silently inert until the daemon shut down.
+
 ## [0.8.0] - 2026-09-15
 
 ### Added

@@ -4,7 +4,9 @@ import {
 	findStartAfterCycle,
 	validateAutoStart,
 	validateDependsOn,
+	validateReadyPattern,
 	validateStartAfter,
+	validateUniqueNames,
 } from "./dependency-graph.js";
 import type { ProcessConfig } from "./types.js";
 
@@ -279,6 +281,50 @@ describe("validateAutoStart", () => {
 		};
 		expect(() => validateAutoStart([config("api"), cron])).toThrow(
 			/"cron" has autoStart: false and also declares dependsOn/,
+		);
+	});
+});
+
+describe("validateUniqueNames", () => {
+	it("does not throw when every process name is unique", () => {
+		expect(() =>
+			validateUniqueNames([config("api"), config("client")]),
+		).not.toThrow();
+	});
+
+	it("does not throw for a single process", () => {
+		expect(() => validateUniqueNames([config("solo")])).not.toThrow();
+	});
+
+	it("throws when two processes share the same name", () => {
+		expect(() =>
+			validateUniqueNames([config("worker"), config("worker")]),
+		).toThrow(/duplicate process name "worker"/);
+	});
+});
+
+describe("validateReadyPattern", () => {
+	it("does not throw when no process sets readyPattern", () => {
+		expect(() => validateReadyPattern([config("api")])).not.toThrow();
+	});
+
+	it("does not throw for a valid readyPattern", () => {
+		const api: ProcessConfig = {
+			name: "api",
+			command: "node",
+			readyPattern: "Server listening",
+		};
+		expect(() => validateReadyPattern([api])).not.toThrow();
+	});
+
+	it("throws a clear startup error for an invalid readyPattern regex, instead of letting it surface later as a crash", () => {
+		const api: ProcessConfig = {
+			name: "api",
+			command: "node",
+			readyPattern: "(",
+		};
+		expect(() => validateReadyPattern([api])).toThrow(
+			/"api" has an invalid readyPattern "\("/,
 		);
 	});
 });

@@ -64,6 +64,60 @@ type ActiveStream = {
 	historyLoading: boolean;
 };
 
+/**
+ * Finds the longest prefix of `replayLines` that's already the tail of `existingLines`, and drops
+ * it - every (re)connect (including the very first) replays up to RECONNECT_REPLAY_LINES, which
+ * will usually overlap what's already shown (from history, or from before a dropped connection).
+ * Content is the only signal available (the plain-text stream carries no line position/sequence
+ * number), so a run of identical lines - a repeating health-check message, say - is inherently
+ * ambiguous: it might be the exact same bytes replayed again, or genuinely new output that just
+ * happens to repeat the same text. Treating every such run as "already seen" risks silently
+ * dropping real output; a matched run longer than one line where every line has the *same* text is
+ * never trusted wholesale for that reason - it keeps looking for a shorter, unambiguous match
+ * instead, favoring an occasional visible duplicate line over losing data.
+ *
+ * Exported standalone (pure, no DOM/class dependency) so this can be unit-tested on its own.
+ */
+export function dropAlreadySeenPrefix(
+	existingLines: string[],
+	replayLines: string[],
+): string[] {
+	const maxOverlap = Math.min(replayLines.length, existingLines.length);
+	for (let overlap = maxOverlap; overlap > 0; overlap--) {
+		const existingTail = existingLines.slice(-overlap);
+		let matches = true;
+		for (let i = 0; i < overlap; i++) {
+			if (existingTail[i] !== replayLines[i]) {
+				matches = false;
+				break;
+			}
+		}
+		if (!matches) continue;
+		const isDegenerateRun =
+			overlap > 1 && existingTail.every((line) => line === existingTail[0]);
+		if (isDegenerateRun) continue;
+		return replayLines.slice(overlap);
+	}
+	return replayLines;
+}
+
+/**
+ * Splits `pendingLine + chunk` on newlines, returning every completed line plus the new trailing
+ * partial line (not yet terminated by a newline) to carry forward into the next chunk. A raw
+ * stream chunk has no guaranteed alignment with line boundaries - a line can arrive split across
+ * several chunks, or several lines can arrive in one chunk.
+ *
+ * Exported standalone (pure, no DOM/class dependency) so this can be unit-tested on its own.
+ */
+export function splitIntoLines(
+	pendingLine: string,
+	chunk: string,
+): { lines: string[]; pendingLine: string } {
+	const parts = (pendingLine + chunk).split("\n");
+	const newPendingLine = parts.pop() ?? "";
+	return { lines: parts, pendingLine: newPendingLine };
+}
+
 export type LoadOlderState = { hidden: boolean; loading: boolean };
 
 export type LogControllerCallbacks = {
@@ -340,29 +394,12 @@ export class LogController {
 		this.refreshVirtualizer();
 	}
 
-	/** Finds the longest prefix of `replayLines` that's already the tail of `this.lines`, and drops
-	 *  it - every (re)connect (including the very first) replays up to RECONNECT_REPLAY_LINES, which
-	 *  will usually overlap what's already shown (from history, or from before a dropped
-	 *  connection). */
-	private dropAlreadySeenPrefix(replayLines: string[]): string[] {
-		const maxOverlap = Math.min(replayLines.length, this.lines.length);
-		for (let overlap = maxOverlap; overlap > 0; overlap--) {
-			const existingTail = this.lines.slice(-overlap);
-			let matches = true;
-			for (let i = 0; i < overlap; i++) {
-				if (existingTail[i].text !== replayLines[i]) {
-					matches = false;
-					break;
-				}
-			}
-			if (matches) return replayLines.slice(overlap);
-		}
-		return replayLines;
-	}
-
 	private resolveReplay(stream: ActiveStream): void {
 		stream.replayResolved = true;
-		const fresh = this.dropAlreadySeenPrefix(stream.replayBuffer);
+		const fresh = dropAlreadySeenPrefix(
+			this.lines.map((line) => line.text),
+			stream.replayBuffer,
+		);
 		stream.replayBuffer = [];
 		for (const text of fresh) this.pushLiveLine(text);
 	}
@@ -376,10 +413,9 @@ export class LogController {
 	}
 
 	private consumeChunk(stream: ActiveStream, chunk: string): void {
-		const combined = stream.pendingLine + chunk;
-		const parts = combined.split("\n");
-		stream.pendingLine = parts.pop() ?? "";
-		for (const text of parts) this.handleLiveLine(stream, text);
+		const { lines, pendingLine } = splitIntoLines(stream.pendingLine, chunk);
+		stream.pendingLine = pendingLine;
+		for (const text of lines) this.handleLiveLine(stream, text);
 	}
 
 	private scheduleLogRetry(stream: ActiveStream): void {
@@ -426,6 +462,14 @@ export class LogController {
 			}
 
 			this.callbacks.onStatusChange(undefined);
+			// A partial (no trailing newline) line still buffered from the previous connection wasn't
+			// finished on purpose - that connection just dropped mid-line. Flush it as complete, with
+			// the renderer state it was actually written under, before resetting for this new
+			// connection - the same way a clean stream end already does below - otherwise it's
+			// silently dropped every time a reconnect happens to land mid-line.
+			if (stream.pendingLine) {
+				this.pushLiveLine(stream.pendingLine);
+			}
 			this.liveAnsiUp = new AnsiUp();
 			stream.pendingLine = "";
 			stream.replayBuffer = [];

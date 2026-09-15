@@ -58,6 +58,23 @@ export function findStartAfterCycle(
 }
 
 /**
+ * Throws if two configs share the same `name` - every by-name operation (stop/restart, the
+ * pidfile worker list, a process's own log file) resolves to only one of them, silently
+ * orphaning the other rather than rejecting the config outright.
+ */
+export function validateUniqueNames(configs: ProcessConfig[]): void {
+	const seen = new Set<string>();
+	for (const config of configs) {
+		if (seen.has(config.name)) {
+			throw new Error(
+				`braid: duplicate process name "${config.name}" - every process needs a unique name`,
+			);
+		}
+		seen.add(config.name);
+	}
+}
+
+/**
  * Throws if any `dependsOn.processes` entry names a process that isn't configured, names the
  * process itself, or the graph as a whole loops back on itself (which would restart forever).
  */
@@ -137,6 +154,26 @@ export function validateAutoStart(configs: ProcessConfig[]): void {
 		if (config.autoStart === false && config.dependsOn?.processes.length) {
 			throw new Error(
 				`braid: process "${config.name}" has autoStart: false and also declares dependsOn - a dependency's restart would force-start it early, defeating autoStart: false. Remove one or the other.`,
+			);
+		}
+	}
+}
+
+/**
+ * Throws if any process's `readyPattern` isn't a valid regular expression. Compiling it here, at
+ * config-load time, turns a typo into a clear startup error - manager.ts's `handleFreshStart` and
+ * `ensureReady` both construct `new RegExp(config.readyPattern)` fresh on every restart with no
+ * error handling of their own, so an invalid pattern left unvalidated would instead throw deep
+ * inside a restart, as an unhandled rejection that crashes the whole daemon.
+ */
+export function validateReadyPattern(configs: ProcessConfig[]): void {
+	for (const config of configs) {
+		if (config.readyPattern === undefined) continue;
+		try {
+			new RegExp(config.readyPattern);
+		} catch (error) {
+			throw new Error(
+				`braid: process "${config.name}" has an invalid readyPattern "${config.readyPattern}": ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}

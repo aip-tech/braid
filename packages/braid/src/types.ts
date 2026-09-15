@@ -24,6 +24,14 @@ export type ProcessConfig = {
 	env?: Record<string, string>;
 	/** ANSI color name used for this process's log prefix (see COLOR_CODES in prefix.ts). */
 	color?: string;
+	/**
+	 * How long to wait after sending SIGTERM (to this process's whole tree) before escalating to
+	 * SIGKILL - e.g. for a process that traps SIGTERM for its own cleanup but occasionally hangs,
+	 * or a wrapper script that doesn't forward the signal to its own children. Applies to every
+	 * stop of this process: a manual `stop`/`restart`, a `dependsOn` cascade, and daemon shutdown.
+	 * @default 5000
+	 */
+	stopTimeoutMs?: number;
 	/** Paths to watch for changes; when set, braid restarts the process on a matching change. */
 	watch?: string[];
 	/**

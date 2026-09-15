@@ -28,11 +28,40 @@ describe("createControlServer", () => {
 		});
 		expect(wrongAuth.status).toBe(401);
 
+		// A token shorter/longer than the real one must be rejected cleanly (not throw) - the
+		// constant-time comparison's length check has to handle a mismatch itself.
+		const shortAuth = await fetch(`${base}/hello`, {
+			headers: { Authorization: "Bearer short" },
+		});
+		expect(shortAuth.status).toBe(401);
+		const longAuth = await fetch(`${base}/hello`, {
+			headers: { Authorization: `Bearer ${server.token}-extra-characters` },
+		});
+		expect(longAuth.status).toBe(401);
+
 		const ok = await fetch(`${base}/hello`, {
 			headers: { Authorization: `Bearer ${server.token}` },
 		});
 		expect(ok.status).toBe(200);
 		expect(await ok.text()).toBe("hi");
+
+		await server.close();
+	});
+
+	it("returns a generic 500 body for a route handler that throws, without leaking the error message", async () => {
+		const server = createControlServer();
+		server.registerRoute("GET", "/boom", () => {
+			throw new Error("/etc/some-internal-path was not found");
+		});
+		const { port } = await server.listen();
+
+		const res = await fetch(`http://127.0.0.1:${port}/boom`, {
+			headers: { Authorization: `Bearer ${server.token}` },
+		});
+		expect(res.status).toBe(500);
+		const body = await res.text();
+		expect(body).not.toContain("/etc/some-internal-path");
+		expect(body).toBe("Internal error");
 
 		await server.close();
 	});

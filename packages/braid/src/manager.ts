@@ -1,6 +1,7 @@
 import { type ChildProcess, fork, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -15,7 +16,9 @@ import { CORE_PLUGINS } from "./core-plugins/index.js";
 import {
 	validateAutoStart,
 	validateDependsOn,
+	validateReadyPattern,
 	validateStartAfter,
+	validateUniqueNames,
 } from "./dependency-graph.js";
 import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import { loadExternalPlugins } from "./plugin-loader.js";
@@ -44,6 +47,8 @@ const SHUTDOWN_EVENT_TIMEOUT_MS = 2000;
 const DEFAULT_HOOK_RETRIES = 5;
 const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
+// How long stopChild waits after SIGTERM before escalating to SIGKILL.
+const DEFAULT_STOP_TIMEOUT_MS = 5000;
 // Bounds the rolling buffer readyPattern is tested against, so a chatty process before it's
 // actually ready can't grow this without bound while still letting a match span two chunks.
 const READY_PATTERN_BUFFER_BYTES = 8192;
@@ -99,9 +104,12 @@ function isAlive(pid: number): boolean {
 	}
 }
 
-function killPid(pid: number): Promise<void> {
+function killPid(
+	pid: number,
+	signal: "SIGTERM" | "SIGKILL" = "SIGTERM",
+): Promise<void> {
 	return new Promise((resolve) => {
-		treeKill(pid, "SIGTERM", () => resolve());
+		treeKill(pid, signal, () => resolve());
 	});
 }
 
@@ -113,12 +121,35 @@ function waitForExit(child: ChildProcess): Promise<void> {
 	return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
-/** Sends SIGTERM to `child`'s whole process tree and waits for it to actually exit. */
-async function stopChild(child: ChildProcess): Promise<void> {
+/**
+ * Sends SIGTERM to `child`'s whole process tree and waits for it to actually exit, escalating to
+ * SIGKILL after `timeoutMs` if it hasn't - without this, a process that traps/ignores SIGTERM (or
+ * a wrapper script that doesn't forward it to its own children) would hang stop/restart/shutdown
+ * forever, since `waitForExit` alone has no way to give up.
+ */
+async function stopChild(
+	child: ChildProcess,
+	{
+		timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+		label,
+	}: { timeoutMs?: number; label?: string } = {},
+): Promise<void> {
 	if (typeof child.pid !== "number") return;
 	const exited = waitForExit(child);
-	await killPid(child.pid);
-	await exited;
+	await killPid(child.pid, "SIGTERM");
+	let timer: NodeJS.Timeout | undefined;
+	const timedOut = new Promise<boolean>((resolve) => {
+		timer = setTimeout(() => resolve(true), timeoutMs);
+	});
+	const didTimeOut = await Promise.race([exited.then(() => false), timedOut]);
+	clearTimeout(timer);
+	if (didTimeOut) {
+		process.stderr.write(
+			`${braidTag()} "${label ?? child.pid}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+		);
+		await killPid(child.pid, "SIGKILL");
+		await exited;
+	}
 }
 
 function delay(ms: number): Promise<void> {
@@ -202,9 +233,11 @@ export async function runManager(
 			"braid: options.configPath is required to resolve options.plugins",
 		);
 	}
+	validateUniqueNames(configs);
 	validateDependsOn(configs);
 	validateStartAfter(configs);
 	validateAutoStart(configs);
+	validateReadyPattern(configs);
 	for (const config of configs) {
 		if (config.beforeRestart && !(config.watch && config.watch.length > 0)) {
 			throw new Error(
@@ -215,7 +248,13 @@ export async function runManager(
 	const baseCwd = options.cwd ?? process.cwd();
 	const configsByName = new Map(configs.map((config) => [config.name, config]));
 
-	mkdirSync(dirname(pidfilePath), { recursive: true });
+	// mode: 0o700, not just the default - the pidfile written into this directory carries the
+	// control-server's bearer token, so another local user on a shared host shouldn't be able to
+	// read it merely by having "execute" on this directory. mkdirSync's mode is a no-op against an
+	// already-existing directory (e.g. one left over from before this was added), so chmodSync
+	// explicitly rather than relying on it having been created with the right mode in the first place.
+	mkdirSync(dirname(pidfilePath), { recursive: true, mode: 0o700 });
+	chmodSync(dirname(pidfilePath), 0o700);
 	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
 
 	const children = new Map<string, ChildProcess>();
@@ -378,12 +417,18 @@ export async function runManager(
 			const stats = await pidusage(aliveWorkers.map((worker) => worker.pid));
 			for (const worker of aliveWorkers) {
 				const stat = stats[worker.pid];
-				if (stat) {
-					statsByName.set(worker.name, {
-						cpu: Math.round(stat.cpu * 10) / 10,
-						memory: stat.memory,
-					});
-				}
+				if (!stat) continue;
+				// A restart can race this same await: spawnWorker assigns a fresh pid and clears
+				// statsByName for this name while pidusage() above is still in flight. Re-check the
+				// *current* pid for this name against the one actually sampled before writing, so a
+				// stale sample from the old pid can't land back in after spawnWorker already cleared
+				// it - without this, the new process's row would show its predecessor's cpu/memory.
+				const current = pidfileWorkers.find((w) => w.name === worker.name);
+				if (current?.pid !== worker.pid) continue;
+				statsByName.set(worker.name, {
+					cpu: Math.round(stat.cpu * 10) / 10,
+					memory: stat.memory,
+				});
 			}
 			statsFailureLogged = false;
 		} catch (error) {
@@ -420,7 +465,13 @@ export async function runManager(
 			controlPort,
 			controlToken: controlServer.token,
 		};
-		writeFileSync(pidfilePath, JSON.stringify(pidfile, null, 2));
+		// mode only applies to a *new* file (it's ignored if pidfilePath already exists), so
+		// chmodSync explicitly too - otherwise a stale file left with looser permissions from before
+		// this was added would carry the control token unprotected across every later rewrite.
+		writeFileSync(pidfilePath, JSON.stringify(pidfile, null, 2), {
+			mode: 0o600,
+		});
+		chmodSync(pidfilePath, 0o600);
 	}
 
 	const onSignal = (): void => {
@@ -485,8 +536,15 @@ export async function runManager(
 		clearTimeout(shutdownEventTimer);
 
 		await Promise.all([
-			...[...children.values()].map((child) => stopChild(child)),
-			...[...hookChildren].map((child) => stopChild(child)),
+			...[...children].map(([name, child]) =>
+				stopChild(child, {
+					timeoutMs: configsByName.get(name)?.stopTimeoutMs,
+					label: name,
+				}),
+			),
+			...[...hookChildren].map((child) =>
+				stopChild(child, { label: "hook process" }),
+			),
 			controlServer.close(),
 		]);
 		rmSync(pidfilePath, { force: true });
@@ -723,8 +781,13 @@ export async function runManager(
 
 	/**
 	 * Stops `config`'s worker, runs its `dependsOn.run` hook to completion (if set), and forks a
-	 * fresh worker for it - then cascades to whatever depends on `config` in turn. Left stopped,
-	 * with an error logged, if the hook keeps failing after its retries are exhausted.
+	 * fresh worker for it - then routes through `handleFreshStart` exactly like a direct restart
+	 * does, so `config`'s own `readyPattern`/`onRestart` are honored before cascading to whatever
+	 * depends on `config` in turn (not just once it's respawned). Without this, a multi-hop
+	 * `dependsOn` chain (`grandchild -> client -> api`) would cascade to `grandchild` the instant
+	 * `client` respawns, skipping both `client`'s own `readyPattern` wait and its `onRestart` hook -
+	 * exactly the gating a direct restart of `client` already gets via `restartProcessByName`. Left
+	 * stopped, with an error logged, if the hook keeps failing after its retries are exhausted.
 	 */
 	async function restartDependent(config: ProcessConfig): Promise<void> {
 		if (shuttingDown || restarting.has(config.name)) return;
@@ -733,7 +796,10 @@ export async function runManager(
 			const current = children.get(config.name);
 			if (current) {
 				logToProcess(config, "stopping (dependency restarted)");
-				await stopChild(current);
+				await stopChild(current, {
+					timeoutMs: config.stopTimeoutMs,
+					label: config.name,
+				});
 			}
 			if (shuttingDown) return;
 
@@ -752,7 +818,7 @@ export async function runManager(
 
 			spawnWorker(config);
 			rewritePidfile();
-			onProcessRestarted(config.name);
+			await handleFreshStart(config, { lockHeld: true });
 		} finally {
 			restarting.delete(config.name);
 			// A permanently-failed hook can leave this the last worker standing; re-check now that
@@ -876,7 +942,10 @@ export async function runManager(
 		}
 		manuallyStopped.add(name);
 		logToProcess(config, "stopping (manual stop)");
-		await stopChild(current);
+		await stopChild(current, {
+			timeoutMs: config.stopTimeoutMs,
+			label: config.name,
+		});
 		return "ok";
 	}
 
@@ -900,7 +969,10 @@ export async function runManager(
 			const current = children.get(name);
 			if (current && current.exitCode === null && current.signalCode === null) {
 				logToProcess(config, "stopping (manual restart)");
-				await stopChild(current);
+				await stopChild(current, {
+					timeoutMs: config.stopTimeoutMs,
+					label: config.name,
+				});
 			}
 			if (shuttingDown) return "busy";
 			spawnWorker(config);

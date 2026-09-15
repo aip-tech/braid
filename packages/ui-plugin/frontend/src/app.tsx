@@ -76,8 +76,17 @@ export function App() {
 			setBanner(`braid: ${res.status} ${await res.text()}`);
 			return;
 		}
+		let data: ProcessStatus[];
+		try {
+			data = (await res.json()) as ProcessStatus[];
+		} catch {
+			// A 200 with a truncated/malformed body (a proxy or the daemon restarting mid-response) -
+			// treat exactly like the fetch()-throws case above: skip this tick silently rather than
+			// letting res.json() throw uncaught inside this unawaited (`void refreshStatus()`) call,
+			// which would otherwise surface as an unhandled rejection. Self-heals on the next poll.
+			return;
+		}
 		setBanner(undefined);
-		const data = (await res.json()) as ProcessStatus[];
 		setProcesses(data);
 		setStatusLoaded(true);
 		setHistory((prev) => {
