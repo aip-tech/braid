@@ -41,11 +41,24 @@ braid start --config ./other.config.ts</code></pre>
 					</p>
 					<pre><code class="language-bash">braid start --foreground
 braid start --daemon</code></pre>
+					<p>
+						With a name: starts just that one configured process inside an
+						already-running daemon, leaving everything else alone &mdash; the way to
+						bring up a process configured with <code>autoStart: false</code> (see
+						<a href="./config.html#starting-on-demand">Starting on demand</a>). Like
+						<code>restart &lt;name&gt;</code>, this needs the daemon to actually be
+						reachable, and is a safe no-op if the process is already running.
+					</p>
+					<pre><code class="language-bash">braid start cron</code></pre>
 				</section>
 
 				<section id="status">
 					<h2><code>braid status</code></h2>
-					<p>Lists each configured process's name, PID, and whether it's currently alive.</p>
+					<p>
+						Lists each configured process's name, PID, and state: running, stopped
+						(ran before, has since exited), or not started (an <code>autoStart:
+						false</code> process nobody's started yet in this daemon's lifetime).
+					</p>
 					<pre><code class="language-bash">braid status</code></pre>
 				</section>
 

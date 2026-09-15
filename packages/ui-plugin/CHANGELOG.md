@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.5.0] - 2026-09-15
+
+### Added
+
+- A Start button for a process configured with `autoStart: false` that's
+  never been started, in both the table and detail views - shown instead
+  of Stop/Restart, backed by `@aip-tech/braid`'s new
+  `braid start <name>`/`POST /api/processes/start` (requires
+  `@aip-tech/braid` 0.7.0+; on an older core no process is ever shown as
+  "not started" in the first place, so this is purely additive). The row
+  shows "not started" status until the first start, then behaves exactly
+  like any other process from then on.
+
 ## [0.4.0] - 2026-08-21
 
 ### Added

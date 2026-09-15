@@ -12,7 +12,11 @@ import pidusage from "pidusage";
 import treeKill from "tree-kill";
 import { createControlServer } from "./control-server.js";
 import { CORE_PLUGINS } from "./core-plugins/index.js";
-import { validateDependsOn, validateStartAfter } from "./dependency-graph.js";
+import {
+	validateAutoStart,
+	validateDependsOn,
+	validateStartAfter,
+} from "./dependency-graph.js";
 import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import { loadExternalPlugins } from "./plugin-loader.js";
 import {
@@ -200,6 +204,7 @@ export async function runManager(
 	}
 	validateDependsOn(configs);
 	validateStartAfter(configs);
+	validateAutoStart(configs);
 	for (const config of configs) {
 		if (config.beforeRestart && !(config.watch && config.watch.length > 0)) {
 			throw new Error(
@@ -239,18 +244,35 @@ export async function runManager(
 			}
 		}
 	}
+	// autoStart:false configs never fork as part of boot, regardless of startAfter membership -
+	// validateStartAfter already rejects one being named as someone else's startAfter *target*, but
+	// one that declares startAfter itself (waiting on others for its own later manual start) stays
+	// out of the boot-time ordered loop below and only runs its startAfter chain via ensureReady()
+	// when startProcessByName eventually starts it.
+	const manualNames = new Set(
+		configs
+			.filter((config) => config.autoStart === false)
+			.map((config) => config.name),
+	);
 	const immediateConfigs = configs.filter(
-		(config) => !startAfterNames.has(config.name),
+		(config) =>
+			!startAfterNames.has(config.name) && !manualNames.has(config.name),
 	);
-	const orderedConfigs = configs.filter((config) =>
-		startAfterNames.has(config.name),
+	const orderedConfigs = configs.filter(
+		(config) =>
+			startAfterNames.has(config.name) && !manualNames.has(config.name),
 	);
-	// Ordered config names not yet forked - guards shutdownIfEveryWorkerIsDone against deciding
-	// "nothing left running" while one of these hasn't even spawned yet (so it's simply absent from
-	// `children`, not "exited").
-	const pendingStartAfter = new Set(
-		orderedConfigs.map((config) => config.name),
-	);
+	// Names not yet forked for the first time - either a boot-time startAfter chain still resolving,
+	// or an autoStart:false process nobody has manually started yet - guarding
+	// shutdownIfEveryWorkerIsDone against deciding "nothing left running" while one of these hasn't
+	// even spawned once (so it's simply absent from `children`, not "exited"). Cleared inside
+	// spawnWorker itself (not by each caller) so every path that can perform a first spawn - the
+	// loops below, ensureReady, and startProcessByName's own call into ensureReady - clears it the
+	// same way.
+	const pendingFirstSpawn = new Set([
+		...orderedConfigs.map((config) => config.name),
+		...manualNames,
+	]);
 	let shuttingDown = false;
 	let exitCode = 0;
 
@@ -272,8 +294,14 @@ export async function runManager(
 	// broken setup (missing `ps`, unsupported platform) doesn't stay silent forever.
 	let statsFailureLogged = false;
 	let statsInterval: NodeJS.Timeout | undefined;
+	// Maps every *configured* process, not just ones that have run - an autoStart:false process
+	// nobody's started yet has no pidfileWorkers entry, and shows up here as pid/startedAt
+	// undefined, alive false, so status/the dashboard can list it (and offer to start it) before
+	// its first fork.
 	const getWorkers = () =>
-		pidfileWorkers.map((worker) => {
+		configs.map((config) => {
+			const worker = pidfileWorkers.find((w) => w.name === config.name);
+			if (!worker) return { name: config.name, pid: undefined, alive: false };
 			const alive = isAlive(worker.pid);
 			const stats = alive ? statsByName.get(worker.name) : undefined;
 			return {
@@ -290,6 +318,7 @@ export async function runManager(
 		emitter,
 		stopProcess: (name) => stopProcessByName(name),
 		restartProcess: (name) => restartProcessByName(name),
+		startProcess: (name) => startProcessByName(name),
 	});
 
 	// Options per core plugin, by name - not every core plugin needs config.
@@ -568,6 +597,9 @@ export async function runManager(
 	}
 
 	function spawnWorker(config: ProcessConfig): void {
+		// Harmless no-op if `config.name` was never pending one (every restart of an
+		// already-started process goes through here too) - see pendingFirstSpawn's own comment.
+		pendingFirstSpawn.delete(config.name);
 		const child = fork(WORKER_PATH, [], {
 			cwd: config.cwd ? join(baseCwd, config.cwd) : baseCwd,
 			env: {
@@ -675,7 +707,7 @@ export async function runManager(
 	 * dependsOn stop/restart cycle, there's nothing left running and the manager should wind down.
 	 */
 	function shutdownIfEveryWorkerIsDone(): void {
-		if (shuttingDown || restarting.size > 0 || pendingStartAfter.size > 0) {
+		if (shuttingDown || restarting.size > 0 || pendingFirstSpawn.size > 0) {
 			return;
 		}
 		const everyWorkerExited = [...children.values()].every(
@@ -881,6 +913,31 @@ export async function runManager(
 		}
 	}
 
+	/**
+	 * Starts a configured process that isn't currently running. Idempotent no-op ("ok") if it's
+	 * already alive - unlike `restartProcessByName`, which would kill and respawn it regardless.
+	 * For a process that has never been forked at all in this daemon's lifetime (an `autoStart:
+	 * false` process nobody's started yet, or one still waiting on its own `startAfter` chain),
+	 * this goes through `ensureReady` - the exact same path the boot-time loops use for a genuine
+	 * first spawn - rather than `restartProcessByName`, so it honors `startAfter` and does NOT
+	 * cascade to `dependsOn` dependents the way an actual restart would (a first spawn is not a
+	 * restart). For a process that has run before and is currently stopped, it delegates to
+	 * `restartProcessByName` unchanged - the existing "Restart a stopped process" behavior.
+	 */
+	async function startProcessByName(
+		name: string,
+	): Promise<ProcessActionResult> {
+		const config = configsByName.get(name);
+		if (!config) return "unknown";
+		const current = children.get(name);
+		if (current && current.exitCode === null && current.signalCode === null) {
+			return "ok";
+		}
+		if (current) return restartProcessByName(name);
+		void ensureReady(name);
+		return "ok";
+	}
+
 	// Memoized per name - see ensureReady below for why setting this synchronously (no `await`
 	// between creating the promise and storing it) is what makes it safe against a diamond
 	// dependency or the top-level loop below calling ensureReady for the same name twice.
@@ -904,7 +961,6 @@ export async function runManager(
 			}
 			if (shuttingDown) return;
 			spawnWorker(config);
-			pendingStartAfter.delete(name);
 			rewritePidfile();
 			if (config.readyPattern) {
 				const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;

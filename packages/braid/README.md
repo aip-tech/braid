@@ -31,6 +31,7 @@ export default defineConfig({
 - `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `startAfter`: `{ processes }` — don't fork this process for the first time until `processes` are themselves ready. See [Waiting to start](#waiting-to-start).
+- `autoStart`: set `false` to keep this process from forking when `start` boots the whole stack — start it later on demand instead. See [Starting on demand](#starting-on-demand). @default `true`
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
 - `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
@@ -49,6 +50,9 @@ npx @aip-tech/braid logs [name] --follow     # keep streaming new output
 npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
 npx @aip-tech/braid stop                     # kill everything
 npx @aip-tech/braid start --config ./other.config.ts
+npx @aip-tech/braid start <name>             # start one configured process in an already-running daemon
+npx @aip-tech/braid restart <name>           # stop and re-fork one process, leaving the rest alone
+npx @aip-tech/braid stop <name>              # stop one process, leaving the rest (and the daemon) running
 ```
 
 In `--foreground` mode, `start` blocks until every process stops (Ctrl-C, or `braid stop` from another terminal), streaming their combined output straight here instead of only to the log files.
@@ -141,6 +145,21 @@ Without `readyPattern`, dependents are held off only until `api` has re-spawned 
 ```
 
 `client` isn't forked until `api`'s own `readyPattern` matches (or its `readyTimeoutMs` elapses — same best-effort semantics as above); if `api` sets no `readyPattern`, `client` forks as soon as `api` has been forked. This only affects each process's first spawn — once everything is up, later watch-triggered/`dependsOn`/manual restarts are entirely unaffected, and `start` itself doesn't wait around for a slow `startAfter` chain to finish before returning. A `startAfter` chain that loops back on itself is rejected at startup, same as a circular `dependsOn`.
+
+## Starting on demand
+
+Set `autoStart: false` to keep a process from forking at all when `start` boots the whole stack — useful for a cron-style job you only want to run when you ask for it. It's still fully configured (listed by `status`/the dashboard as "not started"), just never spawned automatically:
+
+```ts
+{
+	name: "cron",
+	command: "pnpm",
+	args: ["--filter", "./jobs", "run", "nightly-report"],
+	autoStart: false, // @default true
+},
+```
+
+Start it later with `braid start cron`, the dashboard's Start button, or `PluginContext.startProcess()` from a plugin. Calling start on an already-running process is a safe no-op — it doesn't kill and respawn it the way `restart` would. A process can combine `autoStart: false` with its own `startAfter` — its later manual start still waits on those dependencies first — but not with `dependsOn` (a dependency's restart would force-start it early, defeating the point), and it can't be named as someone else's `startAfter` target (that dependent would never see it become ready on its own). Both are rejected at startup.
 
 ## Logs
 

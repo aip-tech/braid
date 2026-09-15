@@ -90,17 +90,19 @@ export default helloPlugin;</code></pre>
 						<li><code>registerStatic(prefix, dir)</code> &mdash; serves files under <code>dir</code> for any request path starting with <code>prefix</code>. Throws if the prefix is already taken.</li>
 						<li><code>registerUpgrade(path, handler)</code> &mdash; raw HTTP Upgrade dispatch (e.g. for a WebSocket) on an exact path match.</li>
 						<li><code>on(type, handler)</code> &mdash; subscribes to a process lifecycle event, see below.</li>
-						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt, cpu?, memory? }[]</code> for every configured process, the same data <code>status</code> renders. <code>cpu</code> (percent of one core) and <code>memory</code> (RSS bytes) are absent until the daemon's first sample, or while a process is stopped.</li>
+						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt?, cpu?, memory? }[]</code> for every <em>configured</em> process, the same data <code>status</code> renders &mdash; including one with <code>autoStart: false</code> that's never been started (<code>pid</code>/<code>startedAt</code> absent, <code>alive: false</code>). <code>cpu</code>/<code>memory</code> are likewise absent until the daemon's first sample, or while a process is stopped.</li>
 						<li><code>stopProcess(name)</code> &mdash; stops one named process. Resolves <code>"ok"</code>, <code>"unknown"</code> (not configured, or not currently running), or <code>"busy"</code> (a restart is already in progress for it).</li>
 						<li><code>restartProcess(name)</code> &mdash; stops and respawns one named process, then runs its own <code>onRestart</code> hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a watch-triggered restart would. Can take a while to resolve if <code>onRestart</code> keeps retrying. Resolves <code>"ok"</code>, <code>"unknown"</code>, or <code>"busy"</code>.</li>
+						<li><code>startProcess(name)</code> &mdash; starts a configured process that isn't currently running; the counterpart to <code>restartProcess</code> for one that's stopped or has <code>autoStart: false</code> and has never run. Idempotent: resolves <code>"ok"</code> as a no-op if it's already alive, rather than killing and respawning it the way <code>restartProcess</code> would. A genuine first start doesn't cascade to <code>dependsOn</code> dependents the way a restart does, but does honor the process's own <code>startAfter</code> if it sets one.</li>
 						<li><code>log(message)</code> &mdash; writes a line to stderr, prefixed with this plugin's own name. If sent before the daemon's ready handshake (e.g. from a <code>controlServerReady</code> handler), also relayed straight to the terminal that ran <code>braid start</code>, not just <code>daemon.log</code>.</li>
 					</ul>
 					<p>
-						<code>stopProcess</code>/<code>restartProcess</code> are available to
-						<em>every</em> plugin, not only ones that registered the affected process
-						themselves &mdash; a plugin can stop or restart any configured process. Same
-						trust level as any other capability in your <code>node_modules</code>, worth
-						knowing before wiring one up to something you didn't write yourself.
+						<code>stopProcess</code>/<code>restartProcess</code>/<code>startProcess</code>
+						are available to <em>every</em> plugin, not only ones that registered the
+						affected process themselves &mdash; a plugin can stop, restart, or start any
+						configured process. Same trust level as any other capability in your
+						<code>node_modules</code>, worth knowing before wiring one up to something you
+						didn't write yourself.
 					</p>
 					<p>
 						The control server itself is loopback-only (<code>127.0.0.1</code>) and

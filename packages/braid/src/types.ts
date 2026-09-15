@@ -45,6 +45,19 @@ export type ProcessConfig = {
 	/** How long to wait for `readyPattern` before giving up and proceeding anyway. @default 10000 */
 	readyTimeoutMs?: number;
 	/**
+	 * Whether this process forks when `braid start` boots the whole stack. Set `false` for a
+	 * process you only want running on demand (a cron-style job, say) - it's still fully
+	 * configured (visible in `status`/the dashboard as "not started"), just never spawned
+	 * automatically. Start it later with `braid start <name>`, the dashboard's Start button, or
+	 * `PluginContext.startProcess()`. Cannot be combined with a non-empty `dependsOn` (a
+	 * dependency's restart would force-start it early) or be named as a `startAfter` target of
+	 * another process (that dependent would never see it become ready) - both rejected at
+	 * startup. Can itself declare `startAfter`: doing so delays its *manual* first start until
+	 * those processes are ready, exactly like it would delay an automatic first start.
+	 * @default true
+	 */
+	autoStart?: boolean;
+	/**
 	 * Restart this process whenever any of these other configured processes restarts (a
 	 * `watch`-triggered restart, or one cascaded from its own `dependsOn`). Referencing an
 	 * unknown process name, or a chain that loops back on itself, is rejected at startup.
@@ -232,7 +245,8 @@ export type PluginContext = {
 		name: string;
 		pid: number | undefined;
 		alive: boolean;
-		startedAt: string;
+		/** Absent for a configured process that has never been forked yet (`autoStart: false`, not yet started). */
+		startedAt?: string;
 		/** Percent of one CPU core, sampled every `statsPollIntervalMs`. Absent until the first sample. */
 		cpu?: number;
 		/** RSS in bytes, sampled every `statsPollIntervalMs`. Absent until the first sample. */
@@ -253,6 +267,15 @@ export type PluginContext = {
 	 * if `name` isn't configured, "busy" if already restarting, "ok" once fully restarted.
 	 */
 	restartProcess(name: string): Promise<ProcessActionResult>;
+	/**
+	 * Starts a configured process that isn't currently running - the "not started" counterpart to
+	 * `restartProcess`. Idempotent: returns "ok" as a no-op if `name` is already alive, rather than
+	 * killing and respawning it the way `restartProcess` would. Resolves "unknown" if `name` isn't
+	 * configured, "ok" once the start has been kicked off (which, for a process with its own
+	 * `startAfter`, may still be waiting on a dependency in the background - this doesn't block on
+	 * that, matching how a `braid start` of the whole stack never blocks on `startAfter` either).
+	 */
+	startProcess(name: string): Promise<ProcessActionResult>;
 	/** Writes a line to stderr, prefixed with this plugin's name. */
 	log(message: string): void;
 };

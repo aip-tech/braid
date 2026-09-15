@@ -89,11 +89,14 @@ export function validateDependsOn(configs: ProcessConfig[]): void {
 
 /**
  * Throws if any `startAfter.processes` entry names a process that isn't configured, names the
- * process itself, or the graph as a whole loops back on itself (which would deadlock startup,
- * since none of the processes in the cycle could ever be considered ready to fork).
+ * process itself, names a process with `autoStart: false` (which would never fork on its own, so
+ * the dependent would either wait forever or - via a later manual start of the dependent - end up
+ * silently auto-starting a process that was explicitly told not to), or the graph as a whole
+ * loops back on itself (which would deadlock startup, since none of the processes in the cycle
+ * could ever be considered ready to fork).
  */
 export function validateStartAfter(configs: ProcessConfig[]): void {
-	const names = new Set(configs.map((config) => config.name));
+	const configsByName = new Map(configs.map((config) => [config.name, config]));
 
 	for (const config of configs) {
 		for (const dependency of config.startAfter?.processes ?? []) {
@@ -102,9 +105,15 @@ export function validateStartAfter(configs: ProcessConfig[]): void {
 					`braid: process "${config.name}" cannot start after itself`,
 				);
 			}
-			if (!names.has(dependency)) {
+			const dependencyConfig = configsByName.get(dependency);
+			if (!dependencyConfig) {
 				throw new Error(
 					`braid: process "${config.name}" starts after unknown process "${dependency}"`,
+				);
+			}
+			if (dependencyConfig.autoStart === false) {
+				throw new Error(
+					`braid: process "${config.name}" starts after "${dependency}", but "${dependency}" has autoStart: false so it never forks on its own - remove autoStart: false from "${dependency}", or remove the startAfter reference`,
 				);
 			}
 		}
@@ -115,5 +124,20 @@ export function validateStartAfter(configs: ProcessConfig[]): void {
 		throw new Error(
 			`braid: circular startup dependency: ${cycle.join(" -> ")}`,
 		);
+	}
+}
+
+/**
+ * Throws if a process sets both `autoStart: false` and a non-empty `dependsOn` - a dependency's
+ * restart would force-spawn it (via the dependsOn cascade in manager.ts's `restartDependent`)
+ * before it's ever been manually started, silently defeating `autoStart: false`.
+ */
+export function validateAutoStart(configs: ProcessConfig[]): void {
+	for (const config of configs) {
+		if (config.autoStart === false && config.dependsOn?.processes.length) {
+			throw new Error(
+				`braid: process "${config.name}" has autoStart: false and also declares dependsOn - a dependency's restart would force-start it early, defeating autoStart: false. Remove one or the other.`,
+			);
+		}
 	}
 }

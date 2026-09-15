@@ -105,7 +105,7 @@ export function App() {
 	}, [refreshStatus]);
 
 	const runAction = useCallback(
-		async (action: "stop" | "restart", name: string) => {
+		async (action: "stop" | "restart" | "start", name: string) => {
 			setPending((prev) => new Set(prev).add(name));
 			setRowErrors((prev) => {
 				const next = new Map(prev);

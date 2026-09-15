@@ -13,7 +13,7 @@ function respond(
 	if (result === "busy") {
 		res
 			.writeHead(409, { "content-type": "text/plain" })
-			.end("busy: a restart is already in progress for this process");
+			.end("busy: an operation is already in progress for this process");
 		return;
 	}
 	res.writeHead(404, { "content-type": "text/plain" }).end(unknownMessage);
@@ -47,6 +47,17 @@ export const processesPlugin: BraidPlugin = {
 				return;
 			}
 			respond(res, await ctx.restartProcess(name), "unknown process");
+		});
+		ctx.registerRoute("POST", "/api/processes/start", async (req, res) => {
+			const url = new URL(req.url ?? "/", "http://localhost");
+			const name = url.searchParams.get("name");
+			if (!name) {
+				res
+					.writeHead(400, { "content-type": "text/plain" })
+					.end("name query param required");
+				return;
+			}
+			respond(res, await ctx.startProcess(name), "unknown process");
 		});
 	},
 };

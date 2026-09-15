@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	findDependencyCycle,
 	findStartAfterCycle,
+	validateAutoStart,
 	validateDependsOn,
 	validateStartAfter,
 } from "./dependency-graph.js";
@@ -20,6 +21,7 @@ function config(name: string, dependsOnProcesses?: string[]): ProcessConfig {
 function startAfterConfig(
 	name: string,
 	startAfterProcesses?: string[],
+	autoStart?: boolean,
 ): ProcessConfig {
 	return {
 		name,
@@ -27,6 +29,7 @@ function startAfterConfig(
 		...(startAfterProcesses
 			? { startAfter: { processes: startAfterProcesses } }
 			: {}),
+		...(autoStart !== undefined ? { autoStart } : {}),
 	};
 }
 
@@ -230,5 +233,52 @@ describe("validateStartAfter", () => {
 				startAfterConfig("c", ["a"]),
 			]),
 		).toThrow(/circular startup dependency: a -> b -> c -> a/);
+	});
+
+	it("throws when a startAfter target has autoStart: false", () => {
+		expect(() =>
+			validateStartAfter([
+				startAfterConfig("client", ["api"]),
+				startAfterConfig("api", undefined, false),
+			]),
+		).toThrow(/"client" starts after "api", but "api" has autoStart: false/);
+	});
+
+	it("does not throw when the startAfter *dependent* (not the target) has autoStart: false", () => {
+		expect(() =>
+			validateStartAfter([
+				startAfterConfig("cron", ["api"], false),
+				startAfterConfig("api"),
+			]),
+		).not.toThrow();
+	});
+});
+
+describe("validateAutoStart", () => {
+	it("does not throw for a plain autoStart: false process with no dependsOn", () => {
+		const cron: ProcessConfig = {
+			name: "cron",
+			command: "node",
+			autoStart: false,
+		};
+		expect(() => validateAutoStart([cron])).not.toThrow();
+	});
+
+	it("does not throw when autoStart is left at its default (true) alongside dependsOn", () => {
+		expect(() =>
+			validateAutoStart([config("api"), config("client", ["api"])]),
+		).not.toThrow();
+	});
+
+	it("throws when a process combines autoStart: false with a non-empty dependsOn", () => {
+		const cron: ProcessConfig = {
+			name: "cron",
+			command: "node",
+			autoStart: false,
+			dependsOn: { processes: ["api"] },
+		};
+		expect(() => validateAutoStart([config("api"), cron])).toThrow(
+			/"cron" has autoStart: false and also declares dependsOn/,
+		);
 	});
 });

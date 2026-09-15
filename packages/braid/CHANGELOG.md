@@ -5,6 +5,33 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.7.0] - 2026-09-15
+
+### Added
+
+- `autoStart: false` on `ProcessConfig` — keep a process from forking when
+  `start` boots the whole stack; it stays fully configured (shown by
+  `status`/the dashboard as "not started") until started on demand via
+  `braid start <name>`, the dashboard's Start button, or
+  `PluginContext.startProcess()`. Starting an already-running process is a
+  safe no-op. Rejected at startup if combined with a non-empty `dependsOn`
+  on the same process, or if named as another process's `startAfter`
+  target — both would force-start it before anyone asked. See
+  [Starting on demand](./README.md#starting-on-demand).
+- `braid start <name>` — starts one configured process inside an
+  already-running daemon, the counterpart to the existing
+  `stop <name>`/`restart <name>`.
+- New `POST /api/processes/start` control-server route and
+  `PluginContext.startProcess(name)`.
+
+### Changed
+
+- `PluginContext.getProcesses()` (and so `GET /api/status`) now includes
+  every *configured* process, not only ones that have run at least once —
+  a never-started `autoStart: false` process shows up with `pid`/
+  `startedAt` absent and `alive: false`. `startedAt` is correspondingly
+  optional now on that return type; every other field is unchanged.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added

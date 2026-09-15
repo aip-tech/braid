@@ -80,5 +80,14 @@ export default defineConfig({
 				],
 			},
 		},
+		{
+			// `autoStart: false` - a cron-style one-shot that never runs on `braid start`. Start it
+			// on demand with `braid start cron` or the dashboard's Start button.
+			name: "cron",
+			color: "red",
+			command: "tsx",
+			args: ["src/cron.ts"],
+			autoStart: false,
+		},
 	],
 });

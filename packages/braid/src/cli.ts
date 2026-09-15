@@ -265,7 +265,8 @@ type LiveProcessStatus = {
 	name: string;
 	pid: number | undefined;
 	alive: boolean;
-	startedAt: string;
+	/** Absent for a configured process that has never been started (`autoStart: false`). */
+	startedAt?: string;
 	cpu?: number;
 	memory?: number;
 };
@@ -305,7 +306,7 @@ async function fetchLiveStatus(
  */
 async function postProcessAction(
 	pidfile: Pidfile,
-	action: "stop" | "restart",
+	action: "stop" | "restart" | "start",
 	name: string,
 ): Promise<{ ok: boolean; message: string }> {
 	const url = new URL(
@@ -369,6 +370,26 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 
 	switch (command) {
 		case "start": {
+			// Per-process form (`braid start <name>`): starts one configured process - most useful
+			// for an `autoStart: false` one - inside an already-running daemon. Checked before the
+			// whole-stack "already running" guard below, since this form requires the opposite
+			// precondition: a live daemon, not the absence of one.
+			if (processName) {
+				const running = findRunningPidfile(pidfilePath);
+				if (!running) {
+					console.log("Nothing running.");
+					return 0;
+				}
+				const { ok, message } = await postProcessAction(
+					running,
+					"start",
+					processName,
+				);
+				console.log(
+					ok ? `Started: ${processName}` : `${braidTag()} ${message}`,
+				);
+				return ok ? 0 : 1;
+			}
 			const alreadyRunning = findRunningPidfile(pidfilePath);
 			if (alreadyRunning) {
 				console.error(
@@ -491,6 +512,13 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				return 0;
 			}
 			for (const status of statuses) {
+				// A configured process that's never been started (autoStart: false, not yet
+				// manually started) has no pid/startedAt at all - distinct from "stopped", which
+				// means it ran before and has since exited.
+				if (status.pid === undefined) {
+					console.log(`○ ${status.name}  not started`);
+					continue;
+				}
 				const stats =
 					status.cpu !== undefined && status.memory !== undefined
 						? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
@@ -503,7 +531,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 		}
 		default: {
 			console.error(
-				"Usage: braid <start|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
+				"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
 			);
 			return 1;
 		}

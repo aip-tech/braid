@@ -12,7 +12,7 @@ type WorkerSnapshot = {
 	name: string;
 	pid: number | undefined;
 	alive: boolean;
-	startedAt: string;
+	startedAt?: string;
 	cpu?: number;
 	memory?: number;
 };
@@ -23,14 +23,21 @@ type ContextFactoryOptions = {
 	emitter: EventEmitter;
 	stopProcess: (name: string) => Promise<ProcessActionResult>;
 	restartProcess: (name: string) => Promise<ProcessActionResult>;
+	startProcess: (name: string) => Promise<ProcessActionResult>;
 };
 
 /** Builds one PluginContext per plugin, so log() can prefix the right plugin name. */
 export function createPluginContextFactory(
 	options: ContextFactoryOptions,
 ): (pluginName: string) => PluginContext {
-	const { controlServer, getWorkers, emitter, stopProcess, restartProcess } =
-		options;
+	const {
+		controlServer,
+		getWorkers,
+		emitter,
+		stopProcess,
+		restartProcess,
+		startProcess,
+	} = options;
 	return (pluginName: string): PluginContext => ({
 		registerRoute: controlServer.registerRoute,
 		registerStatic: controlServer.registerStatic,
@@ -41,6 +48,7 @@ export function createPluginContextFactory(
 		getProcesses: getWorkers,
 		stopProcess,
 		restartProcess,
+		startProcess,
 		log(message) {
 			const line = `${pluginTag(pluginName)} ${message}`;
 			process.stderr.write(`${line}\n`);

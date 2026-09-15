@@ -5,7 +5,7 @@ import {
 	type HistorySample,
 	type ProcessStatus,
 } from "./api.js";
-import { BackIcon, RestartIcon, StopIcon } from "./icons.js";
+import { BackIcon, RestartIcon, StartIcon, StopIcon } from "./icons.js";
 import { LogPane } from "./log-pane.js";
 import { Sparkline } from "./sparkline.js";
 
@@ -16,7 +16,7 @@ type DetailViewProps = {
 	history: HistorySample[];
 	pending: Set<string>;
 	rowErrors: Map<string, string>;
-	onAction: (action: "stop" | "restart", name: string) => void;
+	onAction: (action: "stop" | "restart" | "start", name: string) => void;
 };
 
 export function DetailView({
@@ -30,6 +30,8 @@ export function DetailView({
 }: DetailViewProps) {
 	const busy = pending.has(name);
 	const rowError = rowErrors.get(name);
+	// See table-view.tsx's identical comment - a first start must not be routed through "restart".
+	const neverStarted = process !== undefined && process.startedAt === undefined;
 
 	return (
 		<div>
@@ -48,7 +50,9 @@ export function DetailView({
 						{process
 							? process.alive
 								? "running"
-								: "stopped"
+								: neverStarted
+									? "not started"
+									: "stopped"
 							: statusLoaded
 								? "unknown"
 								: ""}
@@ -66,24 +70,38 @@ export function DetailView({
 					</span>
 				</div>
 				<div class="detail-actions">
-					<button
-						type="button"
-						class="btn-icon btn-stop"
-						disabled={busy || !process?.alive}
-						onClick={() => onAction("stop", name)}
-					>
-						<StopIcon />
-						{busy ? "..." : "Stop"}
-					</button>
-					<button
-						type="button"
-						class="btn-icon btn-restart"
-						disabled={busy}
-						onClick={() => onAction("restart", name)}
-					>
-						<RestartIcon />
-						{busy ? "..." : "Restart"}
-					</button>
+					{neverStarted ? (
+						<button
+							type="button"
+							class="btn-icon btn-restart"
+							disabled={busy}
+							onClick={() => onAction("start", name)}
+						>
+							<StartIcon />
+							{busy ? "..." : "Start"}
+						</button>
+					) : (
+						<>
+							<button
+								type="button"
+								class="btn-icon btn-stop"
+								disabled={busy || !process?.alive}
+								onClick={() => onAction("stop", name)}
+							>
+								<StopIcon />
+								{busy ? "..." : "Stop"}
+							</button>
+							<button
+								type="button"
+								class="btn-icon btn-restart"
+								disabled={busy}
+								onClick={() => onAction("restart", name)}
+							>
+								<RestartIcon />
+								{busy ? "..." : "Restart"}
+							</button>
+						</>
+					)}
 				</div>
 			</div>
 			<p class="row-error" hidden={!rowError}>

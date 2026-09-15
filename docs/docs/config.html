@@ -30,6 +30,7 @@
 					<li><a href="#pre-restart-hooks">Pre-restart hooks</a></li>
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
 					<li><a href="#waiting-to-start">Waiting to start</a></li>
+					<li><a href="#starting-on-demand">Starting on demand</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
 					<li><a href="#stats">Process stats</a></li>
@@ -218,6 +219,35 @@ export default defineConfig({
 						<code>startAfter</code> chain to finish before returning. A
 						<code>startAfter</code> chain that loops back on itself is rejected at
 						startup, same as a circular <code>dependsOn</code>.
+					</p>
+				</section>
+
+				<section id="starting-on-demand">
+					<h2>Starting on demand</h2>
+					<p>
+						Set <code>autoStart: false</code> to keep a process from forking at all
+						when <code>start</code> boots the whole stack &mdash; useful for a
+						cron-style job you only want to run when you ask for it. It's still
+						fully configured (listed by <code>status</code>/the dashboard as
+						&ldquo;not started&rdquo;), just never spawned automatically:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "cron",
+	command: "pnpm",
+	args: ["--filter", "./jobs", "run", "nightly-report"],
+	autoStart: false, // @default true
+},</code></pre>
+					<p>
+						Start it later with <code>braid start cron</code>, the dashboard's Start
+						button, or <code>PluginContext.startProcess()</code> from a plugin. Calling
+						start on an already-running process is a safe no-op &mdash; it doesn't kill
+						and respawn it the way <code>restart</code> would. A process can combine
+						<code>autoStart: false</code> with its own <code>startAfter</code> &mdash;
+						its later manual start still waits on those dependencies first &mdash; but
+						not with <code>dependsOn</code> (a dependency's restart would force-start it
+						early, defeating the point), and it can't be named as someone else's
+						<code>startAfter</code> target (that dependent would never see it become
+						ready on its own). Both are rejected at startup.
 					</p>
 				</section>
 

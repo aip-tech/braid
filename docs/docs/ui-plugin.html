@@ -20,7 +20,7 @@
 				<h1>Web UI</h1>
 				<p class="lede">
 					<code>@aip-tech/braid-plugin-ui</code> is a small web dashboard for
-					braid &mdash; live process status, Stop/Restart buttons, and
+					braid &mdash; live process status, Stop/Restart/Start buttons, and
 					live log tailing per process &mdash;
 					served straight off the control server every <code>start</code>
 					already runs. It's a separate, optional package: nothing about it
@@ -82,20 +82,24 @@
 				<section id="what-it-shows">
 					<h2>What it shows</h2>
 					<p>
-						Every configured process's name, pid, running/stopped status, CPU
-						(percent of one core) and memory (RSS), and start time, polling
-						every 2 seconds &mdash; the same data <code>braid status</code>
+						Every configured process's name, pid, running/stopped/not-started
+						status, CPU (percent of one core) and memory (RSS), and start time,
+						polling every 2 seconds &mdash; the same data <code>braid status</code>
 						prints. CPU/memory need <code>@aip-tech/braid</code>
 						<code>&gt;=0.5.0</code>; on an older version those two columns
-						just show as empty. Stop and Restart buttons per
-						process, backed by the same
-						<code>braid stop &lt;name&gt;</code>/<code>restart &lt;name&gt;</code>
-						routes the CLI itself uses. A top bar shows the host project's
-						installed <code>@aip-tech/braid</code> version.
+						just show as empty. Stop and Restart buttons per process, backed by
+						the same <code>braid stop &lt;name&gt;</code>/<code>restart
+						&lt;name&gt;</code> routes the CLI itself uses. A process configured
+						with <code>autoStart: false</code> that's never been started (needs
+						<code>@aip-tech/braid</code> <code>&gt;=0.7.0</code>) shows a single
+						Start button instead, backed by <code>braid start &lt;name&gt;</code> -
+						see <a href="/braid/docs/config.html#starting-on-demand">Starting on
+						demand</a>. A top bar shows the host project's installed
+						<code>@aip-tech/braid</code> version.
 					</p>
 					<p>
 						Click a process's name for its own page: a toolbar with the same
-						Stop/Restart actions, two small rolling charts of its recent CPU
+						Stop/Restart (or Start) actions, two small rolling charts of its recent CPU
 						and memory usage (a browser-side history, so they start empty on
 						page load and fill in over the next minute), and its log output
 						streaming live underneath, off the same <code>/api/logs</code>

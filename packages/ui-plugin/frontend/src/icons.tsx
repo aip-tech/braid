@@ -43,6 +43,14 @@ export function StopIcon(props: IconProps) {
 	);
 }
 
+export function StartIcon(props: IconProps) {
+	return (
+		<Icon {...props}>
+			<path d="M6 4l14 8-14 8V4z" fill="currentColor" stroke="none" />
+		</Icon>
+	);
+}
+
 export function RestartIcon(props: IconProps) {
 	return (
 		<Icon {...props}>

@@ -2,7 +2,8 @@ export type ProcessStatus = {
 	name: string;
 	pid: number | undefined;
 	alive: boolean;
-	startedAt: string;
+	/** Absent for a configured process that has never been started (`autoStart: false`). */
+	startedAt?: string;
 	/** Percent of one CPU core. Absent until the daemon's first sample, or while stopped. */
 	cpu?: number;
 	/** RSS in bytes. Absent until the daemon's first sample, or while stopped. */
@@ -19,13 +20,14 @@ export function formatMemory(bytes: number): string {
 
 export type HistorySample = { cpu: number; memory: number };
 
-export function formatStarted(iso: string): string {
+export function formatStarted(iso: string | undefined): string {
+	if (iso === undefined) return "-";
 	const date = new Date(iso);
 	return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
 export async function postAction(
-	action: "stop" | "restart",
+	action: "stop" | "restart" | "start",
 	name: string,
 ): Promise<{ ok: boolean; message: string }> {
 	const res = await fetch(

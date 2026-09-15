@@ -1410,6 +1410,249 @@ describe("runManager startAfter", () => {
 	}, 20000);
 });
 
+describe("runManager autoStart", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-auto-start-test-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function manualConfig(name: string): ProcessConfig {
+		return { ...keepAliveConfig(name), autoStart: false };
+	}
+
+	async function postAction(
+		pidfile: { controlPort: number; controlToken: string },
+		action: "stop" | "restart" | "start",
+		name: string,
+	): Promise<Response> {
+		return fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/${action}?name=${name}`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+	}
+
+	type StatusEntry = {
+		name: string;
+		pid: number | undefined;
+		alive: boolean;
+		startedAt?: string;
+	};
+
+	async function fetchStatus(pidfile: {
+		controlPort: number;
+		controlToken: string;
+	}): Promise<StatusEntry[]> {
+		const res = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/status`,
+			{
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		return (await res.json()) as StatusEntry[];
+	}
+
+	it("rejects autoStart: false combined with a non-empty dependsOn before spawning anything", async () => {
+		const configs = [
+			keepAliveConfig("api"),
+			{ ...manualConfig("cron"), dependsOn: { processes: ["api"] } },
+		];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/"cron" has autoStart: false and also declares dependsOn/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("rejects a startAfter target with autoStart: false before spawning anything", async () => {
+		const configs = [
+			manualConfig("api"),
+			startAfterConfig(keepAliveConfig("client"), ["api"]),
+		];
+
+		await expect(runManager(configs, pidfilePath)).rejects.toThrow(
+			/"client" starts after "api", but "api" has autoStart: false/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("never forks an autoStart: false process at boot, but still lists it (as not-started) over /api/status", async () => {
+		const configs = [keepAliveConfig("api"), manualConfig("cron")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const api = pidfileWorker(pidfilePath, "api");
+			return api !== undefined && isPidAlive(api.pid);
+		});
+		// Give a never-going-to-happen spawn every chance to have happened by now.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(pidfileWorker(pidfilePath, "cron")).toBeUndefined();
+
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		const status = await fetchStatus(pidfile);
+		const cron = status.find((s) => s.name === "cron");
+		expect(cron).toEqual({ name: "cron", pid: undefined, alive: false });
+
+		// A never-started autoStart:false process has no pidfile entry for stopFromPidfile's
+		// worker-killing loop to find, and the daemon deliberately never shuts down on its own
+		// while "cron" could still be started (that's what this test is proving) - so an in-process
+		// test (which can't tree-kill its own pid, see other blocks' identical comment) needs to
+		// bring it up first for a clean exit cascade to trigger.
+		await postAction(pidfile, "start", "cron");
+		await waitFor(() => {
+			const started = pidfileWorker(pidfilePath, "cron");
+			return started !== undefined && isPidAlive(started.pid);
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("does not shut down once every auto-started process has exited, while an autoStart: false one is still unstarted", async () => {
+		const configs = [
+			{ name: "oneshot", command: "node", args: ["-e", "process.exit(0)"] },
+			manualConfig("cron"),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		// Give shutdownIfEveryWorkerIsDone a moment to (wrongly) fire once "oneshot" exits, if it
+		// were going to - "cron" never having forked at all must not look like "everyone's done".
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(existsSync(pidfilePath)).toBe(true);
+		expect(isPidAlive(pidfile.managerPid)).toBe(true);
+
+		expect((await postAction(pidfile, "start", "cron")).status).toBe(200);
+		await waitFor(() => {
+			const cron = pidfileWorker(pidfilePath, "cron");
+			return cron !== undefined && isPidAlive(cron.pid);
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("starts an autoStart: false process on demand via POST /api/processes/start", async () => {
+		const configs = [manualConfig("cron")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		expect((await postAction(pidfile, "start", "cron")).status).toBe(200);
+		await waitFor(() => {
+			const cron = pidfileWorker(pidfilePath, "cron");
+			return cron !== undefined && isPidAlive(cron.pid);
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("is idempotent: starting an already-running process again is a no-op, not a respawn", async () => {
+		const configs = [manualConfig("cron")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await postAction(pidfile, "start", "cron");
+		await waitFor(() => {
+			const cron = pidfileWorker(pidfilePath, "cron");
+			return cron !== undefined && isPidAlive(cron.pid);
+		});
+		const before = pidfileWorker(pidfilePath, "cron")?.pid;
+
+		expect((await postAction(pidfile, "start", "cron")).status).toBe(200);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(pidfileWorker(pidfilePath, "cron")?.pid).toBe(before);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("returns 404 for starting an unconfigured process name", async () => {
+		const configs = [keepAliveConfig("api")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		expect((await postAction(pidfile, "start", "missing")).status).toBe(404);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("honors its own startAfter chain on a manual first start", async () => {
+		const readyDelayMs = 1500;
+		const configs = [
+			{ ...slowConfig("api", readyDelayMs), readyPattern: "ready-marker" },
+			startAfterConfig(manualConfig("cron"), ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		const startedAt = Date.now();
+		expect((await postAction(pidfile, "start", "cron")).status).toBe(200);
+
+		await waitFor(
+			() => {
+				const cron = pidfileWorker(pidfilePath, "cron");
+				return cron !== undefined && isPidAlive(cron.pid);
+			},
+			{ timeoutMs: 10000 },
+		);
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(readyDelayMs - 300);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("does not cascade to a dependsOn dependent on its manual first start (a first spawn is not a restart)", async () => {
+		const configs = [
+			manualConfig("cron"),
+			dependentConfig("dependent", ["cron"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const dependent = pidfileWorker(pidfilePath, "dependent");
+			return dependent !== undefined && isPidAlive(dependent.pid);
+		});
+		const dependentBefore = pidfileWorker(pidfilePath, "dependent")?.pid;
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		expect((await postAction(pidfile, "start", "cron")).status).toBe(200);
+		await waitFor(() => {
+			const cron = pidfileWorker(pidfilePath, "cron");
+			return cron !== undefined && isPidAlive(cron.pid);
+		});
+		// Give a wrongly-cascaded restart every chance to have happened by now.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(pidfileWorker(pidfilePath, "dependent")?.pid).toBe(dependentBefore);
+		const dependentLog = readFileSync(
+			join(tmpDir, "logs", "dependent.log"),
+			"utf8",
+		);
+		expect(dependentLog).not.toContain("stopping (dependency restarted)");
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+});
+
 describe("runManager beforeRestart", () => {
 	let tmpDir: string;
 	let pidfilePath: string;
