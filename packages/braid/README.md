@@ -26,6 +26,7 @@ export default defineConfig({
 ```
 
 - `watch`: restart this process when these paths change. Omit it for a command that manages its own reload.
+- `exclude`: paths to leave out of `watch`, resolved the same way — e.g. `exclude: ["api/src/__generated__"]` so a regenerated file there doesn't trigger its own restart.
 - `dependsOn`: `{ processes, run? }` — restart this process whenever any of `processes` restarts, optionally running a command first (e.g. codegen) and waiting for it to finish. See [Dependent restarts](#dependent-restarts).
 - `onRestart`: run a command after this process itself restarts, e.g. rebuilding a shared workspace package. See [Post-restart hooks](#post-restart-hooks).
 - `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).

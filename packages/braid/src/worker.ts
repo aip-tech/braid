@@ -162,8 +162,16 @@ export function runWorker(config: ProcessConfig): void {
 		const allowedExts = (config.ext ?? DEFAULT_EXT)
 			.split(",")
 			.map((ext) => ext.trim().toLowerCase());
+		// Each entry excludes itself (matters if it's a file, or for the directory node chokidar
+		// tests before deciding whether to recurse) and its whole subtree via the /** suffix - a
+		// plain glob entry (already containing wildcards) just gets a second, harmlessly-unmatched
+		// pattern alongside its own.
+		const excluded = (config.exclude ?? []).flatMap((path) => {
+			const resolved = resolve(process.cwd(), path);
+			return [resolved, `${resolved}/**`];
+		});
 		const watcher = watchFiles(paths, {
-			ignored: DEFAULT_IGNORED,
+			ignored: [...DEFAULT_IGNORED, ...excluded],
 			ignoreInitial: true,
 			// chokidar's own default (2000ms) is too slow for a prompt, reliable restart.
 			awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 50 },

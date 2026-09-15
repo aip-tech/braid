@@ -32,6 +32,13 @@ export type ProcessConfig = {
 	 */
 	ext?: string;
 	/**
+	 * Paths to exclude from `watch` - e.g. a generated-code directory inside an otherwise-watched
+	 * folder. Resolved relative to `cwd` the same way `watch` entries are. Each entry excludes
+	 * itself and everything under it, so a directory excludes its whole subtree; a glob is also
+	 * accepted (passed straight through to the underlying watcher). Only used when `watch` is set.
+	 */
+	exclude?: string[];
+	/**
 	 * A regex (as a string, passed to `new RegExp()`) matched against this process's own
 	 * stdout/stderr after each restart. Until it matches (or `readyTimeoutMs` elapses), `onRestart`
 	 * and any dependents' `dependsOn` cascades are held off - e.g. an API's own

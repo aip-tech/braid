@@ -5,6 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.8.0] - 2026-09-15
+
+### Added
+
+- `exclude?: string[]` on `ProcessConfig` — paths to leave out of `watch`,
+  resolved the same way `watch` entries are. Useful for a generated-code
+  directory living inside an otherwise-watched folder, so regenerating it
+  doesn't trigger its own restart. Each entry excludes itself and its
+  whole subtree; a glob is also accepted. Only used when `watch` is set.
+
 ## [0.7.0] - 2026-09-15
 
 ### Added

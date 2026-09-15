@@ -289,6 +289,61 @@ describe("runManager watch", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);
+
+	it("ignores changes inside an excluded path, but still restarts on changes elsewhere in the watched directory", async () => {
+		const watchedDir = join(tmpDir, "watched");
+		const excludedDir = join(watchedDir, "__generated__");
+		mkdirSync(excludedDir, { recursive: true });
+		const configs = [
+			{
+				name: "api",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+				watch: [watchedDir],
+				ext: "txt",
+				exclude: [excludedDir],
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		const logPath = join(tmpDir, "logs", "api.log");
+
+		// The pidfile only tracks the outer worker's own pid, which never changes on a
+		// watch-triggered restart (only the inner spawned app does) - the log's own "started <pid>"
+		// line (see keep-alive.js) is what actually proves a restart happened, same technique the
+		// sibling test above uses.
+		await waitFor(
+			() =>
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes("started"),
+		);
+		const originalContent = readFileSync(logPath, "utf8");
+		const originalPid = originalContent.match(/started (\d+)/)?.[1];
+		expect(originalPid).toBeDefined();
+
+		// Same settle delay as triggerWatchedRestart - give chokidar a moment to actually be
+		// watching before writing, so this isn't a false negative from writing too early.
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		writeFileSync(join(excludedDir, "generated.txt"), "0");
+		// No restart should happen - give it every chance to (wrongly) fire before checking.
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		expect(readFileSync(logPath, "utf8")).toBe(originalContent);
+
+		writeFileSync(join(watchedDir, "real.txt"), "0");
+		// A watch-triggered restart rotates the log (see the sibling test above), so the fresh
+		// "started <pid>" line lands in a new current log, not appended to the old one.
+		await waitFor(
+			() => {
+				const restartedPid = readFileSync(logPath, "utf8").match(
+					/started (\d+)/,
+				)?.[1];
+				return restartedPid !== undefined && restartedPid !== originalPid;
+			},
+			{ timeoutMs: 10000 },
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
 });
 
 describe("runManager log rotation", () => {

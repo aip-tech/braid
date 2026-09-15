@@ -74,7 +74,17 @@ export default defineConfig({
 	args: ["--filter", "./api", "run", "dev"],
 	watch: ["api/src"],
 	ext: "ts,graphql,json", // @default "ts,js,json" - comma-separated, only used when watch is set
+	exclude: ["api/src/__generated__"], // leave generated files out of the watch
 },</code></pre>
+					<p>
+						<code>exclude</code> is resolved relative to <code>cwd</code> the same way
+						<code>watch</code> entries are, and only used when <code>watch</code> is
+						set. Each entry excludes itself and everything under it &mdash; a directory
+						excludes its whole subtree, so a generated-code folder living inside an
+						otherwise-watched directory doesn't trigger its own restart every time it's
+						regenerated. A glob is accepted too, passed straight through to the
+						underlying watcher.
+					</p>
 				</section>
 
 				<section id="dependent-restarts">
