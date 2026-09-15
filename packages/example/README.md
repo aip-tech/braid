@@ -1,6 +1,6 @@
 # braid-example
 
-A live test bed for [`braid`](../braid): five toy processes, started via braid's actual
+A live test bed for [`braid`](../braid): six toy processes, started via braid's actual
 compiled `bin`, each demonstrating a different config feature.
 
 - `web` (`src/web.ts`) — HTTP server on port 4001. Plain `watch`, no hooks: edit and save to
@@ -17,6 +17,8 @@ compiled `bin`, each demonstrating a different config feature.
   against a stale generated file. This is the real scenario the hook exists for - a process
   whose own restart depends on freshly regenerated output from the very change that triggered
   it.
+- `cron` (`src/cron.ts`) — `autoStart: false`: a cron-style one-shot that never runs on
+  `braid start`. Start it on demand with `braid start cron` or the dashboard's Start button.
 
 ```bash
 pnpm dev             # start everything as a background daemon
@@ -35,3 +37,6 @@ Things to try while it's running:
   `generated-sdk.json` *before* its own restart, and `client` regenerate `client-sdk.json`
   once `api` next restarts.
 - `cat src/restart-log.txt` after editing `src/api.ts` a few times.
+- `pnpm dev:status` — note `cron` shows "not started" until you run
+  `pnpm exec braid start cron` (or click Start in the dashboard), after
+  which it shows as stopped (it's a one-shot job, not long-running).

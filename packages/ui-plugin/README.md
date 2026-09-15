@@ -49,20 +49,28 @@ plugins: [["@aip-tech/braid-plugin-ui", { path: "/dashboard/" }]],
 
 ## What it does (and doesn't) do
 
-Shows every configured process's name, pid, running/stopped status, and
-start time, polling every 2 seconds. Stop and Restart buttons per process.
-A top bar shows the host project's installed `@aip-tech/braid` version
-(read from its own `package.json` at register time).
+Shows every configured process's name, pid, CPU/memory usage, start time,
+and status - running, stopped, or (for a process configured with
+`autoStart: false` that's never been started, needs `@aip-tech/braid`
+`>=0.7.0`) "not started" - polling every 2 seconds. CPU/memory need
+`@aip-tech/braid` `>=0.5.0`; on an older core those columns just show as
+empty. Stop and Restart buttons per process; a never-started row shows a
+single Start button instead, backed by `braid start <name>`. A top bar
+shows the host project's installed `@aip-tech/braid` version (read from
+its own `package.json` at register time).
 
-Click a process's name for its own page: the same Stop/Restart actions,
-plus that process's log output streaming live underneath, rendered with
-its real ANSI colors. It starts with the last 300 lines; a "Load older
-lines" button loads further back into the process's retained history
-(bounded by `logs.maxSizeBytes` - the current file plus one rotation
-backup) - one page per click, nothing loads automatically. The log
-view is virtualized, so a long-lived session or a deep scroll-back doesn't
-grow the page's DOM without bound.
+Click a process's name for its own page: the same actions, two small
+rolling charts of its recent CPU and memory usage (a browser-side
+history, so they start empty on page load and fill in over the next
+minute), and that process's log output streaming live underneath,
+rendered with its real ANSI colors. It starts with the last 300 lines; a
+"Load older lines" button loads further back into the process's retained
+history (bounded by `logs.maxSizeBytes` - the current file plus one
+rotation backup) - one page per click, nothing loads automatically. The
+log view is virtualized, so a long-lived session or a deep scroll-back
+doesn't grow the page's DOM without bound.
 
-Any plugin can stop or restart any configured process (`PluginContext.
-stopProcess`/`restartProcess` - see `@aip-tech/braid`'s plugin docs), the
-same trust level as any other dependency in your `node_modules`.
+Any plugin can stop, restart, or start any configured process
+(`PluginContext.stopProcess`/`restartProcess`/`startProcess` - see
+`@aip-tech/braid`'s plugin docs), the same trust level as any other
+dependency in your `node_modules`.

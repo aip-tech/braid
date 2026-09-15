@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.5.1] - 2026-09-15
+
+### Fixed
+
+- README's "What it does" section hadn't been updated since before the
+  0.4.0 CPU/memory columns/charts or the 0.5.0 Start button - it still
+  described the original pid/status/Stop/Restart-only dashboard. No
+  functional change, docs only.
+
 ## [0.5.0] - 2026-09-15
 
 ### Added
