@@ -180,9 +180,14 @@ export function createControlServer(): ControlServer {
 
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
-		const handler = safeEqual(url.searchParams.get("token") ?? "", token)
-			? upgrades.get(url.pathname)
-			: undefined;
+		// The cookie a prior GET's ?token= redirect already established authenticates an upgrade
+		// too, not just the raw query token - without this, a page that's otherwise never had to
+		// keep the secret in reach of its own JS would have no way to open a WebSocket without
+		// putting it in a URL (visible in devtools/history/a screen share) purely for this.
+		const authenticated =
+			safeEqual(url.searchParams.get("token") ?? "", token) ||
+			safeEqual(readCookie(req, cookieName) ?? "", token);
+		const handler = authenticated ? upgrades.get(url.pathname) : undefined;
 		if (!handler) {
 			socket.destroy();
 			return;

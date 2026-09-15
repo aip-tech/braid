@@ -161,6 +161,47 @@ describe("createControlServer", () => {
 		await server.close();
 	});
 
+	it("dispatches a raw HTTP upgrade authenticated by the session cookie alone, no query token needed", async () => {
+		const server = createControlServer();
+		server.registerRoute("GET", "/hello", (_req, res) => {
+			res.end("hi");
+		});
+		server.registerUpgrade("/ws", (_req, socket) => {
+			socket.end(
+				"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+			);
+		});
+		const { port } = await server.listen();
+
+		// The same GET ?token= -> Set-Cookie dance a browser navigation goes through.
+		const redirected = await fetch(
+			`http://127.0.0.1:${port}/hello?token=${server.token}`,
+			{ redirect: "manual" },
+		);
+		const cookie = (redirected.headers.get("set-cookie") ?? "").split(";")[0];
+		expect(cookie).toContain(`braid_token_${port}=`);
+
+		const upgraded = await new Promise<boolean>((resolve) => {
+			const req = httpRequest({
+				port,
+				host: "127.0.0.1",
+				path: "/ws",
+				headers: {
+					Connection: "Upgrade",
+					Upgrade: "websocket",
+					Cookie: cookie,
+				},
+			});
+			req.on("upgrade", () => resolve(true));
+			req.on("error", () => resolve(false));
+			req.on("close", () => resolve(false));
+			req.end();
+		});
+		expect(upgraded).toBe(true);
+
+		await server.close();
+	});
+
 	it("close() resolves promptly even after keep-alive fetch() connections", async () => {
 		const server = createControlServer();
 		server.registerRoute("GET", "/ping", (_req, res) => {

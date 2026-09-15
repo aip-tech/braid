@@ -760,6 +760,29 @@ export async function runManager(
 	}
 
 	/**
+	 * Runs `fn` while `name` is marked "restarting" - a concurrent restart/stop request for the same
+	 * name during that window reports "busy" instead of racing it. Shared by the two callers
+	 * (`restartDependent`, `restartProcessByName`) that hold this lock across their whole
+	 * stop->respawn->handleFreshStart sequence - `handleFreshStart` itself has a narrower, separate
+	 * `lockHeld`-guarded acquire for its own standalone (not-already-locked) caller, left as its own
+	 * thing rather than folded in here since unifying the two would widen exactly which operations
+	 * that caller's lock spans, a behavior change this refactor isn't meant to make.
+	 */
+	async function withRestartLock<T>(
+		name: string,
+		fn: () => Promise<T>,
+	): Promise<T | "busy"> {
+		if (restarting.has(name)) return "busy";
+		restarting.add(name);
+		try {
+			return await fn();
+		} finally {
+			restarting.delete(name);
+			shutdownIfEveryWorkerIsDone();
+		}
+	}
+
+	/**
 	 * A worker that exits on its own (a one-shot config, or one killed from outside braid) doesn't
 	 * trigger shutdown by itself - but once every worker has exited this way, and none are mid a
 	 * dependsOn stop/restart cycle, there's nothing left running and the manager should wind down.
@@ -790,9 +813,8 @@ export async function runManager(
 	 * stopped, with an error logged, if the hook keeps failing after its retries are exhausted.
 	 */
 	async function restartDependent(config: ProcessConfig): Promise<void> {
-		if (shuttingDown || restarting.has(config.name)) return;
-		restarting.add(config.name);
-		try {
+		if (shuttingDown) return;
+		await withRestartLock(config.name, async () => {
 			const current = children.get(config.name);
 			if (current) {
 				logToProcess(config, "stopping (dependency restarted)");
@@ -819,12 +841,7 @@ export async function runManager(
 			spawnWorker(config);
 			rewritePidfile();
 			await handleFreshStart(config, { lockHeld: true });
-		} finally {
-			restarting.delete(config.name);
-			// A permanently-failed hook can leave this the last worker standing; re-check now that
-			// it's no longer blocking shutdownIfEveryWorkerIsDone's restarting.size guard.
-			shutdownIfEveryWorkerIsDone();
-		}
+		});
 	}
 
 	function onProcessRestarted(name: string): void {
@@ -962,9 +979,8 @@ export async function runManager(
 	): Promise<ProcessActionResult> {
 		const config = configsByName.get(name);
 		if (!config) return "unknown";
-		if (shuttingDown || restarting.has(name)) return "busy";
-		restarting.add(name);
-		try {
+		if (shuttingDown) return "busy";
+		return withRestartLock(name, async (): Promise<ProcessActionResult> => {
 			manuallyStopped.delete(name);
 			const current = children.get(name);
 			if (current && current.exitCode === null && current.signalCode === null) {
@@ -979,10 +995,7 @@ export async function runManager(
 			rewritePidfile();
 			await handleFreshStart(config, { lockHeld: true });
 			return "ok";
-		} finally {
-			restarting.delete(name);
-			shutdownIfEveryWorkerIsDone();
-		}
+		});
 	}
 
 	/**

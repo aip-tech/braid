@@ -255,4 +255,45 @@ describe("App", () => {
 			container.querySelector<HTMLButtonElement>(".btn-stop")?.disabled,
 		).toBe(false);
 	});
+
+	it("shows the session-expired banner (not a row error) when an action itself gets a 401", async () => {
+		// Regression test: postAction's own failure used to always become a row-level error - a raw
+		// "Unauthorized" string - even when the actual cause (the daemon restarted, invalidating the
+		// session) is identical to what refreshStatus already has a dedicated, clearer banner for.
+		// The daemon restart is simulated to take effect right as the action POSTs - realistically,
+		// the very next /api/status poll (runAction's own follow-up refreshStatus) would also start
+		// 401ing from that point on, same as this one does.
+		let sessionExpired = false;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = String(input);
+				if (url === "/api/ui/version")
+					return jsonResponse({ braidVersion: "1.0.0" });
+				if (sessionExpired) return textResponse("Unauthorized", 401);
+				if (url === "/api/status")
+					return jsonResponse([makeProcess({ alive: true })]);
+				if (init?.method === "POST") {
+					sessionExpired = true;
+					return textResponse("Unauthorized", 401);
+				}
+				throw new Error(`unexpected fetch: ${url}`);
+			}),
+		);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		act(() => container.querySelector<HTMLButtonElement>(".btn-stop")?.click());
+		// runAction chains three separate fetch cycles (refreshStatus, postAction, refreshStatus
+		// again) - a real macrotask flush settles all of them regardless of exact microtask depth.
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		expect(container.querySelector(".error")?.textContent).toContain(
+			"Session expired",
+		);
+		expect(container.querySelector(".row-error")).toBeNull();
+	});
 });

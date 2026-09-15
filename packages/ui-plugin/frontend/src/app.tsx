@@ -4,14 +4,17 @@ import {
 	type HistorySample,
 	type ProcessStatus,
 	postAction,
+	updateHistory,
 } from "./api.js";
 import { DetailView } from "./detail-view.js";
 import { TableView } from "./table-view.js";
 
 const POLL_INTERVAL_MS = 2000;
-// ~1 minute of history at the poll cadence above - enough for a sparkline to show a real trend
-// without growing unbounded for a long-running dashboard tab.
-const HISTORY_LENGTH = 30;
+// Shared between refreshStatus's own 401 and runAction's, so the same root cause (the daemon
+// restarted, invalidating the session cookie/token) always reads the same way regardless of which
+// request happened to surface it first.
+const SESSION_EXPIRED_MESSAGE =
+	"Session expired (the daemon may have restarted) - reload this page.";
 
 type Route = { view: "table" } | { view: "detail"; name: string };
 
@@ -67,9 +70,7 @@ export function App() {
 			return;
 		}
 		if (res.status === 401) {
-			setBanner(
-				"Session expired (the daemon may have restarted) - reload this page.",
-			);
+			setBanner(SESSION_EXPIRED_MESSAGE);
 			return;
 		}
 		if (!res.ok) {
@@ -89,22 +90,7 @@ export function App() {
 		setBanner(undefined);
 		setProcesses(data);
 		setStatusLoaded(true);
-		setHistory((prev) => {
-			const next = new Map(prev);
-			for (const process of data) {
-				if (process.cpu === undefined || process.memory === undefined) {
-					continue;
-				}
-				const samples = next.get(process.name) ?? [];
-				next.set(
-					process.name,
-					[...samples, { cpu: process.cpu, memory: process.memory }].slice(
-						-HISTORY_LENGTH,
-					),
-				);
-			}
-			return next;
-		});
+		setHistory((prev) => updateHistory(prev, data));
 	}, []);
 
 	useEffect(() => {
@@ -123,9 +109,16 @@ export function App() {
 			});
 			await refreshStatus();
 			try {
-				const { ok, message } = await postAction(action, name);
+				const { ok, status, message } = await postAction(action, name);
 				if (!ok) {
-					setRowErrors((prev) => new Map(prev).set(name, message));
+					// Same root cause, same message as refreshStatus's own 401 - a row-level "Unauthorized"
+					// (the raw response body) told the user nothing actionable for what's actually a
+					// session/daemon-restart issue affecting every row, not just this one.
+					if (status === 401) {
+						setBanner(SESSION_EXPIRED_MESSAGE);
+					} else {
+						setRowErrors((prev) => new Map(prev).set(name, message));
+					}
 				}
 			} catch {
 				setRowErrors((prev) => new Map(prev).set(name, "couldn't reach braid"));

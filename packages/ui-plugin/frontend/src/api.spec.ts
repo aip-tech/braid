@@ -4,8 +4,23 @@ import {
 	formatCpu,
 	formatMemory,
 	formatStarted,
+	type HistorySample,
+	type ProcessStatus,
 	postAction,
+	updateHistory,
 } from "./api.js";
+
+function makeProcess(overrides: Partial<ProcessStatus> = {}): ProcessStatus {
+	return {
+		name: "api",
+		pid: 111,
+		alive: true,
+		startedAt: new Date(0).toISOString(),
+		cpu: 1,
+		memory: 1024,
+		...overrides,
+	};
+}
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -46,6 +61,7 @@ describe("postAction", () => {
 	it("POSTs to the action route with the name URL-encoded, and reports success", async () => {
 		const fetchMock = vi.fn(async () => ({
 			ok: true,
+			status: 200,
 			text: async () => "Stopped: my proc",
 		}));
 		vi.stubGlobal("fetch", fetchMock);
@@ -56,21 +72,103 @@ describe("postAction", () => {
 			"/api/processes/stop?name=my%20proc",
 			{ method: "POST" },
 		);
-		expect(result).toEqual({ ok: true, message: "Stopped: my proc" });
+		expect(result).toEqual({
+			ok: true,
+			status: 200,
+			message: "Stopped: my proc",
+		});
 	});
 
-	it("reports failure with the response body as the message, not an exception", async () => {
+	it("reports failure with the response status and body as the message, not an exception", async () => {
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => ({
 				ok: false,
-				text: async () => "Unauthorized",
+				status: 500,
+				text: async () => "internal error",
 			})),
 		);
 
 		const result = await postAction("restart", "api");
 
-		expect(result).toEqual({ ok: false, message: "Unauthorized" });
+		expect(result).toEqual({
+			ok: false,
+			status: 500,
+			message: "internal error",
+		});
+	});
+
+	it("passes a 401 status straight through, for the caller to treat as a session-expired case", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({
+				ok: false,
+				status: 401,
+				text: async () => "Unauthorized",
+			})),
+		);
+
+		const result = await postAction("stop", "api");
+
+		expect(result.status).toBe(401);
+	});
+});
+
+describe("updateHistory", () => {
+	it("appends a new sample for a process reporting cpu/memory this tick", () => {
+		const prev = new Map<string, HistorySample[]>([
+			["api", [{ cpu: 1, memory: 100 }]],
+		]);
+		const next = updateHistory(prev, [
+			makeProcess({ name: "api", cpu: 2, memory: 200 }),
+		]);
+		expect(next.get("api")).toEqual([
+			{ cpu: 1, memory: 100 },
+			{ cpu: 2, memory: 200 },
+		]);
+	});
+
+	it("evicts a process name no longer present in the status response at all", () => {
+		// Regression test: history used to be built by copying `prev` and only ever adding to it,
+		// so a process removed from config (or renamed) stayed in the Map - and its samples - for
+		// the rest of the tab's lifetime.
+		const prev = new Map<string, HistorySample[]>([
+			["removed", [{ cpu: 1, memory: 100 }]],
+			["api", [{ cpu: 1, memory: 100 }]],
+		]);
+		const next = updateHistory(prev, [
+			makeProcess({ name: "api", cpu: 2, memory: 200 }),
+		]);
+		expect(next.has("removed")).toBe(false);
+		expect(next.has("api")).toBe(true);
+	});
+
+	it("keeps a process's existing history when it's present but unsampled this tick (e.g. stopped)", () => {
+		const prev = new Map<string, HistorySample[]>([
+			["api", [{ cpu: 1, memory: 100 }]],
+		]);
+		const next = updateHistory(prev, [
+			makeProcess({
+				name: "api",
+				alive: false,
+				cpu: undefined,
+				memory: undefined,
+			}),
+		]);
+		expect(next.get("api")).toEqual([{ cpu: 1, memory: 100 }]);
+	});
+
+	it("caps a process's history at 30 samples, dropping the oldest first", () => {
+		const prev = new Map<string, HistorySample[]>([
+			["api", Array.from({ length: 30 }, (_, i) => ({ cpu: i, memory: i }))],
+		]);
+		const next = updateHistory(prev, [
+			makeProcess({ name: "api", cpu: 999, memory: 999 }),
+		]);
+		const samples = next.get("api");
+		expect(samples).toHaveLength(30);
+		expect(samples?.[0]).toEqual({ cpu: 1, memory: 1 });
+		expect(samples?.at(-1)).toEqual({ cpu: 999, memory: 999 });
 	});
 });
 

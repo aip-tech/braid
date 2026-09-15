@@ -20,6 +20,43 @@ export function formatMemory(bytes: number): string {
 
 export type HistorySample = { cpu: number; memory: number };
 
+// ~1 minute of history at the dashboard's poll cadence (2s) - enough for a sparkline to show a
+// real trend without growing unbounded for a long-running dashboard tab.
+const HISTORY_LENGTH = 30;
+
+/**
+ * Folds a fresh /api/status response into the rolling per-process cpu/memory history, capped at
+ * HISTORY_LENGTH samples per process. Rebuilt from `data` alone (not `prev`'s own keys) - a name
+ * no longer present in `data` at all (removed from config entirely) is dropped here rather than
+ * kept forever, which is what let a long-running tab's history accumulate unboundedly across
+ * process churn (e.g. an autoStart:false process added/removed over time). A name still present
+ * but unsampled this tick (stopped, or mid-restart) keeps its existing history rather than being
+ * evicted too.
+ *
+ * Exported standalone (pure, no component/hook dependency) so this can be unit-tested on its own.
+ */
+export function updateHistory(
+	prev: Map<string, HistorySample[]>,
+	data: ProcessStatus[],
+): Map<string, HistorySample[]> {
+	const next = new Map<string, HistorySample[]>();
+	for (const process of data) {
+		if (process.cpu === undefined || process.memory === undefined) {
+			const existing = prev.get(process.name);
+			if (existing) next.set(process.name, existing);
+			continue;
+		}
+		const samples = prev.get(process.name) ?? [];
+		next.set(
+			process.name,
+			[...samples, { cpu: process.cpu, memory: process.memory }].slice(
+				-HISTORY_LENGTH,
+			),
+		);
+	}
+	return next;
+}
+
 export function formatStarted(iso: string | undefined): string {
 	if (iso === undefined) return "-";
 	const date = new Date(iso);
@@ -29,13 +66,13 @@ export function formatStarted(iso: string | undefined): string {
 export async function postAction(
 	action: "stop" | "restart" | "start",
 	name: string,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; status: number; message: string }> {
 	const res = await fetch(
 		`/api/processes/${action}?name=${encodeURIComponent(name)}`,
 		{ method: "POST" },
 	);
 	const text = await res.text();
-	return { ok: res.ok, message: text };
+	return { ok: res.ok, status: res.status, message: text };
 }
 
 /** Fetched once - the running daemon's own braid version can't change without a restart. */

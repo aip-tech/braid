@@ -55,6 +55,17 @@ A batch of fixes from a full code-security/quality review of the package.
   like an omitted `name` for a `follow=true` request - it used to register
   the connection under a follower key nothing ever dispatches to, leaving
   it open and silently inert until the daemon shut down.
+- A raw HTTP Upgrade (`registerUpgrade`) can now authenticate via the same
+  session cookie a normal GET already can, not just a `?token=` query
+  param - lets a future WebSocket-using plugin avoid keeping the bearer
+  token in reach of page JS just for that one request.
+- The CLI's config loader now rejects a process missing a `name`/`command`
+  string with a clear, per-entry error at startup instead of that surfacing
+  later as an obscure failure inside a freshly-forked worker, and wraps a
+  config file that throws at import time in a clear message instead of
+  propagating the raw thrown value.
+- `braid start --foreground`'s log auto-follow now reports a non-ok
+  response from the control server instead of silently doing nothing.
 
 ## [0.8.0] - 2026-09-15
 

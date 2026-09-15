@@ -22,6 +22,15 @@ minor version bump.
   rejection when `/api/status` returns a 200 with a truncated/malformed
   body - `res.json()` is now wrapped the same way the fetch-throws case
   already was, skipping that tick silently and self-healing next poll.
+- The per-process cpu/memory history a long-running dashboard tab
+  accumulates is now evicted for a process name that disappears from
+  `/api/status` entirely (removed from config), instead of being kept
+  forever - `updateHistory` is now exported standalone from `api.ts` and
+  unit-tested.
+- A stop/restart action that itself gets a 401 (the daemon restarted
+  mid-session) now shows the same "session expired, reload" banner
+  `refreshStatus` already uses for the identical cause, instead of a
+  raw, less actionable "Unauthorized" row error.
 
 ### Added
 

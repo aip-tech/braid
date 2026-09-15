@@ -88,24 +88,93 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	};
 }
 
+/** Builds an `/api/...` URL against a running daemon's own control server. */
+function controlUrl(
+	pidfile: Pidfile,
+	path: string,
+	params?: Record<string, string>,
+): URL {
+	const url = new URL(`http://127.0.0.1:${pidfile.controlPort}${path}`);
+	for (const [key, value] of Object.entries(params ?? {})) {
+		url.searchParams.set(key, value);
+	}
+	return url;
+}
+
+/** fetch() against the control server, with its bearer token attached. */
+function controlFetch(
+	pidfile: Pidfile,
+	url: URL,
+	init?: RequestInit,
+): Promise<Response> {
+	return fetch(url, {
+		...init,
+		headers: {
+			...init?.headers,
+			Authorization: `Bearer ${pidfile.controlToken}`,
+		},
+	});
+}
+
 const CONFIG_SHAPE_ERROR = (configPath: string): string =>
 	`braid config at ${configPath} must default-export a non-empty array or a { processes } object`;
 
 /** Normalizes a config file's default export to a BraidConfig. */
+/**
+ * Throws a clear, per-entry message if any process config is missing the two fields every
+ * downstream consumer (spawnWorker, the pidfile, the per-process log file) assumes are present -
+ * without this, a config typo (a missing `command`, a `name` left as `undefined`) only surfaced
+ * as an obscure runtime error inside a freshly-forked worker, well after the config had already
+ * been accepted and other processes had already started.
+ */
+function validateProcessConfigShapes(
+	processes: unknown[],
+	configPath: string,
+): asserts processes is ProcessConfig[] {
+	processes.forEach((entry, index) => {
+		if (!entry || typeof entry !== "object") {
+			throw new Error(
+				`braid config at ${configPath}: processes[${index}] must be an object`,
+			);
+		}
+		const { name, command } = entry as Record<string, unknown>;
+		if (typeof name !== "string" || name.length === 0) {
+			throw new Error(
+				`braid config at ${configPath}: processes[${index}] is missing a "name" string`,
+			);
+		}
+		if (typeof command !== "string" || command.length === 0) {
+			throw new Error(
+				`braid config at ${configPath}: process "${name}" is missing a "command" string`,
+			);
+		}
+	});
+}
+
 export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	if (!existsSync(configPath)) {
 		throw new Error(`braid config not found at ${configPath}`);
 	}
-	const mod = (await import(pathToFileURL(configPath).href)) as {
-		default?: unknown;
-	};
+	let mod: { default?: unknown };
+	try {
+		mod = (await import(pathToFileURL(configPath).href)) as {
+			default?: unknown;
+		};
+	} catch (error) {
+		throw new Error(
+			`braid: failed to load config at ${configPath}: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 	const exported = mod.default;
 
 	if (Array.isArray(exported)) {
 		if (exported.length === 0) {
 			throw new Error(CONFIG_SHAPE_ERROR(configPath));
 		}
-		return { processes: exported as ProcessConfig[] };
+		validateProcessConfigShapes(exported, configPath);
+		return { processes: exported };
 	}
 
 	if (exported && typeof exported === "object") {
@@ -119,8 +188,9 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 				`braid config at ${configPath}'s "plugins" must be an array`,
 			);
 		}
+		validateProcessConfigShapes(processes, configPath);
 		return {
-			processes: processes as ProcessConfig[],
+			processes,
 			plugins,
 			logs,
 			foreground,
@@ -247,14 +317,24 @@ async function startDaemon(
 }
 
 /** Streams a running manager's combined process output straight to this terminal until it shuts down. */
-async function followLogs(pidfile: Pidfile): Promise<void> {
-	const url = new URL(`http://127.0.0.1:${pidfile.controlPort}/api/logs`);
-	url.searchParams.set("follow", "true");
+export async function followLogs(pidfile: Pidfile): Promise<void> {
+	const url = controlUrl(pidfile, "/api/logs", { follow: "true" });
+	let response: Response;
 	try {
-		const response = await fetch(url, {
-			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
-		});
-		if (!response.body) return;
+		response = await controlFetch(pidfile, url);
+	} catch {
+		// Couldn't even connect - the control server tearing down mid-shutdown looks the same as a
+		// real connection failure here, so this stays silent like the streaming errors below do.
+		return;
+	}
+	if (!response.ok) {
+		console.error(
+			`${braidTag()} logs: ${response.status} ${await response.text()}`,
+		);
+		return;
+	}
+	if (!response.body) return;
+	try {
 		for await (const chunk of response.body) {
 			process.stdout.write(chunk);
 		}
@@ -290,9 +370,9 @@ async function fetchLiveStatus(
 	pidfile: Pidfile,
 ): Promise<LiveProcessStatus[] | undefined> {
 	try {
-		const response = await fetch(
-			`http://127.0.0.1:${pidfile.controlPort}/api/status`,
-			{ headers: { Authorization: `Bearer ${pidfile.controlToken}` } },
+		const response = await controlFetch(
+			pidfile,
+			controlUrl(pidfile, "/api/status"),
 		);
 		if (!response.ok) return undefined;
 		return (await response.json()) as LiveProcessStatus[];
@@ -312,15 +392,9 @@ async function postProcessAction(
 	action: "stop" | "restart" | "start",
 	name: string,
 ): Promise<{ ok: boolean; message: string }> {
-	const url = new URL(
-		`http://127.0.0.1:${pidfile.controlPort}/api/processes/${action}`,
-	);
-	url.searchParams.set("name", name);
+	const url = controlUrl(pidfile, `/api/processes/${action}`, { name });
 	try {
-		const response = await fetch(url, {
-			method: "POST",
-			headers: { Authorization: `Bearer ${pidfile.controlToken}` },
-		});
+		const response = await controlFetch(pidfile, url, { method: "POST" });
 		const text = (await response.text()).trim();
 		return {
 			ok: response.ok,
@@ -419,10 +493,11 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				console.log("Nothing running.");
 				return 0;
 			}
-			const url = new URL(`http://127.0.0.1:${running.controlPort}/api/logs`);
-			if (processName) url.searchParams.set("name", processName);
-			if (follow) url.searchParams.set("follow", "true");
-			if (lines !== undefined) url.searchParams.set("lines", String(lines));
+			const url = controlUrl(running, "/api/logs", {
+				...(processName ? { name: processName } : {}),
+				...(follow ? { follow: "true" } : {}),
+				...(lines !== undefined ? { lines: String(lines) } : {}),
+			});
 
 			// Handle both: Ctrl-C sends SIGINT, but pnpm re-sends interruption as SIGTERM.
 			const controller = new AbortController();
@@ -430,8 +505,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 			process.on("SIGINT", onSignal);
 			process.on("SIGTERM", onSignal);
 			try {
-				const response = await fetch(url, {
-					headers: { Authorization: `Bearer ${running.controlToken}` },
+				const response = await controlFetch(running, url, {
 					signal: controller.signal,
 				});
 				if (!response.ok) {

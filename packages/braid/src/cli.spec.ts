@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_PIDFILE_PATH,
+	followLogs,
 	isMainModule,
 	loadConfig,
 	parseArgs,
@@ -219,6 +220,97 @@ describe("loadConfig", () => {
 		await expect(loadConfig(configPath)).rejects.toThrow(
 			/"plugins" must be an array/,
 		);
+	});
+
+	it("throws a clear, per-entry error when a process is missing its name", async () => {
+		const configPath = join(tmpDir, "no-name.config.ts");
+		writeFileSync(configPath, 'export default [{ command: "node" }];\n');
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/processes\[0\] is missing a "name" string/,
+		);
+	});
+
+	it("throws a clear, per-entry error when a process is missing its command", async () => {
+		const configPath = join(tmpDir, "no-command.config.ts");
+		writeFileSync(
+			configPath,
+			'export default [{ name: "one", command: "node" }, { name: "two" }];\n',
+		);
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/process "two" is missing a "command" string/,
+		);
+	});
+
+	it("throws the same field-shape error for the { processes } object form too", async () => {
+		const configPath = join(tmpDir, "object-no-command.config.ts");
+		writeFileSync(
+			configPath,
+			'export default { processes: [{ name: "one" }] };\n',
+		);
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/process "one" is missing a "command" string/,
+		);
+	});
+
+	it("wraps a config file that throws at import time in a clear error, instead of the raw thrown value", async () => {
+		const configPath = join(tmpDir, "throws.config.ts");
+		writeFileSync(
+			configPath,
+			'throw new Error("boom from the config file");\n',
+		);
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/failed to load config.*boom from the config file/,
+		);
+	});
+});
+
+describe("followLogs", () => {
+	const fakePidfile = {
+		managerPid: 1,
+		startedAt: new Date(0).toISOString(),
+		workers: [],
+		controlPort: 12345,
+		controlToken: "test-token",
+	};
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	it("reports a non-ok response instead of silently doing nothing", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({
+				ok: false,
+				status: 401,
+				text: async () => "Unauthorized",
+			})),
+		);
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await followLogs(fakePidfile);
+
+		expect(errorSpy).toHaveBeenCalledWith(
+			expect.stringContaining("401 Unauthorized"),
+		);
+	});
+
+	it("stays silent when the connection itself fails (the expected shutdown-teardown case)", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw new TypeError("fetch failed");
+			}),
+		);
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await expect(followLogs(fakePidfile)).resolves.toBeUndefined();
+		expect(errorSpy).not.toHaveBeenCalled();
 	});
 });
 
