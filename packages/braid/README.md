@@ -33,6 +33,7 @@ export default defineConfig({
 - `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
 - `startAfter`: `{ processes }` — don't fork this process for the first time until `processes` are themselves ready. See [Waiting to start](#waiting-to-start).
 - `autoStart`: set `false` to keep this process from forking when `start` boots the whole stack — start it later on demand instead. See [Starting on demand](#starting-on-demand). @default `true`
+- `autoRestart`: restart just this process on a crash instead of stopping the whole stack. See [Restarting on crash](#restarting-on-crash). @default `false`
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
 - `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
@@ -164,6 +165,24 @@ Set `autoStart: false` to keep a process from forking at all when `start` boots 
 ```
 
 Start it later with `braid start cron`, the dashboard's Start button, or `PluginContext.startProcess()` from a plugin. Calling start on an already-running process is a safe no-op — it doesn't kill and respawn it the way `restart` would. A process can combine `autoStart: false` with its own `startAfter` — its later manual start still waits on those dependencies first — but not with `dependsOn` (a dependency's restart would force-start it early, defeating the point), and it can't be named as someone else's `startAfter` target (that dependent would never see it become ready on its own). Both are rejected at startup.
+
+## Restarting on crash
+
+By default, any process exiting with a non-zero code stops the whole stack (mirrors `concurrently --kill-others-on-fail`). Set `autoRestart: true` to restart just that process instead, with exponential backoff:
+
+```ts
+{
+	name: "worker",
+	command: "pnpm",
+	args: ["--filter", "./worker", "run", "start"],
+	autoRestart: true,       // @default false
+	maxRestarts: 10,         // @default 10 - give up (and stop the whole stack) after this many in a row
+	restartDelayMs: 1000,    // @default 1000 - base delay, doubling each attempt, capped at 10s
+	minUptimeMs: 1000,       // @default 1000 - a run this long or longer resets the consecutive-crash count
+},
+```
+
+A crash-triggered restart runs exactly like any other restart: `onRestart` fires and any `dependsOn` dependents cascade, once per attempt — including during a crash loop, so a heavy `onRestart` hook will re-run more than once if the process keeps failing fast.
 
 ## Logs
 

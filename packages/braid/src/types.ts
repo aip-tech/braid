@@ -60,6 +60,36 @@ export type ProcessConfig = {
 	/** How long to wait for `readyPattern` before giving up and proceeding anyway. @default 10000 */
 	readyTimeoutMs?: number;
 	/**
+	 * Restart this process automatically when it exits with a non-zero code, instead of stopping
+	 * the whole stack the way an unhandled crash does by default. Retried with exponential backoff
+	 * (see `restartDelayMs`) up to `maxRestarts` attempts before falling back to that same
+	 * stop-everything behavior. A crash-triggered restart is otherwise indistinguishable from a
+	 * `watch`-triggered one: `onRestart` runs and `dependsOn` dependents cascade exactly the same
+	 * way, once per attempt.
+	 * @default false
+	 */
+	autoRestart?: boolean;
+	/**
+	 * Auto-restart (see `autoRestart`) this process up to this many times in a row; if it keeps
+	 * crashing past that, fall back to stopping the whole stack instead. The count resets once the
+	 * process stays up for `minUptimeMs`. Only used when `autoRestart` is set.
+	 * @default 10
+	 */
+	maxRestarts?: number;
+	/**
+	 * Base delay before an `autoRestart` attempt; each consecutive failure doubles it, capped at
+	 * 10 seconds, in ms. Only used when `autoRestart` is set.
+	 * @default 1000
+	 */
+	restartDelayMs?: number;
+	/**
+	 * How long an `autoRestart`ed process must stay up to count as recovered, resetting the
+	 * consecutive-restart counter used by `maxRestarts` - so an occasional crash after hours of
+	 * uptime doesn't count against a real crash loop. Only used when `autoRestart` is set.
+	 * @default 1000
+	 */
+	minUptimeMs?: number;
+	/**
 	 * Whether this process forks when `braid start` boots the whole stack. Set `false` for a
 	 * process you only want running on demand (a cron-style job, say) - it's still fully
 	 * configured (visible in `status`/the dashboard as "not started"), just never spawned

@@ -19,6 +19,12 @@ export const DEFAULT_HOOK_RETRIES = 5;
 export const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
 // How long a watch-triggered restart waits after SIGTERM before escalating to SIGKILL.
 export const DEFAULT_STOP_TIMEOUT_MS = 5000;
+export const DEFAULT_MAX_RESTARTS = 10;
+export const DEFAULT_RESTART_DELAY_MS = 1000;
+export const DEFAULT_MIN_UPTIME_MS = 1000;
+// Ceiling on a single autoRestart backoff wait - not user-configurable, just a backstop against a
+// pathological restartDelayMs producing multi-minute per-attempt waits.
+export const DEFAULT_MAX_RESTART_DELAY_MS = 10_000;
 // Mirrors nodemon's own default ignore list (its `ignore-by-default` dependency) - deliberately
 // not extended with dotfile exclusion, which nodemon does *not* do by default either, so a
 // config watching a dotfile (.env, .eslintrc.js) keeps working.
@@ -122,8 +128,47 @@ export function runWorker(config: ProcessConfig): void {
 	// Set only while WE are killing `child` on purpose (a watch-triggered restart) - distinguishes
 	// that from an unprompted exit/crash in the exit handler below.
 	let awaitingExit: (() => void) | undefined;
+	// True for the whole stop -> hook -> respawn cycle (a watch-triggered restart) or backoff-wait
+	// -> respawn cycle (an autoRestart retry), not just either's own debounce/delay window - a slow
+	// beforeRestart retry, or a pending autoRestart backoff wait, shouldn't let an overlapping cycle
+	// start from a second file change or a second crash. Hoisted out of the `if (watched)` block
+	// below (which still declares `triggerRestart`, the only watch-specific user of this flag)
+	// since autoRestart's own crash-branch logic needs it regardless of whether `watch` is set.
+	let restarting = false;
+	// autoRestart's consecutive-failure tracking - reset once a run stays up for minUptimeMs.
+	let consecutiveCrashes = 0;
+	let lastSpawnAt = 0;
+
+	function scheduleAutoRestart(exitCode: number | null): void {
+		restarting = true;
+		const maxRestarts = config.maxRestarts ?? DEFAULT_MAX_RESTARTS;
+		const restartDelayMs = config.restartDelayMs ?? DEFAULT_RESTART_DELAY_MS;
+		const delayMs = Math.min(
+			restartDelayMs * 2 ** (consecutiveCrashes - 1),
+			DEFAULT_MAX_RESTART_DELAY_MS,
+		);
+		stderrPrefixer.write(
+			`braid: "${config.name}" crashed (exit code ${exitCode}), restarting in ${delayMs}ms (attempt ${consecutiveCrashes}/${maxRestarts})\n`,
+		);
+		void (async () => {
+			try {
+				await delay(delayMs);
+				// Sent right before respawning, not at the top of this wait: a manual stop landing
+				// during a multi-second backoff would otherwise kill this fork before "started" ever
+				// follows "restart", leaving this name stuck in manager.ts's awaitingFreshStart Set
+				// forever (nothing else ever clears it). From here on everything is synchronous, so
+				// there's no such gap.
+				send({ source: "braid-worker", type: "restart" }, () => {});
+				spawnApp();
+				send({ source: "braid-worker", type: "started" }, () => {});
+			} finally {
+				restarting = false;
+			}
+		})();
+	}
 
 	function spawnApp(): void {
+		lastSpawnAt = Date.now();
 		child = spawn(config.command, config.args ?? [], {
 			env: { ...process.env, ...config.env },
 		});
@@ -147,6 +192,22 @@ export function runWorker(config: ProcessConfig): void {
 				if (!watched) process.exit(0);
 				child = null;
 				return;
+			}
+			const minUptimeMs = config.minUptimeMs ?? DEFAULT_MIN_UPTIME_MS;
+			if (Date.now() - lastSpawnAt >= minUptimeMs) consecutiveCrashes = 0;
+			consecutiveCrashes++;
+			if (
+				config.autoRestart &&
+				consecutiveCrashes <= (config.maxRestarts ?? DEFAULT_MAX_RESTARTS)
+			) {
+				child = null;
+				scheduleAutoRestart(code);
+				return;
+			}
+			if (config.autoRestart) {
+				stderrPrefixer.write(
+					`braid: "${config.name}" crashed ${consecutiveCrashes} times within its uptime window, giving up\n`,
+				);
 			}
 			if (!watched) {
 				send({ source: "braid-worker", type: "crash", code }, () =>
@@ -185,9 +246,8 @@ export function runWorker(config: ProcessConfig): void {
 			awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 50 },
 		});
 
-		// True for the whole stop -> hook -> respawn cycle, not just the debounce window - a slow
-		// beforeRestart retry shouldn't let an overlapping cycle start from a second file change.
-		let restarting = false;
+		// `restarting` is declared at the top of runWorker (shared with autoRestart's crash-branch
+		// logic) - not re-declared here.
 		let debounceTimer: NodeJS.Timeout | undefined;
 
 		async function triggerRestart(): Promise<void> {

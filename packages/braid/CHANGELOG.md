@@ -5,6 +5,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.9.3] - 2026-09-17
+
+### Added
+
+- `ProcessConfig.autoRestart?: boolean` (@default `false`): when a process
+  exits with a non-zero code, restart just that process instead of
+  stopping the whole stack the way an unhandled crash does by default.
+  Retries with exponential backoff (`restartDelayMs`, doubling each
+  attempt, capped at 10s) up to `maxRestarts` consecutive failures
+  (@default `10`) before falling back to today's stop-everything
+  behavior; `minUptimeMs` (@default `1000`) resets the failure count once
+  a restart stays up long enough to count as recovered, so an occasional
+  crash after hours of uptime doesn't count against a real crash loop.
+  Implemented entirely in `worker.ts`, reusing the exact same
+  `"restart"`/`"started"` IPC message pair a `watch`-triggered restart
+  already sends - `manager.ts` needed no changes at all, since it already
+  treats every restart identically regardless of what triggered it. This
+  also means a crash-triggered auto-restart runs `onRestart` and cascades
+  to `dependsOn` dependents exactly like any other restart, once per
+  attempt - deliberate, for consistency, though a crash loop will re-run
+  a heavy `onRestart` hook more than once as a result.
+
 ## [0.9.2] - 2026-09-17
 
 A full push to close every remaining test-coverage gap in the package,

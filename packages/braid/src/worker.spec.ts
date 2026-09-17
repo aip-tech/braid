@@ -12,7 +12,13 @@ vi.mock("chokidar", () => ({ watch: vi.fn() }));
 import { spawn } from "node:child_process";
 import { watch as watchFiles } from "chokidar";
 import treeKill from "tree-kill";
-import { loadConfig, RESTART_DEBOUNCE_MS, runWorker } from "./worker.js";
+import {
+	DEFAULT_MAX_RESTART_DELAY_MS,
+	DEFAULT_RESTART_DELAY_MS,
+	loadConfig,
+	RESTART_DEBOUNCE_MS,
+	runWorker,
+} from "./worker.js";
 
 type FakeChild = EventEmitter & {
 	pid: number;
@@ -588,6 +594,135 @@ describe("runWorker", () => {
 			expect(stderrWrites.join("")).toContain(
 				"kept failing; leaving it stopped",
 			);
+		});
+	});
+
+	describe("autoRestart", () => {
+		it("retries a crashing non-watched process after the base backoff delay, instead of exiting", async () => {
+			runWorker({ name: "web", command: "node", autoRestart: true });
+			lastChild().emit("exit", 1);
+
+			// Not yet - still waiting out the backoff delay.
+			expect(sentMessages).toEqual([]);
+			expect(exitCalls).toEqual([]);
+			expect(stderrWrites.join("")).toContain(
+				"crashed (exit code 1), restarting in 1000ms (attempt 1/10)",
+			);
+
+			await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_DELAY_MS);
+
+			expect(sentMessages).toEqual([
+				{ source: "braid-worker", type: "restart" },
+				{ source: "braid-worker", type: "started" },
+			]);
+			expect(spawnCalls).toHaveLength(2);
+			expect(exitCalls).toEqual([]);
+		});
+
+		it("doubles the delay on each consecutive crash, capped at DEFAULT_MAX_RESTART_DELAY_MS", async () => {
+			runWorker({ name: "web", command: "node", autoRestart: true });
+
+			const delays = [1000, 2000, 4000, 8000, DEFAULT_MAX_RESTART_DELAY_MS];
+			for (const [i, delayMs] of delays.entries()) {
+				lastChild().emit("exit", 1);
+				expect(stderrWrites.join("")).toContain(
+					`restarting in ${delayMs}ms (attempt ${i + 1}/10)`,
+				);
+				await vi.advanceTimersByTimeAsync(delayMs);
+				expect(spawnCalls).toHaveLength(i + 2);
+			}
+		});
+
+		it("resets the consecutive-crash counter once the process stays up for minUptimeMs", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				autoRestart: true,
+				minUptimeMs: 5000,
+			});
+			lastChild().emit("exit", 1); // 1st crash - attempt 1, delay 1000ms
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(spawnCalls).toHaveLength(2);
+
+			// This run stays up for exactly minUptimeMs before crashing again - should count as
+			// "recovered" and reset the counter, rather than continuing to double the delay.
+			await vi.advanceTimersByTimeAsync(5000);
+			lastChild().emit("exit", 1);
+			expect(stderrWrites.join("")).toContain(
+				"restarting in 1000ms (attempt 1/10)",
+			);
+		});
+
+		it("gives up after maxRestarts consecutive crashes, falling back to the crash+shutdown path", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				autoRestart: true,
+				maxRestarts: 2,
+				restartDelayMs: 10,
+			});
+			lastChild().emit("exit", 1); // crash 1/2 - retries
+			await vi.advanceTimersByTimeAsync(10);
+			expect(spawnCalls).toHaveLength(2);
+
+			lastChild().emit("exit", 1); // crash 2/2 - still retries (maxRestarts allows exactly 2)
+			await vi.advanceTimersByTimeAsync(20);
+			expect(spawnCalls).toHaveLength(3);
+
+			lastChild().emit("exit", 1); // crash 3 - exceeds maxRestarts, gives up
+			expect(stderrWrites.join("")).toContain(
+				'"web" crashed 3 times within its uptime window, giving up',
+			);
+			expect(sentMessages.at(-1)).toEqual({
+				source: "braid-worker",
+				type: "crash",
+				code: 1,
+			});
+			expect(exitCalls).toEqual([1]);
+			expect(spawnCalls).toHaveLength(3); // no further respawn
+		});
+
+		it("does not double-spawn when a file change lands during a crash-retry's backoff wait", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				watch: ["/project/src"],
+				autoRestart: true,
+			});
+			lastChild().emit("exit", 1); // crash - schedules a retry, sets the shared restarting flag
+
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			// restarting is still true at this point (backoff delay hasn't elapsed) - the watch
+			// handler's own guard should have swallowed the change entirely, never even reaching
+			// triggerRestart's kill-tree step.
+			expect(treeKillCalls).toEqual([]);
+
+			await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_DELAY_MS);
+
+			expect(spawnCalls).toHaveLength(2); // only the crash-triggered respawn, not a second one
+		});
+
+		it("still responds to file changes after a successful crash-retry (restarting flag correctly reset)", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				watch: ["/project/src"],
+				autoRestart: true,
+			});
+			lastChild().emit("exit", 1);
+			await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_DELAY_MS);
+			expect(spawnCalls).toHaveLength(2);
+
+			const recovered = lastChild();
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			expect(treeKillCalls).toEqual([
+				{ pid: recovered.pid, signal: "SIGTERM" },
+			]);
+			recovered.emit("exit", 0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(spawnCalls).toHaveLength(3);
 		});
 	});
 });

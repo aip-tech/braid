@@ -32,6 +32,7 @@
 					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
 					<li><a href="#waiting-to-start">Waiting to start</a></li>
 					<li><a href="#starting-on-demand">Starting on demand</a></li>
+					<li><a href="#restarting-on-crash">Restarting on crash</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
 					<li><a href="#stats">Process stats</a></li>
@@ -278,6 +279,32 @@ export default defineConfig({
 						early, defeating the point), and it can't be named as someone else's
 						<code>startAfter</code> target (that dependent would never see it become
 						ready on its own). Both are rejected at startup.
+					</p>
+				</section>
+
+				<section id="restarting-on-crash">
+					<h2>Restarting on crash</h2>
+					<p>
+						By default, any process exiting with a non-zero code stops the whole
+						stack (mirrors <code>concurrently --kill-others-on-fail</code>). Set
+						<code>autoRestart: true</code> to restart just that process instead,
+						with exponential backoff:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "worker",
+	command: "pnpm",
+	args: ["--filter", "./worker", "run", "start"],
+	autoRestart: true,       // @default false
+	maxRestarts: 10,         // @default 10 - give up (and stop the whole stack) after this many in a row
+	restartDelayMs: 1000,    // @default 1000 - base delay, doubling each attempt, capped at 10s
+	minUptimeMs: 1000,       // @default 1000 - a run this long or longer resets the consecutive-crash count
+},</code></pre>
+					<p>
+						A crash-triggered restart runs exactly like any other restart:
+						<code>onRestart</code> fires and any <code>dependsOn</code> dependents
+						cascade, once per attempt &mdash; including during a crash loop, so a
+						heavy <code>onRestart</code> hook will re-run more than once if the
+						process keeps failing fast.
 					</p>
 				</section>
 
