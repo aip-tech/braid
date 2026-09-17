@@ -18,7 +18,7 @@ import {
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
-import type { ProcessConfig } from "./types.js";
+import type { Pidfile, ProcessConfig } from "./types.js";
 
 // Lets one test simulate a delayed pidusage() *resolution* landing after a restart, to land the
 // race deterministically - real timing can't reliably reproduce it on demand. The underlying call
@@ -100,12 +100,50 @@ async function waitFor(
 	}
 }
 
+/**
+ * `stopFromPidfile`'s own `killPid` only fires SIGTERM and resolves once the signal was *sent*,
+ * not once the target has actually exited - fine for its real callers (a fresh CLI invocation
+ * exiting right after), but not a strong enough guarantee for this describe block's shared
+ * `afterEach`, which needs every real process a test spawned to be *confirmed* gone before the
+ * next test's `beforeEach` reuses the same fixture pids/ports. A worker fork can now legitimately
+ * take up to its own `stopTimeoutMs` to finish its internal SIGKILL escalation (see worker.ts's
+ * SIGTERM handler) - reads the pidfile's own worker pids first (stopFromPidfile deletes the file),
+ * then gives them one exponential-backoff sweep and a direct SIGKILL for anything still alive.
+ * Test-hygiene-only: production shutdown has its own, more careful escalation - this is just a
+ * hard backstop against a leaked real OS process outliving the test that spawned it.
+ */
+async function forceStopFromPidfile(pidfilePath: string): Promise<void> {
+	const pidfile = existsSync(pidfilePath)
+		? (JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile)
+		: undefined;
+	await stopFromPidfile(pidfilePath);
+	if (!pidfile) return;
+	const pids = [pidfile.managerPid, ...pidfile.workers.map((w) => w.pid)];
+	for (let delayMs = 25; delayMs <= 400; delayMs *= 2) {
+		if (pids.every((pid) => !isPidAlive(pid))) return;
+		await new Promise((resolve) => setTimeout(resolve, delayMs));
+	}
+	for (const pid of pids) {
+		if (isPidAlive(pid)) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// Already gone between the check above and this call - fine, that's the goal.
+			}
+		}
+	}
+}
+
 function keepAliveConfig(name: string): ProcessConfig {
 	return { name, command: "node", args: [join(FIXTURES, "keep-alive.js")] };
 }
 
-function exitFailConfig(name: string): ProcessConfig {
-	return { name, command: "node", args: [join(FIXTURES, "exit-fail.js")] };
+function exitFailConfig(name: string, delayMs = 0): ProcessConfig {
+	return {
+		name,
+		command: "node",
+		args: [join(FIXTURES, "exit-fail.js"), String(delayMs)],
+	};
 }
 
 /** Crashes `failuresBeforeSuccess` times (tracked via `counterPath`, since each attempt is a fresh
@@ -244,10 +282,10 @@ describe("runManager", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -443,7 +481,14 @@ describe("runManager", () => {
 	it("escalates to SIGKILL, instead of hanging forever, when a process ignores SIGTERM", async () => {
 		const configs = [
 			ignoreSigtermConfig("stubborn", 200),
-			exitFailConfig("bad"),
+			// Delayed, not immediate: "bad" crashing kicks off the shutdown cascade that sends
+			// "stubborn" its SIGTERM, and ignore-sigterm.js's own SIGTERM-ignoring handler is only
+			// its *second* line - an immediate crash raced that registration closely enough (both
+			// are a fresh `node` process's own startup cost) that "stubborn" sometimes received
+			// SIGTERM before it had ignored anything, dying immediately by default disposition
+			// instead of ever exercising the escalation this test means to cover. A head start
+			// removes the race rather than papering over it with longer timeouts.
+			exitFailConfig("bad", 500),
 		];
 
 		const managerPromise = runManager(configs, pidfilePath);
@@ -452,14 +497,35 @@ describe("runManager", () => {
 		if (stubbornPid === undefined) throw new Error("stubborn never started");
 		await waitFor(() => isPidAlive(stubbornPid));
 
+		// stubbornPid (from the pidfile) is the outer worker fork's own pid, not the inner
+		// ignore-sigterm.js app's - the fork has no SIGTERM handler of its own and always dies
+		// near-instantly regardless of what its inner app does, so asserting only on stubbornPid
+		// can't actually detect whether the inner app was ever escalated against (a real bug this
+		// test used to miss entirely - see worker.ts's own SIGTERM handler). Parse the inner app's
+		// own pid from its "started <pid>" log line instead, the same way it announces itself.
+		const stubbornLog = join(tmpDir, "logs", "stubborn.log");
+		await waitFor(
+			() =>
+				existsSync(stubbornLog) &&
+				/started \d+/.test(readFileSync(stubbornLog, "utf8")),
+		);
+		const innerPidMatch = readFileSync(stubbornLog, "utf8").match(
+			/started (\d+)/,
+		);
+		if (!innerPidMatch)
+			throw new Error("stubborn's own started <pid> line never appeared");
+		const innerPid = Number(innerPidMatch[1]);
+		await waitFor(() => isPidAlive(innerPid));
+
 		// If stopChild had no SIGKILL escalation, "bad" crashing would leave shutdown() awaiting
-		// "stubborn"'s exit forever - this whole test's own timeout (10000ms) is the real assertion
+		// "stubborn"'s exit forever - this whole test's own timeout (below) is the real assertion
 		// that it doesn't hang; stopTimeoutMs: 200 above just keeps that bounded and fast.
 		const exitCode = await managerPromise;
 
 		expect(exitCode).toBe(1);
 		expect(isPidAlive(stubbornPid)).toBe(false);
-	}, 10000);
+		expect(isPidAlive(innerPid)).toBe(false);
+	}, 15000);
 
 	it("refuses to start a second manager against a pidfile that's still alive", async () => {
 		const configs = [keepAliveConfig("solo")];
@@ -507,10 +573,10 @@ describe("runManager watch", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -630,10 +696,10 @@ describe("runManager log rotation", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -683,10 +749,10 @@ describe("runManager plugin support", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -1109,10 +1175,10 @@ describe("runManager manual process control", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -1437,10 +1503,10 @@ describe("runManager dependsOn", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -1887,10 +1953,10 @@ describe("runManager onRestart", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -1997,10 +2063,10 @@ describe("runManager readyPattern", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -2247,10 +2313,10 @@ describe("runManager startAfter", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -2422,10 +2488,10 @@ describe("runManager autoStart", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -2672,10 +2738,10 @@ describe("runManager beforeRestart", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
@@ -2865,10 +2931,10 @@ describe("findRunningPidfile", () => {
 		// Safety net, not the primary cleanup path: every test above already stops its own daemon
 		// (and any dummy pids it wrote into a pidfile-shaped file) before finishing. But a test that
 		// throws first - a failed assertion, an unexpected error, vitest's own timeout - would
-		// otherwise skip that and leak a real, still-running process tree. stopFromPidfile is a
-		// no-op (returns []) when there's nothing left to stop, so this is safe to run
+		// otherwise skip that and leak a real, still-running process tree. forceStopFromPidfile is a
+		// no-op (returns immediately) when there's nothing left to stop, so this is safe to run
 		// unconditionally on every test, not just failures.
-		await stopFromPidfile(pidfilePath);
+		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 

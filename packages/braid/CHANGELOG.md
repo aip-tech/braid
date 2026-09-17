@@ -5,6 +5,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.9.4] - 2026-09-18
+
+### Fixed
+
+- `braid stop`/a `dependsOn` cascade/daemon shutdown could leave a
+  process's real OS process running forever if it traps or ignores
+  `SIGTERM`, instead of eventually SIGKILLing it as documented. The
+  outer worker fork installs no `SIGTERM` handler of its own, so it
+  always died near-instantly regardless of what its inner app did -
+  `stopChild`'s SIGKILL-escalation timer was watching the fork's exit,
+  not the inner app's, so it effectively never fired for this case; and
+  even when it did, `tree-kill` can no longer reach an already-orphaned
+  child once its former parent (the fork) has already exited, since it
+  walks live `ppid` relationships at call time. Fixed by giving the
+  worker fork its own `SIGTERM` handler that kills its inner app first
+  (reusing the same kill/wait/SIGKILL-escalate sequence a watch-triggered
+  restart already had) and only exits once that's confirmed done -
+  `stopChild`'s own wait on the fork's exit is accurate again as a
+  result, with a widened outer backstop timeout so it acts as a true
+  last-resort rather than racing and winning against the fork's own,
+  now-real internal escalation.
+
 ## [0.9.3] - 2026-09-17
 
 ### Added

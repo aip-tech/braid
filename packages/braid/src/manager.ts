@@ -49,6 +49,12 @@ const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 // How long stopChild waits after SIGTERM before escalating to SIGKILL.
 const DEFAULT_STOP_TIMEOUT_MS = 5000;
+// A worker fork now escalates a stubborn inner app to SIGKILL internally, within its own
+// stopTimeoutMs-bounded SIGTERM handler (worker.ts) - stopChild's own outer timeout for a worker
+// fork (as opposed to a single-process hook child, which has no such inner delay to accommodate)
+// needs real margin above that inner budget, or it fires and does the real work first on every
+// call, defeating the point of the inner handler existing at all. See workerStopTimeoutMs.
+const WORKER_STOP_GRACE_MS = 2000;
 // Bounds the rolling buffer readyPattern is tested against, so a chatty process before it's
 // actually ready can't grow this without bound while still letting a match span two chunks.
 const READY_PATTERN_BUFFER_BYTES = 8192;
@@ -157,6 +163,15 @@ export async function stopChild(
 		await killPid(child.pid, "SIGKILL");
 		await exited;
 	}
+}
+
+/** `stopChild`'s own outer timeout when `child` is a worker fork (as opposed to a single-process
+ *  hook child) - see WORKER_STOP_GRACE_MS for why this needs a margin over the plain
+ *  `stopTimeoutMs` a worker's own internal SIGTERM handler uses for the same config. */
+function workerStopTimeoutMs(config: ProcessConfig | undefined): number {
+	return (
+		(config?.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS) + WORKER_STOP_GRACE_MS
+	);
 }
 
 function delay(ms: number): Promise<void> {
@@ -554,7 +569,7 @@ export async function runManager(
 		await Promise.all([
 			...[...children].map(([name, child]) =>
 				stopChild(child, {
-					timeoutMs: configsByName.get(name)?.stopTimeoutMs,
+					timeoutMs: workerStopTimeoutMs(configsByName.get(name)),
 					label: name,
 				}),
 			),
@@ -868,7 +883,7 @@ export async function runManager(
 			if (current) {
 				logToProcess(config, "stopping (dependency restarted)");
 				await stopChild(current, {
-					timeoutMs: config.stopTimeoutMs,
+					timeoutMs: workerStopTimeoutMs(config),
 					label: config.name,
 				});
 			}
@@ -1023,7 +1038,7 @@ export async function runManager(
 		manuallyStopped.add(name);
 		logToProcess(config, "stopping (manual stop)");
 		await stopChild(current, {
-			timeoutMs: config.stopTimeoutMs,
+			timeoutMs: workerStopTimeoutMs(config),
 			label: config.name,
 		});
 		return "ok";
@@ -1055,7 +1070,7 @@ export async function runManager(
 			if (current && current.exitCode === null && current.signalCode === null) {
 				logToProcess(config, "stopping (manual restart)");
 				await stopChild(current, {
-					timeoutMs: config.stopTimeoutMs,
+					timeoutMs: workerStopTimeoutMs(config),
 					label: config.name,
 				});
 			}

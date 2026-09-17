@@ -69,6 +69,31 @@ function killTree(pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> {
 	);
 }
 
+/**
+ * Races `exited` against `timeoutMs`; SIGKILLs `pid` and awaits `exited` again if it times out,
+ * calling `onEscalate` first (for the caller's own "sending SIGKILL" log line). The caller is
+ * responsible for having already sent the initial SIGTERM and wired up `exited` (via
+ * `awaitingExit`) before calling this - this only owns the "did it comply in time" half.
+ */
+async function escalateIfNotExited(
+	pid: number,
+	exited: Promise<void>,
+	timeoutMs: number,
+	onEscalate: () => void,
+): Promise<void> {
+	let timer: NodeJS.Timeout | undefined;
+	const timedOut = new Promise<boolean>((resolveTimeout) => {
+		timer = setTimeout(() => resolveTimeout(true), timeoutMs);
+	});
+	const didTimeOut = await Promise.race([exited.then(() => false), timedOut]);
+	clearTimeout(timer);
+	if (didTimeOut) {
+		onEscalate();
+		void killTree(pid, "SIGKILL");
+		await exited;
+	}
+}
+
 /** Runs `hook` once, piping its output through the same prefixers as the process's own output. */
 function runHookOnce(
 	hook: RestartHook,
@@ -135,6 +160,24 @@ export function runWorker(config: ProcessConfig): void {
 	// below (which still declares `triggerRestart`, the only watch-specific user of this flag)
 	// since autoRestart's own crash-branch logic needs it regardless of whether `watch` is set.
 	let restarting = false;
+	// Resolves whoever's waiting (currently only the SIGTERM handler below) the next time
+	// `restarting` clears - an event instead of polling, since nothing else in this file polls.
+	let notifyWhenNotRestarting: (() => void) | undefined;
+	function whenNotRestarting(): Promise<void> {
+		if (!restarting) return Promise.resolve();
+		return new Promise((resolve) => {
+			notifyWhenNotRestarting = resolve;
+		});
+	}
+	function markRestartingDone(): void {
+		restarting = false;
+		notifyWhenNotRestarting?.();
+		notifyWhenNotRestarting = undefined;
+	}
+	// True only during an autoRestart backoff wait (set right before it, cleared once the wait
+	// elapses and a fresh spawn actually happens) - lets a SIGTERM landing mid-wait cancel the
+	// pending retry outright instead of sitting through it (see the SIGTERM handler below).
+	let pendingAutoRestartTimer: NodeJS.Timeout | undefined;
 	// autoRestart's consecutive-failure tracking - reset once a run stays up for minUptimeMs.
 	let consecutiveCrashes = 0;
 	let lastSpawnAt = 0;
@@ -150,9 +193,9 @@ export function runWorker(config: ProcessConfig): void {
 		stderrPrefixer.write(
 			`braid: "${config.name}" crashed (exit code ${exitCode}), restarting in ${delayMs}ms (attempt ${consecutiveCrashes}/${maxRestarts})\n`,
 		);
-		void (async () => {
+		pendingAutoRestartTimer = setTimeout(async () => {
+			pendingAutoRestartTimer = undefined;
 			try {
-				await delay(delayMs);
 				// Sent right before respawning, not at the top of this wait: a manual stop landing
 				// during a multi-second backoff would otherwise kill this fork before "started" ever
 				// follows "restart", leaving this name stuck in manager.ts's awaitingFreshStart Set
@@ -162,9 +205,9 @@ export function runWorker(config: ProcessConfig): void {
 				spawnApp();
 				send({ source: "braid-worker", type: "started" }, () => {});
 			} finally {
-				restarting = false;
+				markRestartingDone();
 			}
-		})();
+		}, delayMs);
 	}
 
 	function spawnApp(): void {
@@ -222,6 +265,57 @@ export function runWorker(config: ProcessConfig): void {
 
 	spawnApp();
 
+	// A worker fork installs no signal handling by default, so it dies immediately on SIGTERM
+	// (manager.ts's stopChild sends it there for every manager-initiated stop: a manual `braid
+	// stop`, a dependsOn cascade's respawn, or daemon shutdown) regardless of whether its own
+	// inner `child` app actually complied - leaving a `child` that ignores SIGTERM running forever,
+	// orphaned once this fork exits out from under it. This handler makes the fork's own exit
+	// (which manager.ts's stopChild waits on) actually mean "the inner app is confirmed dead too".
+	let stopping = false;
+	process.on("SIGTERM", () => {
+		if (stopping) return; // a second SIGTERM while already stopping - ignore, in progress
+		stopping = true;
+		void (async () => {
+			if (pendingAutoRestartTimer) {
+				// Mid an autoRestart backoff wait - `restarting` is already true for this whole
+				// window (see scheduleAutoRestart), but nothing is actually running right now, so
+				// there's nothing to wait out or kill: cancel the pending retry immediately rather
+				// than sitting through the rest of it only to spawn a fresh instance and
+				// immediately kill that instead. Handled before `whenNotRestarting()` below - that
+				// call is only for an in-flight *watch-triggered* restart's own kill sequence,
+				// which genuinely is mid-flight and must be waited out, not cancelled out from
+				// under it.
+				clearTimeout(pendingAutoRestartTimer);
+				pendingAutoRestartTimer = undefined;
+				markRestartingDone();
+			} else {
+				// A watch-triggered restart already in flight owns `child`/`awaitingExit` right
+				// now - wait for it to finish rather than racing it for either.
+				await whenNotRestarting();
+				restarting = true; // claim it for our own kill below, so nothing else (a file
+				try {
+					// change, a fresh crash) can start a competing cycle meanwhile
+					if (child?.pid) {
+						const pid = child.pid;
+						const exited = new Promise<void>((resolveExit) => {
+							awaitingExit = resolveExit;
+						});
+						void killTree(pid, "SIGTERM");
+						const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+						await escalateIfNotExited(pid, exited, timeoutMs, () =>
+							stderrPrefixer.write(
+								`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+							),
+						);
+					}
+				} finally {
+					markRestartingDone();
+				}
+			}
+			process.exit(0);
+		})();
+	});
+
 	if (watched) {
 		// process.cwd() is already config.cwd-resolved (manager forks this worker with that cwd) -
 		// resolve(), not join(), so an already-absolute watch entry isn't mangled.
@@ -266,22 +360,11 @@ export function runWorker(config: ProcessConfig): void {
 					// Without this, an app that traps/ignores SIGTERM would hang this restart forever -
 					// `restarting` never clears, so every later file change is silently swallowed too.
 					const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
-					let timer: NodeJS.Timeout | undefined;
-					const timedOut = new Promise<boolean>((resolveTimeout) => {
-						timer = setTimeout(() => resolveTimeout(true), timeoutMs);
-					});
-					const didTimeOut = await Promise.race([
-						exited.then(() => false),
-						timedOut,
-					]);
-					clearTimeout(timer);
-					if (didTimeOut) {
+					await escalateIfNotExited(pid, exited, timeoutMs, () =>
 						stderrPrefixer.write(
 							`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
-						);
-						void killTree(pid, "SIGKILL");
-						await exited;
-					}
+						),
+					);
 				}
 				if (config.beforeRestart) {
 					const ok = await runHookWithRetries(
@@ -299,7 +382,7 @@ export function runWorker(config: ProcessConfig): void {
 				spawnApp();
 				send({ source: "braid-worker", type: "started" }, () => {});
 			} finally {
-				restarting = false;
+				markRestartingDone();
 			}
 		}
 

@@ -147,6 +147,11 @@ describe("runWorker", () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		process.send = originalSend;
+		// Each runWorker() call registers a real "SIGTERM" listener on this shared process object -
+		// without this, they'd accumulate across every test in this file (triggering Node's
+		// MaxListenersExceededWarning) and a later test's process.emit("SIGTERM") would also fire
+		// every earlier test's now-stale listener.
+		process.removeAllListeners("SIGTERM");
 	});
 
 	describe("a non-watched process", () => {
@@ -723,6 +728,131 @@ describe("runWorker", () => {
 			recovered.emit("exit", 0);
 			await vi.advanceTimersByTimeAsync(0);
 			expect(spawnCalls).toHaveLength(3);
+		});
+	});
+
+	describe("SIGTERM (a manager-initiated stop)", () => {
+		it("kills the current child and exits the worker once it's confirmed dead", async () => {
+			runWorker({ name: "web", command: "node" });
+			const firstChild = lastChild();
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(treeKillCalls).toEqual([
+				{ pid: firstChild.pid, signal: "SIGTERM" },
+			]);
+			expect(exitCalls).toEqual([]); // still waiting for the child to actually exit
+
+			firstChild.emit("exit", 0);
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("escalates to SIGKILL if the child doesn't comply within stopTimeoutMs, then exits", async () => {
+			runWorker({ name: "web", command: "node", stopTimeoutMs: 300 });
+			const firstChild = lastChild();
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(treeKillCalls).toEqual([
+				{ pid: firstChild.pid, signal: "SIGTERM" },
+			]);
+
+			await vi.advanceTimersByTimeAsync(300);
+			expect(treeKillCalls).toEqual([
+				{ pid: firstChild.pid, signal: "SIGTERM" },
+				{ pid: firstChild.pid, signal: "SIGKILL" },
+			]);
+			expect(stderrWrites.join("")).toContain(
+				"did not exit within 300ms of SIGTERM; sending SIGKILL",
+			);
+			expect(exitCalls).toEqual([]); // still waiting for the real exit event
+
+			firstChild.emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("exits immediately when there's no active child (idle after a clean exit while watched)", async () => {
+			runWorker({ name: "web", command: "node", watch: ["/project/src"] });
+			lastChild().emit("exit", 0); // clean exit while watched -> idle, child set to null
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(treeKillCalls).toEqual([]);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("cancels a pending autoRestart backoff wait instead of waiting it out and spawning a fresh instance first", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				autoRestart: true,
+				restartDelayMs: 5000,
+			});
+			lastChild().emit("exit", 1); // schedules a retry ~5000ms out
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(exitCalls).toEqual([0]); // exits immediately, not after waiting out the backoff
+			expect(spawnCalls).toHaveLength(1); // never respawned just to kill it again
+
+			// The cancelled timer firing later (it shouldn't - clearTimeout should have stopped it)
+			// would be a real regression: confirm nothing more happens even once its delay elapses.
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(spawnCalls).toHaveLength(1);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("ignores a second SIGTERM while already stopping", async () => {
+			runWorker({ name: "web", command: "node" });
+			const firstChild = lastChild();
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(treeKillCalls).toEqual([
+				{ pid: firstChild.pid, signal: "SIGTERM" },
+			]);
+
+			firstChild.emit("exit", 0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("waits for an in-flight watch-triggered restart to finish, instead of racing it for the same child/awaitingExit", async () => {
+			runWorker({ name: "web", command: "node", watch: ["/project/src"] });
+			const firstChild = lastChild();
+
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS); // triggerRestart begins, kills firstChild
+
+			process.emit("SIGTERM"); // lands while that restart's own kill is still in flight
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([]); // hasn't hijacked anything yet
+
+			firstChild.emit("exit", 0); // the restart's own kill completes
+			await vi.advanceTimersByTimeAsync(0); // triggerRestart finishes: respawns, sends started, clears restarting
+
+			expect(spawnCalls).toHaveLength(2); // the in-flight restart's own respawn completed normally
+			const secondChild = lastChild();
+			// Only now does the SIGTERM handler proceed, against the NEW (post-restart) child - the
+			// first entry here is the restart's own kill of the original child, already asserted
+			// implicitly by this point; the second is the SIGTERM handler's, added after waiting.
+			expect(treeKillCalls).toEqual([
+				{ pid: firstChild.pid, signal: "SIGTERM" },
+				{ pid: secondChild.pid, signal: "SIGTERM" },
+			]);
+
+			secondChild.emit("exit", 0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([0]);
 		});
 	});
 });
