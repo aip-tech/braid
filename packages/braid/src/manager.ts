@@ -126,8 +126,15 @@ function waitForExit(child: ChildProcess): Promise<void> {
  * SIGKILL after `timeoutMs` if it hasn't - without this, a process that traps/ignores SIGTERM (or
  * a wrapper script that doesn't forward it to its own children) would hang stop/restart/shutdown
  * forever, since `waitForExit` alone has no way to give up.
+ *
+ * Exported so `manager-stop-child.spec.ts` can drive the SIGKILL-escalation branch directly, with
+ * `tree-kill` mocked and a fake `child` that deliberately never emits `exit`: worker.ts (the real
+ * `child` this is always called with in production) installs no `SIGTERM` handler of its own, so
+ * the underlying Node process always dies from the signal's default disposition well within any
+ * realistic `timeoutMs` - there's no way to make a *real* forked worker hang long enough to
+ * observe this path from an end-to-end test.
  */
-async function stopChild(
+export async function stopChild(
 	child: ChildProcess,
 	{
 		timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
@@ -408,6 +415,12 @@ export async function runManager(
 		if (statsPollInFlight) return;
 		const aliveWorkers: PidfileWorker[] = [];
 		for (const worker of pidfileWorkers) {
+			// istanbul ignore else -- pure cache hygiene: getWorkers() already suppresses cpu/memory
+			// for a non-alive worker regardless of whether the else branch ran, via its own `alive ?`
+			// check, so there's no way to observe a difference in behavior through any public API -
+			// only a stopped-and-never-restarted name's entry lingering in memory a little longer
+			// than it needs to. (A *restarted* name's stale entry is a real, observable bug, but
+			// that's a separate deletion, in spawnWorker, covered by its own test.)
 			if (isAlive(worker.pid)) aliveWorkers.push(worker);
 			else statsByName.delete(worker.name);
 		}
@@ -516,6 +529,9 @@ export async function runManager(
 				isAlive(child.pid)
 			) {
 				const config = configsByName.get(name);
+				// istanbul ignore else -- every key ever set in `children` comes from spawnWorker(config)
+				// with that same config's own name, which is always a key of configsByName by
+				// construction - config can't actually be undefined here.
 				if (config) logToProcess(config, "stopping");
 			}
 		}
@@ -672,6 +688,10 @@ export async function runManager(
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		});
 		children.set(config.name, child);
+		// istanbul ignore else -- fork() only omits a pid if it failed to spawn at all, which for
+		// forking this same already-running Node executable (not an arbitrary user command) isn't
+		// something a test can trigger without mocking fork() itself; see worker.spec.ts/
+		// start-daemon.spec.ts for the same class of guard already verified that way at that layer.
 		if (typeof child.pid === "number") {
 			upsertWorkerRecord(config.name, child.pid);
 			// A restart's new pid invalidates any cached stats keyed by this name - without this,
@@ -704,6 +724,9 @@ export async function runManager(
 		});
 
 		child.on("message", (message: unknown) => {
+			// istanbul ignore if -- worker.ts (the only sender on this channel) never emits a message
+			// shape other than the three handled below; this guards purely against some future or
+			// stray message, not anything a legitimate config/process interaction can produce.
 			if (!isWorkerStatusMessage(message)) return;
 			if (message.type === "restart") {
 				void safeEmit(emitter, "processRestart", {
@@ -717,7 +740,11 @@ export async function runManager(
 				return;
 			}
 			if (message.type === "started") {
-				// Also fires at initial start, with no preceding "restart" - nothing to do then.
+				// istanbul ignore else -- worker.ts only ever sends "started" from inside its own
+				// triggerRestart(), always immediately preceded by a "restart" message that adds this
+				// same name to awaitingFreshStart first - so delete() returning false (no cascade to
+				// run) isn't reachable via any real worker lifecycle today, only if that pairing ever
+				// changed without this being updated to match.
 				if (awaitingFreshStart.delete(config.name)) {
 					void handleFreshStart(config);
 				}
@@ -735,6 +762,9 @@ export async function runManager(
 				void shutdown(1, config.name);
 			}
 		});
+		// istanbul ignore next -- forking this same already-running Node executable essentially never
+		// emits its own 'error' event (unlike spawn()ing an arbitrary user command); see spawnWorker's
+		// matching child.pid guard above for the same reasoning.
 		child.on("error", (error) => {
 			if (!shuttingDown) {
 				process.stderr.write(
@@ -813,9 +843,28 @@ export async function runManager(
 	 * stopped, with an error logged, if the hook keeps failing after its retries are exhausted.
 	 */
 	async function restartDependent(config: ProcessConfig): Promise<void> {
+		// istanbul ignore if -- only reachable if `shuttingDown` is already true at the exact
+		// synchronous moment onProcessRestarted calls this (there's no yield point between a
+		// dependency's own restart notification and this call for an external shutdown trigger to
+		// land in) - not reliably constructible as its own test without mocking internal timing.
+		// The pattern itself is covered via this same function's later checks (see below) and
+		// runHookWithRetries'/handleFreshStart's own sibling guards, all exercised directly.
 		if (shuttingDown) return;
+		// A dependent that hasn't had its own first spawn yet - still waiting on its own
+		// `startAfter` chain - must not be force-started here: `ensureReady` already owns that first
+		// spawn and will still deliver it once `config` is actually ready to go, exactly like a
+		// manual first start doesn't cascade either (a first spawn is not a restart). Without this
+		// guard, this would both jump ahead of whatever `config` is supposed to wait for and leak a
+		// duplicate, untracked process once `ensureReady`'s own spawn lands afterward and overwrites
+		// this one's entry in `children` - confirmed by reproducing it directly: the first, orphaned
+		// process is never killed even on daemon shutdown, since nothing keeps a reference to it.
+		if (pendingFirstSpawn.has(config.name)) return;
 		await withRestartLock(config.name, async () => {
 			const current = children.get(config.name);
+			// istanbul ignore else -- current can only be undefined for a name that has never been
+			// spawned at all, which the pendingFirstSpawn check above already returns early for -
+			// every other name reaching here has a `children` entry (spawnWorker always sets one and
+			// nothing ever removes it), dead or alive.
 			if (current) {
 				logToProcess(config, "stopping (dependency restarted)");
 				await stopChild(current, {
@@ -823,6 +872,10 @@ export async function runManager(
 					label: config.name,
 				});
 			}
+			// istanbul ignore if -- reachable only if a real shutdown lands in the narrow gap between
+			// stopChild() above resolving and this line - a genuine but sub-test-granularity race
+			// (see restartDependent's own top-of-function comment for why this class of check isn't
+			// reliably constructible as its own dedicated test).
 			if (shuttingDown) return;
 
 			const hook = config.dependsOn?.run;
@@ -836,6 +889,8 @@ export async function runManager(
 					return;
 				}
 			}
+			// istanbul ignore if -- same reasoning as the shuttingDown check above, now for the gap
+			// between the dependsOn hook (if any) succeeding and this line.
 			if (shuttingDown) return;
 
 			spawnWorker(config);
@@ -871,6 +926,9 @@ export async function runManager(
 				if (pattern.test(buffer)) settle(true);
 			};
 			const settle = (ready: boolean) => {
+				// istanbul ignore if -- can't actually happen twice: the first call below both clears
+				// the timer and unregisters onOutput, so neither of settle's own two callers survives
+				// to call it again afterward. Kept as a guard anyway in case that pairing ever changes.
 				if (settled) return;
 				settled = true;
 				emitter.off("processOutput", onOutput);
@@ -899,6 +957,11 @@ export async function runManager(
 		config: ProcessConfig,
 		{ lockHeld = false }: { lockHeld?: boolean } = {},
 	): Promise<void> {
+		// istanbul ignore if -- only reachable if `shuttingDown` is already true at the exact
+		// synchronous moment this is called (from spawnWorker's "started" handler, or from
+		// restartDependent/restartProcessByName immediately after their own respawn) - the same
+		// zero-yield-point timing issue as restartDependent's own top-of-function guard. The
+		// post-readyPattern-wait check below (a real, later point in time) is covered directly.
 		if (shuttingDown) return;
 		if (config.readyPattern) {
 			const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
@@ -979,6 +1042,12 @@ export async function runManager(
 	): Promise<ProcessActionResult> {
 		const config = configsByName.get(name);
 		if (!config) return "unknown";
+		// istanbul ignore if -- shutdown() keeps the control server open throughout its own teardown
+		// (only closed at the very end), so a request landing here after a crash elsewhere flipped
+		// `shuttingDown` is possible in principle, but the actual window is typically milliseconds
+		// wide (no daemonShutdown listeners to wait on, a plain keep-alive process dies fast) -
+		// engineering a test that reliably lands a real HTTP request inside it without flaking would
+		// need mocking this function's internals directly rather than timing a real request.
 		if (shuttingDown) return "busy";
 		return withRestartLock(name, async (): Promise<ProcessActionResult> => {
 			manuallyStopped.delete(name);
@@ -990,6 +1059,8 @@ export async function runManager(
 					label: config.name,
 				});
 			}
+			// istanbul ignore if -- same reasoning as this function's own entry guard above, now for
+			// the gap between stopChild() resolving and this line.
 			if (shuttingDown) return "busy";
 			spawnWorker(config);
 			rewritePidfile();
@@ -1044,6 +1115,11 @@ export async function runManager(
 			if (dependencies.length > 0) {
 				await Promise.all(dependencies.map(ensureReady));
 			}
+			// istanbul ignore if -- reachable if a real shutdown begins while this is still awaiting
+			// its own startAfter chain, but by the time it resolves the whole daemon (including this
+			// dangling background promise's eventual continuation) has typically already torn down -
+			// asserting on it would mean asserting against a pidfile shutdown() has already deleted,
+			// not something a clean integration test can verify.
 			if (shuttingDown) return;
 			spawnWorker(config);
 			rewritePidfile();

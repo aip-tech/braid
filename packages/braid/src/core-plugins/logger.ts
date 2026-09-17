@@ -29,10 +29,13 @@ type Destination = {
 	generation: number;
 };
 
-function rotateFileIfExists(filePath: string): void {
+/** Renames `filePath` to `${filePath}.1` if it exists, and reports whether it did. */
+function rotateFileIfExists(filePath: string): boolean {
 	if (existsSync(filePath)) {
 		renameSync(filePath, `${filePath}.1`);
+		return true;
 	}
+	return false;
 }
 
 function parseLines(query: URLSearchParams): number | undefined {
@@ -105,6 +108,11 @@ export const loggerPlugin: BraidPlugin = {
 			const set = getFollowerSet(key);
 			set.add(res);
 			res.on("close", () => set.delete(res));
+			// istanbul ignore next -- symmetric cleanup for the same set entry 'close' above already
+			// removes; reliably forcing a real 'error' (as opposed to a client-initiated 'close', which
+			// is what an aborted fetch/dropped connection actually produces and is covered above)
+			// needs a genuinely broken socket, not something a test can construct deterministically
+			// without flaking.
 			res.on("error", () => set.delete(res));
 		}
 
@@ -113,7 +121,15 @@ export const loggerPlugin: BraidPlugin = {
 			const existing = destinations.get(name);
 			if (existing) return existing;
 			const filePath = join(dir, `${name}.log`);
-			rotateFileIfExists(filePath);
+			// A file already at this path predates this Destination (a previous daemon run's output
+			// that was never rotated because nothing wrote here yet this run) - rotating it away
+			// here is itself a generation bump. Starting fresh at generation 0 instead would make a
+			// `/api/logs/history` cursor minted *before* this call (reading that stale file with no
+			// Destination yet, so `currentGeneration` was 0 by fallback - see the history route
+			// below) compare equal to this brand new destination's own generation 0, wrongly reading
+			// the new, unrelated file instead of being redirected to the backup the stale content
+			// actually rotated into.
+			const rotated = rotateFileIfExists(filePath);
 			const stream = new SonicBoom({
 				dest: filePath,
 				append: true,
@@ -126,7 +142,7 @@ export const loggerPlugin: BraidPlugin = {
 				filePath,
 				bytesWritten: 0,
 				ended: false,
-				generation: 0,
+				generation: rotated ? 1 : 0,
 			};
 			destinations.set(name, destination);
 			return destination;
@@ -134,6 +150,9 @@ export const loggerPlugin: BraidPlugin = {
 
 		function rotateNow(name: string): void {
 			const destination = destinations.get(name);
+			// istanbul ignore if -- both call sites (the processOutput size-threshold check and the
+			// processRestart handler, which calls getOrCreateDestination first) only ever reach this
+			// after a destination for `name` already exists.
 			if (!destination) return;
 			renameSync(destination.filePath, `${destination.filePath}.1`);
 			destination.stream.reopen();
@@ -181,6 +200,9 @@ export const loggerPlugin: BraidPlugin = {
 		});
 
 		ctx.registerRoute("GET", "/api/logs", (req, res) => {
+			// istanbul ignore next -- `req.url` satisfies IncomingMessage's own optional typing;
+			// Node's HTTP parser never emits a 'request' event without it already set (same
+			// reasoning as control-server.ts's own identical fallbacks).
 			const url = new URL(req.url ?? "/", "http://localhost");
 			// `|| undefined`, not `?? undefined` - an explicit but empty `?name=` must be treated the
 			// same as an omitted one everywhere below (the unknown-process check, which follower key
@@ -233,6 +255,7 @@ export const loggerPlugin: BraidPlugin = {
 		// more" pages from here, then only uses the plain route's `follow=true` for the live tail
 		// going forward. JSON, not a kept-open stream - each call answers once and closes.
 		ctx.registerRoute("GET", "/api/logs/history", (req, res) => {
+			// istanbul ignore next -- same reasoning as the /api/logs route's identical fallback above.
 			const url = new URL(req.url ?? "/", "http://localhost");
 			const name = url.searchParams.get("name");
 			const pageSize =

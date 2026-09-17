@@ -69,6 +69,8 @@ export function linePrefixer(
 		write(chunk) {
 			buffer += chunk.toString();
 			const lines = buffer.split("\n");
+			// istanbul ignore next -- String.split always returns at least one element (even for an
+			// empty string), so pop() here can never actually be undefined.
 			buffer = lines.pop() ?? "";
 			for (const line of lines) {
 				sink(`${prefixFor()}${line}\n`);

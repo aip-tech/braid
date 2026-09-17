@@ -102,7 +102,12 @@ export function createControlServer(): ControlServer {
 		req: IncomingMessage,
 		res: ServerResponse,
 	): Promise<void> {
+		// `?? "/"`/`?? "GET"` satisfy IncomingMessage's own optional typing - in practice, Node's
+		// HTTP parser never emits a 'request' event without both already set, so there's no way to
+		// exercise this fallback from a real request without bypassing the parser entirely.
+		// istanbul ignore next
 		const url = new URL(req.url ?? "/", "http://localhost");
+		// istanbul ignore next
 		const method = req.method ?? "GET";
 
 		const headerToken = req.headers.authorization?.startsWith("Bearer ")
@@ -163,9 +168,12 @@ export function createControlServer(): ControlServer {
 			return;
 		}
 
-		const staticEntry = staticEntries.find((entry) =>
-			url.pathname.startsWith(entry.prefix),
-		);
+		// Longest-prefix match, not registration-order: two plugins can register nested prefixes
+		// (e.g. "/" and "/docs/"), and whichever registered first must not permanently shadow the
+		// other just because every path also starts with "/".
+		const staticEntry = staticEntries
+			.filter((entry) => url.pathname.startsWith(entry.prefix))
+			.sort((a, b) => b.prefix.length - a.prefix.length)[0];
 		if (staticEntry) {
 			await serveStatic(staticEntry, url.pathname, res);
 			return;
@@ -179,6 +187,9 @@ export function createControlServer(): ControlServer {
 	});
 
 	server.on("upgrade", (req, socket, head) => {
+		// Same reasoning as handleRequest's own `req.url ?? "/"` above - unreachable via a real upgrade
+		// request.
+		// istanbul ignore next
 		const url = new URL(req.url ?? "/", "http://localhost");
 		// The cookie a prior GET's ?token= redirect already established authenticates an upgrade
 		// too, not just the raw query token - without this, a page that's otherwise never had to

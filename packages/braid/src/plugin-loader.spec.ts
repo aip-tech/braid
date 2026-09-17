@@ -98,6 +98,28 @@ describe("loadExternalPlugins: local fixtures", () => {
 		expect(contexts.get("ok")?.registerRoute).toHaveBeenCalled();
 	});
 
+	it("logs and skips a module that throws a non-Error value at import time, using String() for it", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const { contextFor } = contextFactory();
+
+		await expect(
+			loadExternalPlugins(
+				["./__fixtures__/plugins/throws-at-import.js"],
+				FAKE_CONFIG_PATH,
+				contextFor,
+			),
+		).resolves.toBeUndefined();
+
+		expect(
+			writeSpy.mock.calls.some((call) =>
+				String(call[0]).includes("boom, just a string"),
+			),
+		).toBe(true);
+		writeSpy.mockRestore();
+	});
+
 	it("logs and skips a missing module without throwing", async () => {
 		const writeSpy = vi
 			.spyOn(process.stderr, "write")

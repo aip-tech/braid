@@ -9,13 +9,16 @@ import type {
 	WorkerStatusMessage,
 } from "./types.js";
 
-const DEFAULT_EXT = "ts,js,json";
+// Exported (alongside the other tuning constants below) so worker.spec.ts can drive its fake-timer
+// tests off the exact same values, instead of duplicating - and risking silently drifting from -
+// magic numbers of its own.
+export const DEFAULT_EXT = "ts,js,json";
 // Coalesces multiple files saved together into one restart cycle.
-const RESTART_DEBOUNCE_MS = 100;
-const DEFAULT_HOOK_RETRIES = 5;
-const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
+export const RESTART_DEBOUNCE_MS = 100;
+export const DEFAULT_HOOK_RETRIES = 5;
+export const DEFAULT_HOOK_RETRY_DELAY_MS = 1000;
 // How long a watch-triggered restart waits after SIGTERM before escalating to SIGKILL.
-const DEFAULT_STOP_TIMEOUT_MS = 5000;
+export const DEFAULT_STOP_TIMEOUT_MS = 5000;
 // Mirrors nodemon's own default ignore list (its `ignore-by-default` dependency) - deliberately
 // not extended with dotfile exclusion, which nodemon does *not* do by default either, so a
 // config watching a dotfile (.env, .eslintrc.js) keeps working.
@@ -28,7 +31,10 @@ const DEFAULT_IGNORED = [
 	"**/node_modules/**",
 ];
 
-function loadConfig(): ProcessConfig {
+/** Reads and parses this fork's `BRAID_CONFIG` env var - the one process this worker runs, passed
+ *  by `manager.ts`'s `spawnWorker` rather than re-read from disk (see `daemon.ts`'s `loadInput`
+ *  for the same reasoning: a config file can be arbitrary JS/TS, not just data). */
+export function loadConfig(): ProcessConfig {
 	const raw = process.env.BRAID_CONFIG;
 	if (!raw) {
 		throw new Error("braid worker started without BRAID_CONFIG");
@@ -51,10 +57,7 @@ function delay(ms: number): Promise<void> {
 }
 
 /** Sends `signal` to `pid`'s whole process tree and resolves once it has been sent. */
-function killTree(
-	pid: number,
-	signal: "SIGTERM" | "SIGKILL" = "SIGTERM",
-): Promise<void> {
+function killTree(pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> {
 	return new Promise((resolveKill) =>
 		treeKill(pid, signal, () => resolveKill()),
 	);

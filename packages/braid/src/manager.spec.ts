@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -26,15 +27,35 @@ import type { ProcessConfig } from "./types.js";
 // only delivering the already-computed result to the caller is delayed; delaying the call itself
 // would let the pid die first and change what's being tested (pidusage's own handling of a dead
 // pid, not this race). Delay is 0 (a no-op passthrough) for every other test.
-const pidusageControl = vi.hoisted(() => ({ delayMs: 0 }));
+const pidusageControl = vi.hoisted(() => ({
+	delayMs: 0,
+	// Pids to strip from a resolved result before it's handed back, simulating pidusage's own
+	// documented "a dead pid is just missing from a batched result" shape without needing the pid
+	// to actually be dead.
+	dropPids: new Set<number>(),
+	// When set, the call rejects with this value instead of running the real pidusage call at all -
+	// lets a test force the failure path with a chosen (including non-Error) rejection value.
+	forceRejectWith: undefined as unknown,
+}));
 vi.mock("pidusage", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("pidusage")>();
 	return {
 		default: (pids: number | number[]) => {
-			const result = actual.default(pids as number[]) as Promise<unknown>;
+			if (pidusageControl.forceRejectWith !== undefined) {
+				const rejection = pidusageControl.forceRejectWith;
+				return new Promise((_, reject) => {
+					setTimeout(() => reject(rejection), pidusageControl.delayMs);
+				});
+			}
+			const result = actual.default(pids as number[]) as Promise<
+				Record<number, unknown>
+			>;
 			return new Promise((resolve, reject) => {
 				result.then(
-					(value) => setTimeout(() => resolve(value), pidusageControl.delayMs),
+					(value) => {
+						for (const pid of pidusageControl.dropPids) delete value[pid];
+						setTimeout(() => resolve(value), pidusageControl.delayMs);
+					},
 					(error) => setTimeout(() => reject(error), pidusageControl.delayMs),
 				);
 			});
@@ -52,6 +73,18 @@ function isPidAlive(pid: number): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** Spawns and waits out a process to get a real pid guaranteed to be dead, rather than a made-up
+ *  number that could coincidentally collide with something actually running. */
+async function deadPid(): Promise<number> {
+	const child = spawn(process.execPath, ["-e", "process.exit(0)"]);
+	const pid = await new Promise<number>((resolve, reject) => {
+		child.once("spawn", () => resolve(child.pid as number));
+		child.once("error", reject);
+	});
+	await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+	return pid;
 }
 
 async function waitFor(
@@ -251,6 +284,79 @@ describe("runManager", () => {
 		},
 		10000,
 	);
+
+	it("rejects options.plugins without options.configPath before spawning anything", async () => {
+		const configs = [keepAliveConfig("solo")];
+		await expect(
+			runManager(configs, pidfilePath, { plugins: ["some-plugin"] }),
+		).rejects.toThrow(
+			/options\.configPath is required to resolve options\.plugins/,
+		);
+		expect(existsSync(pidfilePath)).toBe(false);
+	});
+
+	it("resolves a per-process cwd relative to the manager's own baseCwd", async () => {
+		const workDir = join(tmpDir, "workdir");
+		mkdirSync(workDir, { recursive: true });
+		const configs = [
+			{
+				name: "solo",
+				command: "node",
+				args: ["-e", "console.log(process.cwd()); process.exit(0);"],
+				cwd: "workdir",
+			},
+		];
+
+		const exitCode = await runManager(configs, pidfilePath, { cwd: tmpDir });
+		expect(exitCode).toBe(0);
+
+		const logPath = join(tmpDir, "logs", "solo.log");
+		expect(readFileSync(logPath, "utf8")).toContain(workDir);
+	});
+
+	it("prepends a timestamp to every log line when logs.timestamps is set", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			logs: { timestamps: true },
+		});
+		await waitFor(() => existsSync(pidfilePath));
+		const logPath = join(tmpDir, "logs", "solo.log");
+		await waitFor(
+			() =>
+				existsSync(logPath) && readFileSync(logPath, "utf8").includes("[solo]"),
+		);
+		expect(readFileSync(logPath, "utf8")).toMatch(
+			/\d{2}:\d{2}:\d{2}\.\d{3}.*\[solo\]/,
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("does not double-process shutdown when two processes crash close together", async () => {
+		const configs = [exitFailConfig("bad1"), exitFailConfig("bad2")];
+		const exitCode = await runManager(configs, pidfilePath);
+		expect(exitCode).toBe(1);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 10000);
+
+	it("does not double-process shutdown when SIGINT arrives twice in a row (an impatient repeat Ctrl-C)", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+
+		// onSignal (unlike every other shutdown() caller) has no pre-check of its own - shutdown()'s
+		// own internal re-entrancy guard is what has to catch this.
+		process.emit("SIGINT");
+		process.emit("SIGINT");
+
+		const exitCode = await managerPromise;
+		expect(exitCode).toBe(0);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 10000);
 
 	it("kills every other worker and returns a non-zero exit code when one process crashes", async () => {
 		const configs = [keepAliveConfig("ok"), exitFailConfig("bad")];
@@ -620,6 +726,110 @@ describe("runManager plugin support", () => {
 		await managerPromise;
 	}, 10000);
 
+	it("skips a worker whose pid is missing from pidusage's own batched result, without breaking the others", async () => {
+		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			statsPollIntervalMs: 50,
+		});
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+		const onePid = pidfileWorker(pidfilePath, "one")?.pid as number;
+		pidusageControl.dropPids.add(onePid);
+
+		try {
+			// "two" still gets sampled normally even though "one"'s own pid never shows up in the
+			// batch pidusage resolves with (the exact shape a dead-between-check-and-sample pid, or
+			// a platform quirk, would produce).
+			const withStats = await waitForStatus(pidfile, (body) => {
+				const two = body.find((w) => w.name === "two");
+				return two !== undefined && typeof two.cpu === "number";
+			});
+			const one = withStats.find((w) => w.name === "one");
+			expect(one?.cpu).toBeUndefined();
+		} finally {
+			pidusageControl.dropPids.clear();
+		}
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("logs a pidusage polling failure only once, using String() for a non-Error rejection, until it succeeds again", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			statsPollIntervalMs: 30,
+		});
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+
+		pidusageControl.forceRejectWith = "a plain string rejection";
+		try {
+			await waitFor(() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						"process stats polling failed (will keep retrying): a plain string rejection",
+					),
+				),
+			);
+			// A second, third, ... failing tick must not log again while it's still failing.
+			const failureLogCount = () =>
+				writeSpy.mock.calls.filter((call) =>
+					String(call[0]).includes("process stats polling failed"),
+				).length;
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(failureLogCount()).toBe(1);
+		} finally {
+			pidusageControl.forceRejectWith = undefined;
+			writeSpy.mockRestore();
+		}
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("logs a real Error's own message on a pidusage polling failure", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath, {
+			statsPollIntervalMs: 30,
+		});
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+
+		// Forced deterministically - the natural version of this (a poll racing a pid dying between
+		// its own alive-check and the batched pidusage() call) is a genuine but non-reproducible-on-
+		// demand timing race, not something a test can reliably trigger by waiting.
+		pidusageControl.forceRejectWith = new Error("boom from pidusage");
+		try {
+			await waitFor(() =>
+				writeSpy.mock.calls.some((call) =>
+					String(call[0]).includes(
+						"process stats polling failed (will keep retrying): boom from pidusage",
+					),
+				),
+			);
+		} finally {
+			pidusageControl.forceRejectWith = undefined;
+			writeSpy.mockRestore();
+		}
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
 	it("doesn't leak a restarted process's old cpu/memory onto its new pid", async () => {
 		const configs = [keepAliveConfig("solo")];
 		const managerPromise = runManager(configs, pidfilePath, {
@@ -817,7 +1027,7 @@ describe("runManager manual process control", () => {
 
 	async function postAction(
 		pidfile: { controlPort: number; controlToken: string },
-		action: "stop" | "restart",
+		action: "stop" | "restart" | "start",
 		name: string,
 	): Promise<Response> {
 		return fetch(
@@ -979,6 +1189,116 @@ describe("runManager manual process control", () => {
 		await managerPromise;
 	}, 10000);
 
+	it("returns 404 for stopping a one-shot process that already exited on its own (not manually stopped)", async () => {
+		const configs = [
+			keepAliveConfig("solo"),
+			{ name: "oneshot", command: "node", args: ["-e", "process.exit(0)"] },
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() => {
+			const oneshot = pidfileWorker(pidfilePath, "oneshot");
+			return oneshot !== undefined && !isPidAlive(oneshot.pid);
+		});
+
+		expect((await postAction(pidfile, "stop", "oneshot")).status).toBe(404);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("returns 409 busy when stopping a process while its own onRestart hook is still in progress", async () => {
+		const configs = [
+			{
+				...keepAliveConfig("api"),
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "slow-hook.js"), "500"],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const api = pidfileWorker(pidfilePath, "api");
+			return api !== undefined && isPidAlive(api.pid);
+		});
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		const restart = postAction(pidfile, "restart", "api");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect((await postAction(pidfile, "stop", "api")).status).toBe(409);
+		expect((await restart).status).toBe(200);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("start on a previously-run, now-stopped process delegates to restart (a fresh pid, not a no-op)", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		expect((await postAction(pidfile, "stop", "solo")).status).toBe(200);
+		await waitFor(
+			() => !isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+
+		expect((await postAction(pidfile, "start", "solo")).status).toBe(200);
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("skips a watch-triggered restart's own handleFreshStart while a manual restart already holds the lock for the same process", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const configs = [
+			{
+				...watchedConfig("target", watchFile),
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "slow-hook.js"), "2500"],
+				},
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "target")?.pid as number),
+		);
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+
+		// The manual restart respawns "target" (a brand new worker + its own fresh watcher) almost
+		// immediately, then holds the `restarting` lock for ~2500ms while its own onRestart hook
+		// runs. triggerWatchedRestart's own 800ms settle wait comfortably lands inside that window,
+		// so the fresh worker's *own* watch-triggered restart cycle - and the "started" message it
+		// sends once done - arrives while the manual restart above still holds the lock.
+		const manualRestart = postAction(pidfile, "restart", "target");
+		await triggerWatchedRestart(watchFile);
+
+		expect((await manualRestart).status).toBe(200);
+
+		// The watch-triggered respawn still genuinely happens - the worker itself doesn't know or
+		// care about the manager's own lock - just without a second, overlapping handleFreshStart
+		// call for it while the manual restart's own hook-phase lock is still held.
+		await waitFor(
+			() => isPidAlive(pidfileWorker(pidfilePath, "target")?.pid as number),
+			{ timeoutMs: 10000 },
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 15000);
+
 	it("restarting a manually-stopped process brings it back and un-marks it", async () => {
 		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
 		const managerPromise = runManager(configs, pidfilePath);
@@ -1043,6 +1363,85 @@ describe("runManager dependsOn", () => {
 		);
 		expect(existsSync(pidfilePath)).toBe(false);
 	});
+
+	it("does not force-spawn (or leak a duplicate of) a dependent still waiting on its own startAfter chain when its dependency restarts", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			startAfterConfig(dependentConfig("client", ["api"]), ["slow-dep"]),
+			{ ...slowConfig("slow-dep", 1500), readyPattern: "ready-marker" },
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+
+		// "client" hasn't spawned yet - still waiting on "slow-dep"'s own readyPattern.
+		expect(pidfileWorker(pidfilePath, "client")).toBeUndefined();
+
+		// "api" restarts while "client" is still pending its own first spawn - restartDependent must
+		// not force-start it early: that would jump ahead of its own startAfter wait, and - since
+		// ensureReady would still spawn it again once slow-dep is actually ready - leak the first,
+		// now-untracked process (reproduced directly before this fix: the orphaned process was never
+		// killed even on daemon shutdown, since nothing kept a reference to it once `children` was
+		// overwritten by the second spawn).
+		await triggerWatchedRestart(watchFile);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(pidfileWorker(pidfilePath, "client")).toBeUndefined();
+
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return client !== undefined && isPidAlive(client.pid);
+			},
+			{ timeoutMs: 15000 },
+		);
+		const clientPid = pidfileWorker(pidfilePath, "client")?.pid;
+
+		// Settles on exactly one spawn - no second, later respawn replacing this one's pid.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(pidfileWorker(pidfilePath, "client")?.pid).toBe(clientPid);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("resolves a dependsOn.run hook's own cwd relative to the manager's baseCwd", async () => {
+		const workDir = join(tmpDir, "workdir");
+		mkdirSync(workDir, { recursive: true });
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: ["-e", "console.log(process.cwd())"],
+				cwd: "workdir",
+			}),
+		];
+		const managerPromise = runManager(configs, pidfilePath, { cwd: tmpDir });
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		await triggerWatchedRestart(watchFile);
+
+		const clientLog = join(tmpDir, "logs", "client.log");
+		await waitFor(
+			() =>
+				existsSync(clientLog) &&
+				readFileSync(clientLog, "utf8").includes(workDir),
+			{
+				timeoutMs: 10000,
+			},
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 15000);
 
 	it("stops a dependent, runs its hook, and restarts it once its dependency restarts via a watch trigger", async () => {
 		const watchFile = join(tmpDir, "watch.trigger");
@@ -1305,6 +1704,76 @@ describe("runManager dependsOn", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);
+
+	it("stops retrying a dependsOn hook once a real shutdown begins mid-retry-delay, instead of hanging or finishing the count", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [join(FIXTURES, "always-fail-hook.js")],
+				// Chosen so 10 retries * 3000ms (30s+) is far longer than this test's own timeout -
+				// the manager exiting well within that proves the retry loop's own `shuttingDown`
+				// check (not the natural retry count) is what cut it short.
+				retries: 10,
+				retryDelayMs: 3000,
+			}),
+			// Crashes ~1.5s after start - timed to land while the hook above is sitting in its first
+			// retryDelayMs wait (triggered ~800ms in by triggerWatchedRestart, failing near-instantly).
+			{
+				name: "bad",
+				command: "node",
+				args: ["-e", "setTimeout(() => process.exit(1), 1500)"],
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		await triggerWatchedRestart(watchFile);
+
+		const exitCode = await managerPromise;
+		expect(exitCode).toBe(1);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 12000);
+
+	it("tree-kills an in-flight dependsOn hook process itself when a real shutdown begins while it's still running", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+
+		const configs = [
+			watchedConfig("api", watchFile),
+			dependentConfig("client", ["api"], {
+				command: "node",
+				args: [join(FIXTURES, "slow-hook.js"), "3000"],
+			}),
+			// Crashes while the hook above is still actually running (not merely retry-delaying).
+			{
+				name: "bad",
+				command: "node",
+				args: ["-e", "setTimeout(() => process.exit(1), 1500)"],
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+
+		await triggerWatchedRestart(watchFile);
+
+		const exitCode = await managerPromise;
+		expect(exitCode).toBe(1);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 10000);
 });
 
 describe("runManager onRestart", () => {
@@ -1517,6 +1986,140 @@ describe("runManager readyPattern", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 20000);
+
+	it("ignores processOutput events from unrelated processes while waiting for a readyPattern match", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const readyDelayMs = 1000;
+
+		const configs = [
+			{
+				...watchedSlowConfig("api", watchFile, readyDelayMs),
+				readyPattern: "ready-marker",
+			},
+			// Restarts on the very same trigger, interleaving its own unrelated processOutput events
+			// on the shared emitter while "api"'s own readyPattern wait is in progress.
+			watchedConfig("noise", watchFile),
+			dependentConfig("client", ["api"]),
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return (
+					client !== undefined &&
+					client.pid !== clientBefore?.pid &&
+					isPidAlive(client.pid)
+				);
+			},
+			{ timeoutMs: 15000 },
+		);
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("ignores a late readyPattern match that arrives after readyTimeoutMs already gave up", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const configs = [
+			{
+				// Prints "ready-marker" 800ms after each restart - well after the 200ms timeout below
+				// already gives up, so the match arrives at a `settle()` call that's already a no-op.
+				...watchedSlowConfig("api", watchFile, 800),
+				readyPattern: "ready-marker",
+				readyTimeoutMs: 200,
+			},
+			dependentConfig("client", ["api"]),
+		];
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() => {
+			const client = pidfileWorker(pidfilePath, "client");
+			return client !== undefined && isPidAlive(client.pid);
+		});
+		const clientBefore = pidfileWorker(pidfilePath, "client");
+
+		await triggerWatchedRestart(watchFile);
+
+		await waitFor(() =>
+			writeSpy.mock.calls.some((call) =>
+				String(call[0]).includes(
+					'"api": readyPattern never matched within 200ms',
+				),
+			),
+		);
+		await waitFor(
+			() => {
+				const client = pidfileWorker(pidfilePath, "client");
+				return (
+					client !== undefined &&
+					client.pid !== clientBefore?.pid &&
+					isPidAlive(client.pid)
+				);
+			},
+			{ timeoutMs: 10000 },
+		);
+		// Gives the late marker (arriving ~600ms after the timeout already fired) time to actually
+		// reach the emitter - the real assertion is simply that nothing throws/hangs as a result,
+		// proving the (by-then-unregistered) output listener isn't left in a state that misbehaves
+		// once the process it was watching produces the very output it was originally waiting for.
+		await new Promise((resolve) => setTimeout(resolve, 900));
+
+		writeSpy.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 20000);
+
+	it("skips the onRestart hook if shutdown begins during a slow readyPattern wait", async () => {
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		const markerFile = join(tmpDir, "generated.log");
+
+		const configs = [
+			{
+				// The marker only appears 3s after restart - readyTimeoutMs (5s) leaves plenty of room
+				// for "bad" (below) to crash the whole stack while this wait is still in progress.
+				...watchedSlowConfig("api", watchFile, 3000),
+				readyPattern: "ready-marker",
+				readyTimeoutMs: 5000,
+				onRestart: {
+					command: "node",
+					args: [join(FIXTURES, "generate-hook.js"), markerFile],
+				},
+			},
+			{
+				name: "bad",
+				command: "node",
+				args: ["-e", "setTimeout(() => process.exit(1), 1500)"],
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		await waitFor(() =>
+			isPidAlive(pidfileWorker(pidfilePath, "api")?.pid as number),
+		);
+
+		await triggerWatchedRestart(watchFile);
+
+		const exitCode = await managerPromise;
+		expect(exitCode).toBe(1);
+		// handleFreshStart's own post-readyPattern-wait shuttingDown check must have caught this -
+		// the onRestart hook (which would have created markerFile) never got to run.
+		expect(existsSync(markerFile)).toBe(false);
+	}, 10000);
 });
 
 describe("runManager startAfter", () => {
@@ -2114,6 +2717,70 @@ describe("runManager beforeRestart", () => {
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 10000);
+});
+
+describe("findRunningPidfile", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-find-running-"));
+		pidfilePath = join(tmpDir, "run.json");
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("considers the pidfile running when a worker is alive even though the manager itself is dead", async () => {
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const managerPid = await deadPid();
+
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{
+						name: "solo",
+						pid: dummy.pid,
+						startedAt: new Date().toISOString(),
+					},
+				],
+				controlPort: 1,
+				controlToken: "x",
+			}),
+		);
+
+		expect(findRunningPidfile(pidfilePath)).toBeDefined();
+
+		dummy.kill();
+	});
+
+	it("returns undefined once every pid in the pidfile - manager and every worker - is dead", async () => {
+		const managerPid = await deadPid();
+		const workerPid = await deadPid();
+
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: workerPid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 1,
+				controlToken: "x",
+			}),
+		);
+
+		expect(findRunningPidfile(pidfilePath)).toBeUndefined();
+	});
 });
 
 describe("pidfile helpers with no pidfile present", () => {

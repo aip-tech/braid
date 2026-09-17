@@ -133,6 +133,22 @@ describe("parseArgs", () => {
 		);
 	});
 
+	it("throws when --lines is the very last arg, with no value following it at all", () => {
+		expect(() => parseArgs(["logs", "--lines"], "/repo")).toThrow(
+			/positive number/,
+		);
+	});
+
+	it("keeps only the first positional arg as processName, silently ignoring a second one", () => {
+		const parsed = parseArgs(["logs", "web", "extra"], "/repo");
+		expect(parsed.processName).toBe("web");
+	});
+
+	it("silently ignores an unrecognized flag instead of treating it as a process name", () => {
+		const parsed = parseArgs(["logs", "--bogus-flag"], "/repo");
+		expect(parsed.processName).toBeUndefined();
+	});
+
 	it("defaults foreground to undefined, deferring to config", () => {
 		expect(parseArgs(["start"], "/repo").foreground).toBeUndefined();
 	});
@@ -268,6 +284,33 @@ describe("loadConfig", () => {
 			/failed to load config.*boom from the config file/,
 		);
 	});
+
+	it("wraps a config file that throws a non-Error value at import time too", async () => {
+		const configPath = join(tmpDir, "throws-string.config.ts");
+		writeFileSync(configPath, 'throw "boom, just a string";\n');
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/failed to load config.*boom, just a string/,
+		);
+	});
+
+	it("throws a clear per-index error when a processes array entry isn't an object", async () => {
+		const configPath = join(tmpDir, "non-object-entry.config.ts");
+		writeFileSync(
+			configPath,
+			'export default [{ name: "one", command: "node" }, "nope"];\n',
+		);
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/processes\[1\] must be an object/,
+		);
+	});
+
+	it("throws the config-shape error for a default export that's neither an array nor an object", async () => {
+		const configPath = join(tmpDir, "scalar.config.ts");
+		writeFileSync(configPath, 'export default "not a valid config";\n');
+		await expect(loadConfig(configPath)).rejects.toThrow(
+			/must default-export a non-empty array or a \{ processes \} object/,
+		);
+	});
 });
 
 describe("applyNoWatch", () => {
@@ -363,6 +406,14 @@ describe("followLogs", () => {
 		expect(errorSpy).toHaveBeenCalledWith(
 			expect.stringContaining("401 Unauthorized"),
 		);
+	});
+
+	it("returns quietly when the response has no body to stream at all", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: true, status: 200, body: null })),
+		);
+		await expect(followLogs(fakePidfile)).resolves.toBeUndefined();
 	});
 
 	it("stays silent when the connection itself fails (the expected shutdown-teardown case)", async () => {
@@ -467,6 +518,35 @@ describe("runCli", () => {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 		expect(sawStats).toBe(true);
+
+		await runCli(["stop"], tmpDir);
+		await startPromise;
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("status shows a never-started (autoStart: false) process as 'not started', not 'stopped'", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [
+				{ name: "solo", command: "node", args: ["${fixture}"] },
+				{ name: "extra", command: "node", args: ["${fixture}"], autoStart: false },
+			];\n`,
+		);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+
+		expect(await runCli(["status"], tmpDir)).toBe(0);
+		expect(
+			logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("extra") &&
+					String(call[0]).includes("not started"),
+			),
+		).toBe(true);
 
 		await runCli(["stop"], tmpDir);
 		await startPromise;
@@ -592,6 +672,75 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 10000);
 
+	it("start <name> starts one configured (autoStart: false) process inside an already-running daemon", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [
+				{ name: "solo", command: "node", args: ["${fixture}"] },
+				{ name: "extra", command: "node", args: ["${fixture}"], autoStart: false },
+			];\n`,
+		);
+
+		const startPromise = runCli(["start"], tmpDir);
+		await waitFor(() => existsSync(pidfilePath));
+
+		expect(await runCli(["start", "extra"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Started: extra");
+		await waitFor(() => {
+			const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+			return pidfile.workers.some(
+				(worker: { name: string }) => worker.name === "extra",
+			);
+		});
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("start <name> reports nothing running when no daemon is up at all", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["start", "solo"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Nothing running.");
+		logSpy.mockRestore();
+	});
+
+	it("start <name> reports a clear error when the daemon can't be reached", async () => {
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 1,
+				controlToken: "wrong",
+			}),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["start", "solo"], tmpDir)).toBe(1);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("couldn't reach"),
+			),
+		).toBe(true);
+		logSpy.mockRestore();
+
+		dummy.kill();
+	}, 10000);
+
 	it("requires a name for restart and reports nothing running for stop/restart with no daemon up", async () => {
 		const errorSpy = vi
 			.spyOn(console, "error")
@@ -643,6 +792,125 @@ describe("runCli", () => {
 
 		dummy.kill();
 	}, 10000);
+
+	it("status falls back to plain pidfile output when the daemon responds, but with a non-ok status", async () => {
+		// Distinct from the unreachable-daemon case above: here the daemon answers, just not with
+		// 200 - fetchLiveStatus must treat that the same way (fall back), not throw.
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 12345,
+				controlToken: "wrong",
+			}),
+		);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: false, status: 500, text: async () => "" })),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["status"], tmpDir)).toBe(0);
+		expect(
+			logSpy.mock.calls.some(
+				(call) =>
+					String(call[0]).includes("solo") &&
+					String(call[0]).includes("running") &&
+					!String(call[0]).includes("cpu"),
+			),
+		).toBe(true);
+		logSpy.mockRestore();
+		vi.unstubAllGlobals();
+
+		dummy.kill();
+	});
+
+	it("stop <name> reports a bare HTTP status when the daemon responds non-ok with an empty body", async () => {
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 12345,
+				controlToken: "wrong",
+			}),
+		);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: false, status: 503, text: async () => "" })),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["stop", "solo"], tmpDir)).toBe(1);
+		expect(
+			logSpy.mock.calls.some((call) => String(call[0]).includes("HTTP 503")),
+		).toBe(true);
+		logSpy.mockRestore();
+		vi.unstubAllGlobals();
+
+		dummy.kill();
+	});
+
+	it("stop <name> stringifies a non-Error value thrown by fetch itself", async () => {
+		const dummy = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) => dummy.once("spawn", () => resolve()));
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: dummy.pid,
+				startedAt: new Date().toISOString(),
+				workers: [
+					{ name: "solo", pid: dummy.pid, startedAt: new Date().toISOString() },
+				],
+				controlPort: 12345,
+				controlToken: "wrong",
+			}),
+		);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw "network exploded";
+			}),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["stop", "solo"], tmpDir)).toBe(1);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("network exploded"),
+			),
+		).toBe(true);
+		logSpy.mockRestore();
+		vi.unstubAllGlobals();
+
+		dummy.kill();
+	});
 
 	it("prints the daemon's pid on a successful start and leaves a daemon.log behind", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -926,6 +1194,15 @@ describe("runCli", () => {
 
 			expect(await runCli(["logs", "solo", "--lines", "1"], tmpDir)).toBe(0);
 
+			// A bare `braid logs`, no name at all: interleaves every process's own log.
+			writeSpy.mockClear();
+			expect(await runCli(["logs"], tmpDir)).toBe(0);
+			expect(
+				writeSpy.mock.calls.some((call) =>
+					Buffer.from(call[0]).toString().includes("[solo]"),
+				),
+			).toBe(true);
+
 			// An unconfigured name 404s cleanly rather than streaming anything.
 			writeSpy.mockClear();
 			expect(await runCli(["logs", "nonexistent"], tmpDir)).toBe(1);
@@ -933,6 +1210,87 @@ describe("runCli", () => {
 			await stopFromPidfile(pidfilePath);
 			writeSpy.mockRestore();
 		}, 10000);
+
+		it("returns quietly when the control server's response has no body to stream", async () => {
+			const dummy = spawn(process.execPath, [
+				"-e",
+				"setInterval(() => {}, 1000)",
+			]);
+			await new Promise<void>((resolve) =>
+				dummy.once("spawn", () => resolve()),
+			);
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+			mkdirSync(dirname(pidfilePath), { recursive: true });
+			writeFileSync(
+				pidfilePath,
+				JSON.stringify({
+					managerPid: dummy.pid,
+					startedAt: new Date().toISOString(),
+					workers: [
+						{
+							name: "solo",
+							pid: dummy.pid,
+							startedAt: new Date().toISOString(),
+						},
+					],
+					controlPort: 12345,
+					controlToken: "wrong",
+				}),
+			);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => ({ ok: true, status: 200, body: null })),
+			);
+
+			expect(await runCli(["logs", "solo"], tmpDir)).toBe(0);
+
+			vi.unstubAllGlobals();
+			dummy.kill();
+		});
+
+		it("propagates a non-abort network failure instead of swallowing it", async () => {
+			const dummy = spawn(process.execPath, [
+				"-e",
+				"setInterval(() => {}, 1000)",
+			]);
+			await new Promise<void>((resolve) =>
+				dummy.once("spawn", () => resolve()),
+			);
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+			mkdirSync(dirname(pidfilePath), { recursive: true });
+			writeFileSync(
+				pidfilePath,
+				JSON.stringify({
+					managerPid: dummy.pid,
+					startedAt: new Date().toISOString(),
+					workers: [
+						{
+							name: "solo",
+							pid: dummy.pid,
+							startedAt: new Date().toISOString(),
+						},
+					],
+					controlPort: 12345,
+					controlToken: "wrong",
+				}),
+			);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					throw new TypeError("fetch failed");
+				}),
+			);
+
+			// Unlike stop/restart (which convert a fetch failure into a reported error result),
+			// `logs`'s own catch only special-cases an aborted `--follow` stream (see the SIGINT/
+			// SIGTERM tests below) - anything else propagates, rather than silently reporting success.
+			await expect(runCli(["logs", "solo"], tmpDir)).rejects.toThrow(
+				"fetch failed",
+			);
+
+			vi.unstubAllGlobals();
+			dummy.kill();
+		});
 
 		it.each([
 			"SIGINT",

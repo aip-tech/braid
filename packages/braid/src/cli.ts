@@ -234,8 +234,12 @@ type DaemonStartOutcome =
 	| { ok: true; pid: number }
 	| { ok: false; message: string };
 
-/** Forks daemon.ts detached (stdout/stderr to daemon.log), then races its ready/error IPC message. */
-async function startDaemon(
+/** Forks daemon.ts detached (stdout/stderr to daemon.log), then races its ready/error IPC message.
+ *  Exported (mirroring `worker.ts`/`daemon.ts`'s own exports) so `startDaemon.spec.ts` can drive
+ *  the ready/error/exit/fork-error/timeout race directly, with `node:child_process`'s `fork`
+ *  mocked - those outcomes are all rare-failure-mode/timing paths that a real forked daemon can't
+ *  be made to hit deterministically from a test. */
+export async function startDaemon(
 	config: BraidConfig,
 	configPath: string,
 	pidfilePath: string,
@@ -462,11 +466,230 @@ async function runForeground(
 				`${braidTag()} running in foreground (pid ${process.pid}). Press Ctrl-C to stop.`,
 			);
 			const running = findRunningPidfile(pidfilePath);
+			// istanbul ignore else -- `running` is only ever falsy here if something outside braid
+			// deletes/corrupts the pidfile in the zero-yield-point window between manager.ts's own
+			// rewritePidfile() (immediately before onReady fires) and this callback running - not a
+			// reachable case to simulate from a test without literally racing the filesystem.
 			if (running) following = followLogs(running);
 		},
 	});
 	await following;
 	return exitCode;
+}
+
+type StartCommandArgs = {
+	processName: string | undefined;
+	pidfilePath: string;
+	configPath: string;
+	noWatch: boolean;
+	foreground: boolean | undefined;
+	cwd: string;
+};
+
+/**
+ * Handles `braid start [name]`. The per-process form (`braid start <name>`) starts one configured
+ * process - most useful for an `autoStart: false` one - inside an already-running daemon, checked
+ * before the whole-stack "already running" guard below since it requires the opposite
+ * precondition: a live daemon, not the absence of one.
+ */
+async function runStartCommand({
+	processName,
+	pidfilePath,
+	configPath,
+	noWatch,
+	foreground,
+	cwd,
+}: StartCommandArgs): Promise<number> {
+	if (processName) {
+		const running = findRunningPidfile(pidfilePath);
+		if (!running) {
+			console.log("Nothing running.");
+			return 0;
+		}
+		const { ok, message } = await postProcessAction(
+			running,
+			"start",
+			processName,
+		);
+		console.log(ok ? `Started: ${processName}` : `${braidTag()} ${message}`);
+		return ok ? 0 : 1;
+	}
+	const alreadyRunning = findRunningPidfile(pidfilePath);
+	if (alreadyRunning) {
+		console.error(
+			`braid already running (pid ${alreadyRunning.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
+		);
+		return 1;
+	}
+	const loadedConfig = await loadConfig(configPath);
+	const config = noWatch ? applyNoWatch(loadedConfig) : loadedConfig;
+	const runInForeground = foreground ?? config.foreground ?? false;
+	if (runInForeground) {
+		return runForeground(config, configPath, pidfilePath, cwd);
+	}
+	const outcome = await startDaemon(config, configPath, pidfilePath, cwd);
+	if (!outcome.ok) {
+		console.error(`${braidTag()} ${outcome.message}`);
+		return 1;
+	}
+	console.log(`${braidTag()} started (pid ${outcome.pid})`);
+	return 0;
+}
+
+type LogsCommandArgs = {
+	pidfilePath: string;
+	processName: string | undefined;
+	follow: boolean;
+	lines: number | undefined;
+};
+
+/** Handles `braid logs [name]`, streaming a running daemon's `/api/logs` straight to this terminal. */
+async function runLogsCommand({
+	pidfilePath,
+	processName,
+	follow,
+	lines,
+}: LogsCommandArgs): Promise<number> {
+	const running = findRunningPidfile(pidfilePath);
+	if (!running) {
+		console.log("Nothing running.");
+		return 0;
+	}
+	const url = controlUrl(running, "/api/logs", {
+		...(processName ? { name: processName } : {}),
+		...(follow ? { follow: "true" } : {}),
+		...(lines !== undefined ? { lines: String(lines) } : {}),
+	});
+
+	// Handle both: Ctrl-C sends SIGINT, but pnpm re-sends interruption as SIGTERM.
+	const controller = new AbortController();
+	const onSignal = () => controller.abort();
+	process.on("SIGINT", onSignal);
+	process.on("SIGTERM", onSignal);
+	try {
+		const response = await controlFetch(running, url, {
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			console.error(
+				`${braidTag()} ${response.status} ${await response.text()}`,
+			);
+			return 1;
+		}
+		if (response.body) {
+			for await (const chunk of response.body) {
+				process.stdout.write(chunk);
+			}
+		}
+		return 0;
+	} catch (error) {
+		if (error instanceof Error && error.name === "AbortError") return 0;
+		throw error;
+	} finally {
+		process.off("SIGINT", onSignal);
+		process.off("SIGTERM", onSignal);
+	}
+}
+
+type StopCommandArgs = {
+	pidfilePath: string;
+	processName: string | undefined;
+};
+
+/** Handles `braid stop [name]`. */
+async function runStopCommand({
+	pidfilePath,
+	processName,
+}: StopCommandArgs): Promise<number> {
+	if (processName) {
+		const running = findRunningPidfile(pidfilePath);
+		if (!running) {
+			console.log("Nothing running.");
+			return 0;
+		}
+		const { ok, message } = await postProcessAction(
+			running,
+			"stop",
+			processName,
+		);
+		console.log(ok ? `Stopped: ${processName}` : `${braidTag()} ${message}`);
+		return ok ? 0 : 1;
+	}
+	const stopped = await stopFromPidfile(pidfilePath);
+	console.log(
+		stopped.length > 0 ? `Stopped: ${stopped.join(", ")}` : "Nothing running.",
+	);
+	return 0;
+}
+
+type RestartCommandArgs = {
+	pidfilePath: string;
+	processName: string | undefined;
+};
+
+/** Handles `braid restart <name>`. Unlike `start`/`stop`, the name is required - there's no
+ *  whole-stack meaning for "restart everything". */
+async function runRestartCommand({
+	pidfilePath,
+	processName,
+}: RestartCommandArgs): Promise<number> {
+	if (!processName) {
+		console.error("Usage: braid restart <name> [--config <path>]");
+		return 1;
+	}
+	const running = findRunningPidfile(pidfilePath);
+	if (!running) {
+		console.log("Nothing running.");
+		return 0;
+	}
+	const { ok, message } = await postProcessAction(
+		running,
+		"restart",
+		processName,
+	);
+	console.log(ok ? `Restarted: ${processName}` : `${braidTag()} ${message}`);
+	return ok ? 0 : 1;
+}
+
+/**
+ * Handles `braid status`. Not gated on `findRunningPidfile` the way stop/restart are: that returns
+ * undefined for a stale-but-present pidfile (every pid dead) too, and today's "show stopped
+ * workers" behavior below depends on `statusFromPidfile`'s own result length deciding "Nothing
+ * running.", not a separate liveness check - gating the whole command on it would regress that
+ * case. `findRunningPidfile` is only used here to decide whether it's worth trying to reach a
+ * daemon at all.
+ */
+async function runStatusCommand(pidfilePath: string): Promise<number> {
+	const running = findRunningPidfile(pidfilePath);
+	const live = running ? await fetchLiveStatus(running) : undefined;
+	const statuses: LiveProcessStatus[] = live ?? statusFromPidfile(pidfilePath);
+	if (statuses.length === 0) {
+		console.log("Nothing running.");
+		return 0;
+	}
+	for (const status of statuses) {
+		// A configured process that's never been started (autoStart: false, not yet manually
+		// started) has no pid/startedAt at all - distinct from "stopped", which means it ran
+		// before and has since exited.
+		if (status.pid === undefined) {
+			console.log(`○ ${status.name}  not started`);
+			continue;
+		}
+		const stats =
+			status.cpu !== undefined && status.memory !== undefined
+				? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
+				: "";
+		console.log(
+			`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}`,
+		);
+	}
+	return 0;
+}
+
+function printUsage(): void {
+	console.error(
+		"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon] [--no-watch]",
+	);
 }
 
 export async function runCli(argv: string[], cwd: string): Promise<number> {
@@ -482,173 +705,26 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 	const pidfilePath = resolve(cwd, DEFAULT_PIDFILE_PATH);
 
 	switch (command) {
-		case "start": {
-			// Per-process form (`braid start <name>`): starts one configured process - most useful
-			// for an `autoStart: false` one - inside an already-running daemon. Checked before the
-			// whole-stack "already running" guard below, since this form requires the opposite
-			// precondition: a live daemon, not the absence of one.
-			if (processName) {
-				const running = findRunningPidfile(pidfilePath);
-				if (!running) {
-					console.log("Nothing running.");
-					return 0;
-				}
-				const { ok, message } = await postProcessAction(
-					running,
-					"start",
-					processName,
-				);
-				console.log(
-					ok ? `Started: ${processName}` : `${braidTag()} ${message}`,
-				);
-				return ok ? 0 : 1;
-			}
-			const alreadyRunning = findRunningPidfile(pidfilePath);
-			if (alreadyRunning) {
-				console.error(
-					`braid already running (pid ${alreadyRunning.managerPid}). Run "stop" first, or delete ${pidfilePath} if that's stale.`,
-				);
-				return 1;
-			}
-			const loadedConfig = await loadConfig(configPath);
-			const config = noWatch ? applyNoWatch(loadedConfig) : loadedConfig;
-			const runInForeground = foreground ?? config.foreground ?? false;
-			if (runInForeground) {
-				return runForeground(config, configPath, pidfilePath, cwd);
-			}
-			const outcome = await startDaemon(config, configPath, pidfilePath, cwd);
-			if (!outcome.ok) {
-				console.error(`${braidTag()} ${outcome.message}`);
-				return 1;
-			}
-			console.log(`${braidTag()} started (pid ${outcome.pid})`);
-			return 0;
-		}
-		case "logs": {
-			const running = findRunningPidfile(pidfilePath);
-			if (!running) {
-				console.log("Nothing running.");
-				return 0;
-			}
-			const url = controlUrl(running, "/api/logs", {
-				...(processName ? { name: processName } : {}),
-				...(follow ? { follow: "true" } : {}),
-				...(lines !== undefined ? { lines: String(lines) } : {}),
-			});
-
-			// Handle both: Ctrl-C sends SIGINT, but pnpm re-sends interruption as SIGTERM.
-			const controller = new AbortController();
-			const onSignal = () => controller.abort();
-			process.on("SIGINT", onSignal);
-			process.on("SIGTERM", onSignal);
-			try {
-				const response = await controlFetch(running, url, {
-					signal: controller.signal,
-				});
-				if (!response.ok) {
-					console.error(
-						`${braidTag()} ${response.status} ${await response.text()}`,
-					);
-					return 1;
-				}
-				if (response.body) {
-					for await (const chunk of response.body) {
-						process.stdout.write(chunk);
-					}
-				}
-				return 0;
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") return 0;
-				throw error;
-			} finally {
-				process.off("SIGINT", onSignal);
-				process.off("SIGTERM", onSignal);
-			}
-		}
-		case "stop": {
-			if (processName) {
-				const running = findRunningPidfile(pidfilePath);
-				if (!running) {
-					console.log("Nothing running.");
-					return 0;
-				}
-				const { ok, message } = await postProcessAction(
-					running,
-					"stop",
-					processName,
-				);
-				console.log(
-					ok ? `Stopped: ${processName}` : `${braidTag()} ${message}`,
-				);
-				return ok ? 0 : 1;
-			}
-			const stopped = await stopFromPidfile(pidfilePath);
-			console.log(
-				stopped.length > 0
-					? `Stopped: ${stopped.join(", ")}`
-					: "Nothing running.",
-			);
-			return 0;
-		}
-		case "restart": {
-			if (!processName) {
-				console.error("Usage: braid restart <name> [--config <path>]");
-				return 1;
-			}
-			const running = findRunningPidfile(pidfilePath);
-			if (!running) {
-				console.log("Nothing running.");
-				return 0;
-			}
-			const { ok, message } = await postProcessAction(
-				running,
-				"restart",
+		case "start":
+			return runStartCommand({
 				processName,
-			);
-			console.log(
-				ok ? `Restarted: ${processName}` : `${braidTag()} ${message}`,
-			);
-			return ok ? 0 : 1;
-		}
-		case "status": {
-			// Not gated on findRunningPidfile the way stop/restart are: that returns undefined for a
-			// stale-but-present pidfile (every pid dead) too, and today's "show stopped workers"
-			// behavior below depends on statusFromPidfile's own result length deciding "Nothing
-			// running.", not a separate liveness check - gating the whole command on it would regress
-			// that case. findRunningPidfile is only used here to decide whether it's worth trying to
-			// reach a daemon at all.
-			const running = findRunningPidfile(pidfilePath);
-			const live = running ? await fetchLiveStatus(running) : undefined;
-			const statuses: LiveProcessStatus[] =
-				live ?? statusFromPidfile(pidfilePath);
-			if (statuses.length === 0) {
-				console.log("Nothing running.");
-				return 0;
-			}
-			for (const status of statuses) {
-				// A configured process that's never been started (autoStart: false, not yet
-				// manually started) has no pid/startedAt at all - distinct from "stopped", which
-				// means it ran before and has since exited.
-				if (status.pid === undefined) {
-					console.log(`○ ${status.name}  not started`);
-					continue;
-				}
-				const stats =
-					status.cpu !== undefined && status.memory !== undefined
-						? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
-						: "";
-				console.log(
-					`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}`,
-				);
-			}
-			return 0;
-		}
-		default: {
-			console.error(
-				"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon] [--no-watch]",
-			);
+				pidfilePath,
+				configPath,
+				noWatch,
+				foreground,
+				cwd,
+			});
+		case "logs":
+			return runLogsCommand({ pidfilePath, processName, follow, lines });
+		case "stop":
+			return runStopCommand({ pidfilePath, processName });
+		case "restart":
+			return runRestartCommand({ pidfilePath, processName });
+		case "status":
+			return runStatusCommand(pidfilePath);
+		default:
+			printUsage();
 			return 1;
-		}
 	}
 }
 

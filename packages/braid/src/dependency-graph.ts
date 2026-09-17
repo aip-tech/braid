@@ -20,6 +20,8 @@ function findCycle(
 	function visit(name: string): string[] | undefined {
 		state.set(name, IN_PROGRESS);
 		path.push(name);
+		// istanbul ignore next -- every name ever passed here (the initial loop over every config,
+		// or a dependency drawn from another config's own edge list) is a key `edges` was built from.
 		for (const dependency of edges.get(name) ?? []) {
 			if (state.get(dependency) === IN_PROGRESS) {
 				return [...path.slice(path.indexOf(dependency)), dependency];
@@ -172,6 +174,7 @@ export function validateReadyPattern(configs: ProcessConfig[]): void {
 		try {
 			new RegExp(config.readyPattern);
 		} catch (error) {
+			// istanbul ignore next -- RegExp's own constructor only ever throws a real SyntaxError.
 			throw new Error(
 				`braid: process "${config.name}" has an invalid readyPattern "${config.readyPattern}": ${error instanceof Error ? error.message : String(error)}`,
 			);

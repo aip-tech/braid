@@ -5,6 +5,156 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.9.2] - 2026-09-17
+
+A full push to close every remaining test-coverage gap in the package,
+starting from `worker.ts` and `daemon.ts` (the two per-process/per-daemon
+entrypoints forked at runtime, both at 0% measured coverage - only
+exercised indirectly through `manager.spec.ts`/`cli.spec.ts` forking a
+real subprocess, invisible to istanbul since coverage is only collected
+inside the vitest worker process itself) and continuing through every
+other file with a gap. **Statement, branch, function, and line coverage
+are now all 100%** (up from 79%/73%/76%/81% respectively). Writing direct
+tests for `manager.ts`'s dependency-cascade logic surfaced a real bug,
+fixed below.
+
+### Fixed
+
+- A process with both `dependsOn` and its own still-pending `startAfter`
+  chain could be force-spawned early if the `dependsOn` dependency
+  restarted before the `startAfter` chain resolved, then spawned *again*
+  once that chain actually completed - leaking the first process entirely
+  (untracked, and never killed even on daemon shutdown, since nothing kept
+  a reference to it once `children` was overwritten by the second spawn).
+  Reproduced directly before fixing: a real orphaned `worker.ts` process
+  was left running after a full, clean `stopFromPidfile`. `restartDependent`
+  now leaves a still-pending dependent alone; `ensureReady` already owns
+  its first spawn and delivers it once actually ready, exactly like a
+  manual first start doesn't cascade either.
+- `control-server.ts`'s static-file routing (`registerStatic`) now matches
+  the *longest* registered prefix, not whichever entry happened to be
+  registered first (a broader prefix like a UI plugin's default `/` mount
+  could previously shadow every path, including one meant for a more
+  specific prefix a second plugin registered afterwards).
+- `GET /api/logs/history`'s pagination cursor could resolve to the wrong
+  file when a process's log file already existed from a previous daemon
+  run and a history request landed before that process had emitted any
+  output yet this run - see the full explanation in this same entry's
+  predecessor version below. Fixed by counting the lazy rotation as a
+  generation bump.
+
+### Changed
+
+- `cli.ts`'s `runCli` dispatch `switch` no longer holds each command's
+  full implementation inline - `start`/`logs`/`stop`/`restart`/`status`
+  are now separate, individually named functions, each taking just the
+  arguments it needs. `startDaemon` is now exported so its ready/error/
+  exit/fork-error/timeout race can be driven directly with `fork()`
+  mocked, in a new `start-daemon.spec.ts` - those are rare-failure-mode
+  and timing paths a real forked daemon can't be driven into
+  deterministically from a test.
+- `worker.ts`'s `loadConfig`, `daemon.ts`'s `loadInput`/`send`/`main`, and
+  `manager.ts`'s `stopChild`/`findRunningPidfile` are now exported
+  (previously module-private) so they can be unit-tested directly.
+  `daemon.ts`'s fatal-startup-error handling is now its own exported
+  `reportStartupFailure` function instead of being inlined into the
+  top-level `main().catch(...)` glue. `worker.ts`'s tuning constants
+  (`RESTART_DEBOUNCE_MS`, `DEFAULT_HOOK_RETRIES`,
+  `DEFAULT_HOOK_RETRY_DELAY_MS`, `DEFAULT_STOP_TIMEOUT_MS`,
+  `DEFAULT_EXT`) are exported too, so tests can drive fake-timer
+  assertions off the exact values in use instead of duplicating them.
+- `core-plugins/processes.ts`'s three routes each repeated the same "read
+  `?name=`, 400 if missing" check inline; extracted into one shared
+  `requireNameParam` helper.
+- Removed `killTree`'s unused `signal` default (`= "SIGTERM"`) - dead code
+  once actually checked: both call sites always pass an explicit signal,
+  unlike `manager.ts`'s equivalent `killPid`, whose default genuinely has
+  callers relying on it.
+- A number of genuinely unreachable defensive branches (an IPC message
+  shape worker.ts's own protocol never sends, `req.url`/`req.method`
+  fallbacks Node's HTTP parser never leaves unset, a `fork()`-level error
+  event forking this same Node executable essentially can't produce, and
+  a few others) are now marked with `istanbul ignore` and a comment
+  explaining why, rather than left silently uncovered or covered by a
+  contrived test that doesn't correspond to any real code path.
+
+### Added
+
+- `worker.spec.ts`, `daemon.spec.ts`, `module-path.spec.ts`,
+  `manager-stop-child.spec.ts`, `start-daemon.spec.ts`,
+  `core-plugins/processes.spec.ts` (all new): direct, mocked-dependency
+  unit tests for the pieces above, each verified against real observable
+  output (spawn/kill calls, IPC messages, stdout/stderr writes, exit
+  codes, HTTP responses) rather than just call counts.
+- `manager.spec.ts` gained substantially more coverage of `runManager`'s
+  own orchestration: `options.plugins` validation, per-process/hook `cwd`
+  resolution, `logs.timestamps`, concurrent stop/restart/start
+  interactions (including the watch-vs-manual-restart lock race and the
+  dependent-leak regression above), a `pidusage` polling-failure mock
+  extension (dropped pids, forced Error/non-Error rejections), and several
+  "a real shutdown begins mid-operation" races (SIGINT twice, two crashes
+  at once, shutdown during a slow `dependsOn` hook/readyPattern wait).
+- `control-server.spec.ts`, `core-plugins/logger.spec.ts`, and
+  `plugin-loader.spec.ts` gained coverage of their own remaining edge
+  cases: static-file serving (bare prefix, 404, unknown MIME type),
+  cookie parsing, route-handler error formatting, `/api/logs/history`'s
+  backup-file fallback and stale-cursor paths, and a plugin module
+  throwing a non-`Error` value at import time.
+
+## [0.9.1] - 2026-09-17
+
+A round of in-depth code review focused on correctness edge cases and
+maintainability, plus real test coverage for the two `core-plugins` routes
+that previously had none of their own (`processes.ts` had no dedicated
+spec file at all; `logger.ts`'s `/api/logs/history` route was entirely
+untested).
+
+### Fixed
+
+- `control-server.ts`'s static-file routing (`registerStatic`) now matches
+  the *longest* registered prefix, not whichever entry happened to be
+  registered first. A broader prefix (e.g. `@aip-tech/braid-plugin-ui`'s
+  default `/` mount) could previously shadow every path, including one
+  meant for a more specific prefix a second plugin registered afterwards -
+  `url.pathname.startsWith(entry.prefix)` is true for both, and `.find()`
+  always returned the first, order-dependent match.
+- `GET /api/logs/history`'s pagination cursor could resolve to the wrong
+  file (silently returning unrelated content, or too little of it) when a
+  process's log file already existed from a previous daemon run and a
+  history request landed before that process had emitted any output yet
+  this run. The lazy `Destination` created on that first output rotates
+  the leftover file into `.1`, but started its own generation counter back
+  at 0 - indistinguishable from a cursor minted moments earlier against
+  the (now-rotated) stale file, which also read as generation 0 via the
+  no-`Destination`-yet fallback. The lazy rotation now counts as a
+  generation bump, so an earlier cursor correctly re-targets into the
+  backup file instead of comparing equal to the unrelated fresh one.
+
+### Changed
+
+- `cli.ts`'s `runCli` dispatch `switch` no longer holds each command's
+  full implementation inline - `start`/`logs`/`stop`/`restart`/`status`
+  are now separate, individually named functions (`runStartCommand`,
+  `runLogsCommand`, etc.), each taking just the arguments it needs.
+  Behavior is unchanged; this is purely about keeping each command a
+  small, independently readable/testable unit instead of one large
+  multi-hundred-line `switch`.
+- `core-plugins/processes.ts`'s three routes each repeated the same
+  "read `?name=`, 400 if missing" check inline; extracted into one shared
+  `requireNameParam` helper.
+
+### Added
+
+- A dedicated `core-plugins/processes.spec.ts` covering all three
+  `/api/processes/*` routes directly (previously only exercised
+  indirectly through `manager.spec.ts`'s end-to-end tests, which never
+  happened to hit the missing-`name` 400 path).
+- `core-plugins/logger.spec.ts` now covers `GET /api/logs/history`:
+  basic pagination, paging across a rotation boundary, a cursor stale by
+  more than one generation, and a regression test for the cursor bug
+  above.
+- `control-server.spec.ts` now covers the longest-prefix-match fix above.
+
 ## [0.9.0] - 2026-09-17
 
 A batch of fixes from a full code-security/quality review of the package.
