@@ -42,6 +42,8 @@ export type ParsedArgs = {
 	lines?: number;
 	/** `start`'s foreground/daemon override: undefined defers to the config's `foreground` option. */
 	foreground?: boolean;
+	/** `start` only: ignore every process's `watch`/`beforeRestart` for this run. @default false */
+	noWatch: boolean;
 };
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
@@ -51,6 +53,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	let follow = false;
 	let lines: number | undefined;
 	let foreground: boolean | undefined;
+	let noWatch = false;
 
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i];
@@ -74,6 +77,8 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 				throw new Error("--foreground and --daemon are mutually exclusive");
 			}
 			foreground = arg === "--foreground";
+		} else if (arg === "--no-watch") {
+			noWatch = true;
 		} else if (!arg?.startsWith("--") && processName === undefined) {
 			processName = arg;
 		}
@@ -85,6 +90,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 		follow,
 		lines,
 		foreground,
+		noWatch,
 	};
 }
 
@@ -199,6 +205,29 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	}
 
 	throw new Error(CONFIG_SHAPE_ERROR(configPath));
+}
+
+/**
+ * Strips `watch`/`beforeRestart` from every process config for this run only - the config file on
+ * disk is untouched. `beforeRestart` is dropped alongside `watch` (not left in place) since it only
+ * ever fires from inside a watch-triggered restart (see manager.ts's own "sets beforeRestart but no
+ * watch paths" startup validation) - leaving it set with `watch` gone would trip that same check.
+ * Logs which process names were affected so the divergence from the config file isn't silent.
+ */
+export function applyNoWatch(config: BraidConfig): BraidConfig {
+	const affected: string[] = [];
+	const processes = config.processes.map((process) => {
+		if (!process.watch?.length && !process.beforeRestart) return process;
+		affected.push(process.name);
+		const { watch, beforeRestart, ...rest } = process;
+		return rest;
+	});
+	if (affected.length > 0) {
+		console.log(
+			`${braidTag()} --no-watch set; ignoring watch/beforeRestart for: ${affected.join(", ")}`,
+		);
+	}
+	return { ...config, processes };
 }
 
 type DaemonStartOutcome =
@@ -441,8 +470,15 @@ async function runForeground(
 }
 
 export async function runCli(argv: string[], cwd: string): Promise<number> {
-	const { command, configPath, processName, follow, lines, foreground } =
-		parseArgs(argv, cwd);
+	const {
+		command,
+		configPath,
+		processName,
+		follow,
+		lines,
+		foreground,
+		noWatch,
+	} = parseArgs(argv, cwd);
 	const pidfilePath = resolve(cwd, DEFAULT_PIDFILE_PATH);
 
 	switch (command) {
@@ -474,7 +510,8 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				);
 				return 1;
 			}
-			const config = await loadConfig(configPath);
+			const loadedConfig = await loadConfig(configPath);
+			const config = noWatch ? applyNoWatch(loadedConfig) : loadedConfig;
 			const runInForeground = foreground ?? config.foreground ?? false;
 			if (runInForeground) {
 				return runForeground(config, configPath, pidfilePath, cwd);
@@ -608,7 +645,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 		}
 		default: {
 			console.error(
-				"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon]",
+				"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon] [--no-watch]",
 			);
 			return 1;
 		}

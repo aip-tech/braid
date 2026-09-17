@@ -42,6 +42,16 @@ braid start --config ./other.config.ts</code></pre>
 					<pre><code class="language-bash">braid start --foreground
 braid start --daemon</code></pre>
 					<p>
+						Pass <code>--no-watch</code> to ignore every process's <code>watch</code>
+						(and <code>beforeRestart</code>, which requires it) for this one run,
+						without touching the config file &mdash; e.g. running a dev config
+						unmodified where auto-restart isn't wanted. Manual
+						<code>restart &lt;name&gt;</code>, <code>dependsOn</code> cascades, and
+						<code>onRestart</code> hooks are unaffected; only the watch-triggered
+						restart path is disabled.
+					</p>
+					<pre><code class="language-bash">braid start --no-watch</code></pre>
+					<p>
 						With a name: starts just that one configured process inside an
 						already-running daemon, leaving everything else alone &mdash; the way to
 						bring up a process configured with <code>autoStart: false</code> (see
@@ -106,6 +116,7 @@ braid logs api --lines 50     # only the last 50 lines</code></pre>
 						<li><code>--config &lt;path&gt;</code> &mdash; <code>start</code> only; use a config file other than <code>./braid.config.ts</code>.</li>
 						<li><code>--foreground</code> &mdash; <code>start</code> only; run attached to this terminal instead of forking a background daemon.</li>
 						<li><code>--daemon</code> &mdash; <code>start</code> only; force the background daemon, overriding a config's <code>foreground: true</code>.</li>
+						<li><code>--no-watch</code> &mdash; <code>start</code> only; ignore every process's <code>watch</code>/<code>beforeRestart</code> for this run.</li>
 						<li><code>--follow</code> &mdash; <code>logs</code> only; keep the connection open and stream new output as it arrives.</li>
 						<li><code>--lines &lt;n&gt;</code> &mdash; <code>logs</code> only; only print the last <code>n</code> lines.</li>
 					</ul>

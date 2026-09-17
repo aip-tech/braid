@@ -5,7 +5,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
-## [0.9.0] - 2026-09-15
+## [0.9.0] - 2026-09-17
 
 A batch of fixes from a full code-security/quality review of the package.
 
@@ -16,6 +16,11 @@ A batch of fixes from a full code-security/quality review of the package.
   Applies to every stop of that process: a manual `stop`/`restart`, a
   `dependsOn` cascade, a watch-triggered restart, and daemon shutdown.
   @default 5000
+- `--no-watch` flag on `start` — ignores every process's `watch` (and
+  `beforeRestart`, which requires it) for that one run, without touching
+  the config file. Manual `restart <name>`, `dependsOn` cascades, and
+  `onRestart` hooks are unaffected; only the watch-triggered restart path
+  is disabled.
 
 ### Fixed
 

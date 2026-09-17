@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	applyNoWatch,
 	DEFAULT_PIDFILE_PATH,
 	followLogs,
 	isMainModule,
@@ -146,6 +147,11 @@ describe("parseArgs", () => {
 			parseArgs(["start", "--foreground", "--daemon"], "/repo"),
 		).toThrow(/mutually exclusive/);
 	});
+
+	it("defaults noWatch to false and parses --no-watch", () => {
+		expect(parseArgs(["start"], "/repo").noWatch).toBe(false);
+		expect(parseArgs(["start", "--no-watch"], "/repo").noWatch).toBe(true);
+	});
 });
 
 describe("loadConfig", () => {
@@ -261,6 +267,67 @@ describe("loadConfig", () => {
 		await expect(loadConfig(configPath)).rejects.toThrow(
 			/failed to load config.*boom from the config file/,
 		);
+	});
+});
+
+describe("applyNoWatch", () => {
+	it("strips watch and beforeRestart from an affected process, leaving an unaffected one untouched", () => {
+		const untouched = { name: "worker", command: "node" };
+		const config = {
+			processes: [
+				{
+					name: "api",
+					command: "node",
+					watch: ["src"],
+					beforeRestart: { command: "echo" },
+				},
+				untouched,
+			],
+		};
+
+		const result = applyNoWatch(config);
+
+		expect(result.processes[0]).toEqual({ name: "api", command: "node" });
+		expect(result.processes[1]).toBe(untouched);
+	});
+
+	it("strips a beforeRestart set without watch too (the case that would otherwise fail startup validation)", () => {
+		const config = {
+			processes: [
+				{
+					name: "codegen",
+					command: "node",
+					beforeRestart: { command: "echo" },
+				},
+			],
+		};
+
+		expect(applyNoWatch(config).processes[0]).toEqual({
+			name: "codegen",
+			command: "node",
+		});
+	});
+
+	it("logs which process names were affected", () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		applyNoWatch({
+			processes: [{ name: "api", command: "node", watch: ["src"] }],
+		});
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes(
+					"--no-watch set; ignoring watch/beforeRestart for: api",
+				),
+			),
+		).toBe(true);
+		logSpy.mockRestore();
+	});
+
+	it("doesn't log anything when no process has watch or beforeRestart", () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		applyNoWatch({ processes: [{ name: "solo", command: "node" }] });
+		expect(logSpy).not.toHaveBeenCalled();
+		logSpy.mockRestore();
 	});
 });
 
@@ -699,6 +766,70 @@ describe("runCli", () => {
 		).toBe(true);
 
 		await stopFromPidfile(pidfilePath);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("--no-watch lets a watch+beforeRestart config start (rather than tripping the 'beforeRestart needs watch' check once watch is stripped)", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		writeFileSync(
+			configPath,
+			`export default [{ name: "solo", command: "node", args: ["${fixture}"], watch: ["${watchFile.replace(/\\/g, "\\\\")}"], ext: "trigger", beforeRestart: { command: "node", args: ["-e", "process.exit(0)"] } }];\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(
+			["start", "--foreground", "--no-watch"],
+			tmpDir,
+		);
+		await waitFor(() => existsSync(pidfilePath));
+
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes(
+					"--no-watch set; ignoring watch/beforeRestart for: solo",
+				),
+			),
+		).toBe(true);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("--no-watch prevents a watch-triggered restart that would otherwise happen", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		const watchFile = join(tmpDir, "watch.trigger");
+		writeFileSync(watchFile, "0");
+		writeFileSync(
+			configPath,
+			`export default [{ name: "solo", command: "node", args: ["${fixture}"], watch: ["${watchFile.replace(/\\/g, "\\\\")}"], ext: "trigger" }];\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		const startPromise = runCli(
+			["start", "--foreground", "--no-watch"],
+			tmpDir,
+		);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidBefore = JSON.parse(readFileSync(pidfilePath, "utf8")).workers[0]
+			.pid;
+
+		// A real watcher takes a moment to attach after start; give one a fair chance to prove it
+		// isn't there, the same 800ms settle window manager.spec.ts's own triggerWatchedRestart uses.
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		writeFileSync(watchFile, String(Date.now()));
+		await new Promise((resolve) => setTimeout(resolve, 500));
+
+		const pidAfter = JSON.parse(readFileSync(pidfilePath, "utf8")).workers[0]
+			.pid;
+		expect(pidAfter).toBe(pidBefore);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
 		logSpy.mockRestore();
 	}, 10000);
 

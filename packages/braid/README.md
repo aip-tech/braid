@@ -54,9 +54,12 @@ npx @aip-tech/braid start --config ./other.config.ts
 npx @aip-tech/braid start <name>             # start one configured process in an already-running daemon
 npx @aip-tech/braid restart <name>           # stop and re-fork one process, leaving the rest alone
 npx @aip-tech/braid stop <name>              # stop one process, leaving the rest (and the daemon) running
+npx @aip-tech/braid start --no-watch         # ignore every process's watch/beforeRestart for this run
 ```
 
 In `--foreground` mode, `start` blocks until every process stops (Ctrl-C, or `braid stop` from another terminal), streaming their combined output straight here instead of only to the log files.
+
+`--no-watch` overrides `watch` (and `beforeRestart`, which requires it) on every process for that one invocation, without touching the config file — e.g. running a dev config unmodified in an environment where auto-restart isn't wanted. Manual restarts (`braid restart <name>`), `dependsOn` cascades, and `onRestart` hooks are unaffected; only the watch-triggered restart path is disabled.
 
 ## Dependent restarts
 
