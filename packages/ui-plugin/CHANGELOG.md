@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.6.1] - 2026-09-17
+
+No functional changes - this release finishes the test-coverage work
+0.6.0 started, bringing the whole package (Node plugin, `api.ts`,
+every Preact component, and `log-controller.ts`'s full streaming/
+history/trim logic) to 100% statement, branch, function, and line
+coverage.
+
+### Changed
+
+- `getBraidVersion` (in `src/index.ts`) is now exported so its two
+  fallback branches (a version-less package.json, and the resolve/read
+  failing outright) can be driven directly in tests, rather than only
+  ever exercising it against the real, always-present `@aip-tech/braid`
+  installed in this monorepo.
+- A handful of genuinely-unreachable defensive branches in
+  `log-controller.ts` are now marked with `istanbul ignore` and a
+  comment explaining why (e.g. a virtualizer index-bounds guard that
+  can't go out of range given how `refreshVirtualizer` derives `count`,
+  and a couple of "still the active stream" checks that are provably
+  redundant with an earlier check in the same synchronous stretch of
+  code), rather than being silently uncovered.
+
+### Added
+
+- Real tests for `LogController`, the one class in this package that
+  previously had none: history loading (including a page superseded
+  mid-fetch or mid-`json()`-parse by a fresh `start()`), `loadOlder()`'s
+  guards and pagination, the live follow stream's full response-status
+  matrix (401/404/other non-ok/no-body), reconnect/retry scheduling,
+  replay buffering and dedup against existing history, partial-line
+  handling across a dropped connection, and the soft/hard line-count
+  trim caps.
+- Tests for `Icon`, `LogPane`, and `main.tsx` (this package's other
+  previously-uncovered files).
+- A couple of small gaps in existing coverage: an `updateHistory` edge
+  case (a process that's never been sampled), `Icon`'s class-name
+  branch, and a `parseRoute`/action-failure branch each in `app.spec.tsx`.
+
 ## [0.6.0] - 2026-09-15
 
 ### Fixed

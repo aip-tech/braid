@@ -143,6 +143,77 @@ describe("TableView", () => {
 		);
 	});
 
+	it("shows an em-dash for cpu/memory while neither has been sampled yet", () => {
+		act(() =>
+			render(
+				<TableView
+					processes={[makeProcess({ cpu: undefined, memory: undefined })]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const statCells = container.querySelectorAll(".stat-cell");
+		expect(statCells[0]?.textContent).toBe("–");
+		expect(statCells[1]?.textContent).toBe("–");
+	});
+
+	it("calls onAction with start when the Start button is clicked for a never-started process", () => {
+		const onAction = vi.fn();
+		act(() =>
+			render(
+				<TableView
+					processes={[
+						makeProcess({
+							name: "cron",
+							alive: false,
+							startedAt: undefined,
+							pid: undefined,
+						}),
+					]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={onAction}
+				/>,
+				container,
+			),
+		);
+
+		act(() =>
+			container.querySelector<HTMLButtonElement>(".btn-restart")?.click(),
+		);
+
+		expect(onAction).toHaveBeenCalledWith("start", "cron");
+	});
+
+	it("shows '...' on the Start button while a start action is pending for a never-started process", () => {
+		act(() =>
+			render(
+				<TableView
+					processes={[
+						makeProcess({
+							name: "cron",
+							alive: false,
+							startedAt: undefined,
+							pid: undefined,
+						}),
+					]}
+					pending={new Set(["cron"])}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		expect(container.querySelector(".btn-restart")?.textContent).toContain(
+			"...",
+		);
+	});
+
 	it("calls onAction with the action and process name when a button is clicked", () => {
 		const onAction = vi.fn();
 		act(() =>

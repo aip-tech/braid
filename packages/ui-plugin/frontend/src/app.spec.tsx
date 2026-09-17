@@ -216,6 +216,25 @@ describe("App", () => {
 		expect(container.textContent).toContain("api");
 	});
 
+	it("falls back to the table view for a #/process/ route with an unparseable name", async () => {
+		// A lone "%" isn't a valid percent-encoding sequence - decodeURIComponent throws on it.
+		location.hash = "#/process/%";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL) => {
+				const url = String(input);
+				if (url === "/api/ui/version")
+					return jsonResponse({ braidVersion: "1.0.0" });
+				return jsonResponse([makeProcess({ name: "api" })]);
+			}),
+		);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		expect(container.querySelector("#processes")).not.toBeNull();
+	});
+
 	it("marks a row's button disabled while an action is in flight, then re-enables it", async () => {
 		let resolvePost: (() => void) | undefined;
 		vi.stubGlobal(
@@ -295,5 +314,61 @@ describe("App", () => {
 			"Session expired",
 		);
 		expect(container.querySelector(".row-error")).toBeNull();
+	});
+
+	it("shows the response body as a row-level error for a non-401 action failure", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = String(input);
+				if (url === "/api/ui/version")
+					return jsonResponse({ braidVersion: "1.0.0" });
+				if (url === "/api/status")
+					return jsonResponse([makeProcess({ alive: true })]);
+				if (init?.method === "POST")
+					return textResponse("busy: an operation is already in progress", 409);
+				throw new Error(`unexpected fetch: ${url}`);
+			}),
+		);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		act(() => container.querySelector<HTMLButtonElement>(".btn-stop")?.click());
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		expect(container.querySelector(".row-error")?.textContent).toContain(
+			"busy: an operation is already in progress",
+		);
+		expect(container.querySelector(".error")).toHaveProperty("hidden", true);
+	});
+
+	it("shows a row-level error when the action's own fetch throws (can't reach braid)", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = String(input);
+				if (url === "/api/ui/version")
+					return jsonResponse({ braidVersion: "1.0.0" });
+				if (url === "/api/status")
+					return jsonResponse([makeProcess({ alive: true })]);
+				if (init?.method === "POST") throw new TypeError("Failed to fetch");
+				throw new Error(`unexpected fetch: ${url}`);
+			}),
+		);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		act(() => container.querySelector<HTMLButtonElement>(".btn-stop")?.click());
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		expect(container.querySelector(".row-error")?.textContent).toContain(
+			"couldn't reach braid",
+		);
 	});
 });

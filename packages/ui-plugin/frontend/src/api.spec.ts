@@ -158,6 +158,14 @@ describe("updateHistory", () => {
 		expect(next.get("api")).toEqual([{ cpu: 1, memory: 100 }]);
 	});
 
+	it("adds no entry at all for a process that's never been sampled and reports none this tick either", () => {
+		// e.g. a never-started autoStart:false process appearing in /api/status for the first time.
+		const next = updateHistory(new Map(), [
+			makeProcess({ name: "never-started", cpu: undefined, memory: undefined }),
+		]);
+		expect(next.has("never-started")).toBe(false);
+	});
+
 	it("caps a process's history at 30 samples, dropping the oldest first", () => {
 		const prev = new Map<string, HistorySample[]>([
 			["api", Array.from({ length: 30 }, (_, i) => ({ cpu: i, memory: i }))],

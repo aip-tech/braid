@@ -114,6 +114,8 @@ export function splitIntoLines(
 	chunk: string,
 ): { lines: string[]; pendingLine: string } {
 	const parts = (pendingLine + chunk).split("\n");
+	// istanbul ignore next -- `split` on a string always returns at least one element, so `pop()`
+	// only ever returns `undefined` on an already-empty array, which never happens here.
 	const newPendingLine = parts.pop() ?? "";
 	return { lines: parts, pendingLine: newPendingLine };
 }
@@ -228,7 +230,15 @@ export class LogController {
 			getScrollElement: () => this.logEl,
 			estimateSize: () => ROW_ESTIMATE_PX,
 			overscan: OVERSCAN_ROWS,
-			getItemKey: (index: number) => snapshot[index]?.id ?? index,
+			getItemKey: (index: number) => {
+				// istanbul ignore next -- defensive: `refreshVirtualizer` always calls `setOptions()`
+				// with `count` derived from this same `snapshot` before the virtualizer can ask for a
+				// key, so `index` should never be out of bounds here in practice. Guards against
+				// relying on @tanstack/virtual-core's internal render/measurement timing never
+				// producing a stale index against a since-shrunk array, which isn't practical to force
+				// from the outside.
+				return snapshot[index]?.id ?? index;
+			},
 			observeElementRect,
 			observeElementOffset,
 			scrollToFn: elementScroll,
@@ -253,6 +263,9 @@ export class LogController {
 			// spans around them (its escape_txt_for_html runs by default) - innerHTML is only safe
 			// here because that escaping already happened when the line was created; raw fetched text
 			// must never reach it directly.
+			// istanbul ignore next -- defensive: `item.index` comes from the same virtualizer whose
+			// `count` this.lines.length always backs (see the getItemKey comment above), so `line`
+			// should never actually be undefined.
 			if (line) row.innerHTML = line.html;
 			return row;
 		});
@@ -343,6 +356,8 @@ export class LogController {
 
 	private async loadOlderHistory(stream: ActiveStream): Promise<void> {
 		try {
+			// istanbul ignore next -- the `?? ""` fallback is unreachable: loadOlder(), the only
+			// caller, already returns early when `stream.historyCursor === null`.
 			const res = await fetch(
 				`/api/logs/history?name=${encodeURIComponent(stream.name)}&lines=${HISTORY_PAGE_LINES}&before=${encodeURIComponent(stream.historyCursor ?? "")}`,
 				{ signal: stream.controller.signal },
@@ -422,6 +437,11 @@ export class LogController {
 		if (this.activeStream !== stream) return;
 		this.callbacks.onStatusChange("Reconnecting...");
 		stream.retryTimer = setTimeout(() => {
+			// istanbul ignore next -- defensive: by the time this fires, either `stream` is still
+			// `this.activeStream` (the common case), or `start()`/`destroy()` already ran, which
+			// always calls stop() first and clears this exact timer via `this.activeStream.retryTimer`
+			// before reassigning `this.activeStream` - so this timer firing for a stream that's no
+			// longer active isn't something a normal call sequence can produce.
 			if (this.activeStream !== stream) return;
 			void this.runLogStream(stream);
 		}, LOG_RETRY_DELAY_MS);
@@ -496,6 +516,11 @@ export class LogController {
 				this.handleLiveLine(stream, stream.pendingLine);
 				stream.pendingLine = "";
 			}
+			// istanbul ignore if -- defensive: everything since the last `this.activeStream !== stream`
+			// check above (consumeChunk, resolveReplay, handleLiveLine) is synchronous, with no await
+			// in between - nothing here can change `this.activeStream` before this check runs, making
+			// it always false in practice. Kept for symmetry with that check and as a safety net
+			// against a future refactor introducing an await in this stretch.
 			if (this.activeStream !== stream) return;
 			// The server only ever closes a follow stream on daemon shutdown or a dropped connection -
 			// both are worth quietly retrying rather than leaving the pane looking permanently stuck.

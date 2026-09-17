@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type {
@@ -7,7 +6,17 @@ import type {
 	RouteHandler,
 } from "@aip-tech/braid";
 import { describe, expect, it, vi } from "vitest";
-import { uiPlugin } from "./index.js";
+
+// Wraps the real readFileSync so getBraidVersion's two fallback tests can override just its next
+// call, while every other call (including this file's own comparison read below) still hits disk
+// for real.
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
+
+import { readFileSync } from "node:fs";
+import { getBraidVersion, uiPlugin } from "./index.js";
 
 /** A minimal fake PluginContext - real HTTP/control-server plumbing is already covered by
  *  braid's own tests; this only needs to prove uiPlugin.register() calls the right context
@@ -65,6 +74,22 @@ function fakeResponse() {
 	};
 	return res;
 }
+
+describe("getBraidVersion", () => {
+	it('falls back to "unknown" when the resolved package.json has no version field', () => {
+		vi.mocked(readFileSync).mockReturnValueOnce(
+			JSON.stringify({ name: "@aip-tech/braid" }),
+		);
+		expect(getBraidVersion()).toBe("unknown");
+	});
+
+	it('falls back to "unknown" when resolving or reading the package.json fails outright', () => {
+		vi.mocked(readFileSync).mockImplementationOnce(() => {
+			throw new Error("ENOENT");
+		});
+		expect(getBraidVersion()).toBe("unknown");
+	});
+});
 
 describe("uiPlugin", () => {
 	it('registers static content at the default "/" prefix', () => {

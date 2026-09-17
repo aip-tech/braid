@@ -179,6 +179,128 @@ describe("DetailView", () => {
 
 		expect(onAction).toHaveBeenCalledWith("stop", "api");
 	});
+
+	it('shows "stopped" (not "not started") for a process that ran before and has since exited', () => {
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({ alive: false })}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		expect(container.querySelector(".badge-status")?.textContent).toBe(
+			"stopped",
+		);
+	});
+
+	it("calls onAction with start when the Start button is clicked for a never-started process", () => {
+		const onAction = vi.fn();
+		act(() =>
+			render(
+				<DetailView
+					name="cron"
+					process={makeProcess({
+						name: "cron",
+						alive: false,
+						startedAt: undefined,
+						pid: undefined,
+					})}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={onAction}
+				/>,
+				container,
+			),
+		);
+
+		act(() =>
+			container.querySelector<HTMLButtonElement>(".btn-restart")?.click(),
+		);
+
+		expect(onAction).toHaveBeenCalledWith("start", "cron");
+	});
+
+	it("calls onAction with restart when the Restart button is clicked for a running process", () => {
+		const onAction = vi.fn();
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({ name: "api", alive: true })}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={onAction}
+				/>,
+				container,
+			),
+		);
+
+		act(() =>
+			container.querySelector<HTMLButtonElement>(".btn-restart")?.click(),
+		);
+
+		expect(onAction).toHaveBeenCalledWith("restart", "api");
+	});
+
+	it("shows '...' on the Start button while a start action is pending", () => {
+		act(() =>
+			render(
+				<DetailView
+					name="cron"
+					process={makeProcess({
+						name: "cron",
+						alive: false,
+						startedAt: undefined,
+						pid: undefined,
+					})}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set(["cron"])}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		expect(container.querySelector(".btn-restart")?.textContent).toContain(
+			"...",
+		);
+	});
+
+	it("shows '...' on both Stop and Restart while an action is pending for a running process", () => {
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({ name: "api", alive: true })}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set(["api"])}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		expect(container.querySelector(".btn-stop")?.textContent).toContain("...");
+		expect(container.querySelector(".btn-restart")?.textContent).toContain(
+			"...",
+		);
+	});
 });
 
 function formattedLastCpu(): string {

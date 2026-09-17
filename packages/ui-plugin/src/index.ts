@@ -13,8 +13,11 @@ const PUBLIC_DIR = join(__dirname, "public");
  * Reads the host project's own installed `@aip-tech/braid` version straight from its
  * package.json - there's no other way to know it, since this plugin is built and published
  * independently and could be paired with any `@aip-tech/braid` version satisfying its peer range.
+ * Exported so index.spec.ts can drive both fallback branches (a version-less package.json, and the
+ * resolve/read failing outright) directly, rather than only ever exercising this against the real,
+ * always-present @aip-tech/braid installed in this monorepo.
  */
-function getBraidVersion(): string {
+export function getBraidVersion(): string {
 	try {
 		const pkgUrl = import.meta.resolve("@aip-tech/braid/package.json");
 		const pkg = JSON.parse(readFileSync(fileURLToPath(pkgUrl), "utf8")) as {
