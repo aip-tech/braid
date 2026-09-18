@@ -43,6 +43,7 @@ function makeProcess(overrides: Partial<ProcessStatus> = {}): ProcessStatus {
 		startedAt: new Date(0).toISOString(),
 		cpu: 1.2,
 		memory: 2 * 1024 * 1024,
+		restartCount: 0,
 		...overrides,
 	};
 }

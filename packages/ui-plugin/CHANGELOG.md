@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [0.6.2] - 2026-09-18
+
+### Added
+
+- "Restarts" and "Uptime" columns/stats in the table and detail views,
+  matching the new `restartCount` field `@aip-tech/braid` now includes
+  in every process status object. Uptime is computed client-side from
+  the process's existing `startedAt` timestamp via a new `formatUptime`
+  helper in `api.ts` - no new backend state needed.
+
 ## [0.6.1] - 2026-09-17
 
 No functional changes - this release finishes the test-coverage work

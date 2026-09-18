@@ -8,13 +8,15 @@ import type {
 	ProcessActionResult,
 } from "./types.js";
 
-type WorkerSnapshot = {
+export type WorkerSnapshot = {
 	name: string;
 	pid: number | undefined;
 	alive: boolean;
 	startedAt?: string;
 	cpu?: number;
 	memory?: number;
+	restartCount: number;
+	url?: string;
 };
 
 type ContextFactoryOptions = {

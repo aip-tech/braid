@@ -2,6 +2,7 @@ import {
 	formatCpu,
 	formatMemory,
 	formatStarted,
+	formatUptime,
 	type ProcessStatus,
 } from "./api.js";
 import { RestartIcon, StartIcon, StopIcon } from "./icons.js";
@@ -29,6 +30,8 @@ export function TableView({
 					<th>Status</th>
 					<th>CPU</th>
 					<th>Mem</th>
+					<th>Restarts</th>
+					<th>Uptime</th>
 					<th>Started</th>
 					<th />
 				</tr>
@@ -73,6 +76,16 @@ export function TableView({
 							<td class="stat-cell">
 								{process.memory !== undefined
 									? formatMemory(process.memory)
+									: "–"}
+							</td>
+							<td class="stat-cell">
+								{process.restartCount !== undefined
+									? process.restartCount
+									: "–"}
+							</td>
+							<td class="stat-cell">
+								{process.alive && process.startedAt !== undefined
+									? formatUptime(process.startedAt)
 									: "–"}
 							</td>
 							<td>{formatStarted(process.startedAt)}</td>

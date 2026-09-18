@@ -771,6 +771,8 @@ describe("runManager plugin support", () => {
 		alive: boolean;
 		cpu?: number;
 		memory?: number;
+		restartCount?: number;
+		url?: string;
 	};
 
 	/** Polls /api/status until `predicate` matches, returning the body that satisfied it. */
@@ -1021,6 +1023,142 @@ describe("runManager plugin support", () => {
 		await waitForStatus(pidfile, (body) => {
 			const solo = body.find((w) => w.name === "solo");
 			return solo !== undefined && typeof solo.cpu === "number";
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("starts a freshly-spawned process's restartCount at 0, and increments it once per completed restart", async () => {
+		const configs = [keepAliveConfig("solo")];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
+		);
+
+		// A first spawn is not a restart - the counter starts at 0, not 1.
+		const beforeRestart = (
+			(await (
+				await fetchWithToken(pidfile, "/api/status")
+			).json()) as StatusEntry[]
+		).find((w) => w.name === "solo");
+		expect(beforeRestart?.restartCount).toBe(0);
+
+		for (let i = 1; i <= 2; i++) {
+			const restartRes = await fetch(
+				`http://127.0.0.1:${pidfile.controlPort}/api/processes/restart?name=solo`,
+				{
+					method: "POST",
+					headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+				},
+			);
+			expect(restartRes.status).toBe(200);
+			await waitForStatus(pidfile, (body) => {
+				const solo = body.find((w) => w.name === "solo");
+				return solo !== undefined && solo.restartCount === i;
+			});
+		}
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("surfaces a configured process's own url over /api/status, omitting the field entirely when unset, for both a started and a never-started process", async () => {
+		const configs = [
+			{ ...keepAliveConfig("solo"), url: "http://localhost:4000" },
+			keepAliveConfig("bare"),
+			{
+				...keepAliveConfig("idle"),
+				autoStart: false,
+				url: "http://localhost:5000",
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await waitFor(() =>
+			["solo", "bare"].every((name) => {
+				const worker = pidfile.workers.find(
+					(w: { name: string }) => w.name === name,
+				);
+				return worker !== undefined && isPidAlive(worker.pid);
+			}),
+		);
+
+		const status = (await (
+			await fetchWithToken(pidfile, "/api/status")
+		).json()) as StatusEntry[];
+		expect(status.find((w) => w.name === "solo")?.url).toBe(
+			"http://localhost:4000",
+		);
+		expect(status.find((w) => w.name === "bare")?.url).toBeUndefined();
+		expect(status.find((w) => w.name === "idle")?.url).toBe(
+			"http://localhost:5000",
+		);
+
+		// See the identical situation/comment on "passes onReady the same snapshot..." above: a
+		// never-started autoStart:false process keeps the daemon from shutting down on its own, so
+		// it's started first to let a clean exit cascade trigger.
+		await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/start?name=idle`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		await waitFor(() => {
+			const started = pidfileWorker(pidfilePath, "idle");
+			return started !== undefined && isPidAlive(started.pid);
+		});
+
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 10000);
+
+	it("passes onReady the same snapshot /api/status would return at that moment, including a never-started process", async () => {
+		const configs = [
+			keepAliveConfig("solo"),
+			{ ...keepAliveConfig("idle"), autoStart: false },
+		];
+		let readyWorkers:
+			| Array<{ name: string; alive: boolean; restartCount: number }>
+			| undefined;
+		const managerPromise = runManager(configs, pidfilePath, {
+			onReady: (workers) => {
+				readyWorkers = workers;
+			},
+		});
+
+		await waitFor(() => readyWorkers !== undefined);
+		const solo = readyWorkers?.find((w) => w.name === "solo");
+		const idle = readyWorkers?.find((w) => w.name === "idle");
+		expect(solo).toEqual(
+			expect.objectContaining({ alive: true, restartCount: 0 }),
+		);
+		expect(idle).toEqual(
+			expect.objectContaining({ alive: false, restartCount: 0 }),
+		);
+
+		// "idle" (autoStart: false, never started) has no pidfile entry for stopFromPidfile's
+		// worker-killing loop to find, and the daemon deliberately never shuts down on its own while
+		// it could still be started - see the identical situation/comment on the autoStart describe
+		// block's "never forks an autoStart: false process at boot" test. Starting it first lets the
+		// normal all-workers-exited shutdown cascade fire once stopFromPidfile runs.
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
+		await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/start?name=idle`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		await waitFor(() => {
+			const started = pidfileWorker(pidfilePath, "idle");
+			return started !== undefined && isPidAlive(started.pid);
 		});
 
 		await stopFromPidfile(pidfilePath);
@@ -2573,7 +2711,12 @@ describe("runManager autoStart", () => {
 		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8"));
 		const status = await fetchStatus(pidfile);
 		const cron = status.find((s) => s.name === "cron");
-		expect(cron).toEqual({ name: "cron", pid: undefined, alive: false });
+		expect(cron).toEqual({
+			name: "cron",
+			pid: undefined,
+			alive: false,
+			restartCount: 0,
+		});
 
 		// A never-started autoStart:false process has no pidfile entry for stopFromPidfile's
 		// worker-killing loop to find, and the daemon deliberately never shuts down on its own

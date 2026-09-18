@@ -34,6 +34,7 @@ export default defineConfig({
 - `startAfter`: `{ processes }` — don't fork this process for the first time until `processes` are themselves ready. See [Waiting to start](#waiting-to-start).
 - `autoStart`: set `false` to keep this process from forking when `start` boots the whole stack — start it later on demand instead. See [Starting on demand](#starting-on-demand). @default `true`
 - `autoRestart`: restart just this process on a crash instead of stopping the whole stack. See [Restarting on crash](#restarting-on-crash). @default `false`
+- `url`: purely informational — shown in the startup summary and `status` output as this process's own address (e.g. `http://localhost:4000`). Braid never verifies anything is actually listening there.
 - `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
 - `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
 - `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
@@ -46,16 +47,27 @@ Full field list and defaults: [`src/types.ts`](./src/types.ts) (`ProcessConfig`,
 npx @aip-tech/braid start                    # start every configured process as a background daemon
 npx @aip-tech/braid start --foreground       # ...or attached to this terminal (Ctrl-C stops everything)
 npx @aip-tech/braid start --daemon           # force the background daemon, overriding a config's foreground: true
-npx @aip-tech/braid status                   # list each process's name/pid/alive state
+npx @aip-tech/braid status                   # list each process's name/pid/alive/restart-count/uptime
+npx @aip-tech/braid status --json            # same data, as a single JSON array (for scripting/CI)
 npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
 npx @aip-tech/braid logs [name] --follow     # keep streaming new output
 npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
+npx @aip-tech/braid logs [name] --json       # newline-delimited JSON ({name, text}), ANSI stripped
 npx @aip-tech/braid stop                     # kill everything
 npx @aip-tech/braid start --config ./other.config.ts
 npx @aip-tech/braid start <name>             # start one configured process in an already-running daemon
 npx @aip-tech/braid restart <name>           # stop and re-fork one process, leaving the rest alone
 npx @aip-tech/braid stop <name>              # stop one process, leaving the rest (and the daemon) running
 npx @aip-tech/braid start --no-watch         # ignore every process's watch/beforeRestart for this run
+```
+
+`start` prints a one-time summary once every process has forked — a header ("N processes running (pid M)") and one line per process with its alive marker, `url` (if set), and pid:
+
+```
+[braid] 3 processes running (pid 40213)
+  ● api      http://localhost:4000    pid 40214
+  ● web      http://localhost:5173    pid 40215
+  ● worker                            pid 40216
 ```
 
 In `--foreground` mode, `start` blocks until every process stops (Ctrl-C, or `braid stop` from another terminal), streaming their combined output straight here instead of only to the log files.

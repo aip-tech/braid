@@ -2,6 +2,7 @@ import {
 	formatCpu,
 	formatMemory,
 	formatStarted,
+	formatUptime,
 	type HistorySample,
 	type ProcessStatus,
 } from "./api.js";
@@ -67,6 +68,16 @@ export function DetailView({
 					</span>
 					<span>
 						Started {process ? formatStarted(process.startedAt) : "-"}
+					</span>
+					<span>
+						Restarts{" "}
+						{process?.restartCount !== undefined ? process.restartCount : "-"}
+					</span>
+					<span>
+						Uptime{" "}
+						{process?.alive && process.startedAt !== undefined
+							? formatUptime(process.startedAt)
+							: "-"}
 					</span>
 				</div>
 				<div class="detail-actions">

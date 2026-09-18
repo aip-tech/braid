@@ -44,6 +44,8 @@ export type ParsedArgs = {
 	foreground?: boolean;
 	/** `start` only: ignore every process's `watch`/`beforeRestart` for this run. @default false */
 	noWatch: boolean;
+	/** `status`/`logs` only: machine-readable output instead of the default human-readable text. */
+	json: boolean;
 };
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
@@ -54,6 +56,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	let lines: number | undefined;
 	let foreground: boolean | undefined;
 	let noWatch = false;
+	let json = false;
 
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i];
@@ -79,6 +82,8 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 			foreground = arg === "--foreground";
 		} else if (arg === "--no-watch") {
 			noWatch = true;
+		} else if (arg === "--json") {
+			json = true;
 		} else if (!arg?.startsWith("--") && processName === undefined) {
 			processName = arg;
 		}
@@ -91,6 +96,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 		lines,
 		foreground,
 		noWatch,
+		json,
 	};
 }
 
@@ -231,7 +237,16 @@ export function applyNoWatch(config: BraidConfig): BraidConfig {
 }
 
 type DaemonStartOutcome =
-	| { ok: true; pid: number }
+	| {
+			ok: true;
+			pid: number;
+			/** A plugin's own pre-ready `ctx.log()` lines (see `DaemonHandshakeMessage`'s "log"
+			 *  variant), e.g. the ui-plugin's dashboard URL. Buffered rather than printed as they
+			 *  arrive, so the caller can flush them *after* the startup summary table - matching the
+			 *  roadmap's intended ordering, since these otherwise arrive before "ready" and so before
+			 *  the table has anything to print. */
+			logLines: string[];
+	  }
 	| { ok: false; message: string };
 
 /** Forks daemon.ts detached (stdout/stderr to daemon.log), then races its ready/error IPC message.
@@ -290,18 +305,22 @@ export async function startDaemon(
 			child.off("error", onError);
 		}
 
+		// Buffered rather than printed immediately - see `DaemonStartOutcome.logLines`'s own doc
+		// comment for why.
+		const logLines: string[] = [];
+
 		// Not .once(): a plugin's own relayed "log" line (see PluginContext.log) can arrive before
 		// the "ready"/"error" handshake message, and shouldn't be mistaken for it - only "ready"/
 		// "error" settle and stop listening.
 		function onMessage(message: DaemonHandshakeMessage): void {
 			if (message.type === "log") {
-				console.log(message.message);
+				logLines.push(message.message);
 				return;
 			}
 			cleanup();
 			settle(
 				message.type === "ready"
-					? { ok: true, pid: child.pid as number }
+					? { ok: true, pid: child.pid as number, logLines }
 					: { ok: false, message: message.message },
 			);
 		}
@@ -385,10 +404,56 @@ type LiveProcessStatus = {
 	startedAt?: string;
 	cpu?: number;
 	memory?: number;
+	/** Absent when falling back to the plain pidfile (no live daemon to ask) - only known in-memory. */
+	restartCount?: number;
+	/** This process's own `ProcessConfig.url`, if it set one. Purely informational. */
+	url?: string;
 };
 
 function formatBytes(bytes: number): string {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function formatUptime(startedAt: string): string {
+	const totalSeconds = Math.max(
+		0,
+		Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000),
+	);
+	const days = Math.floor(totalSeconds / 86400);
+	const hours = Math.floor((totalSeconds % 86400) / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (days > 0) return `${days}d ${hours}h`;
+	if (hours > 0) return `${hours}h ${minutes}m`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
+type StartupSummaryRow = {
+	name: string;
+	pid: number | undefined;
+	alive: boolean;
+	url?: string;
+};
+
+/** Prints the one-time post-`start` summary block: a header ("N processes running") and one line
+ *  per configured process, sorted by name for a stable, scannable order (matching every other
+ *  process listing in this file). Shared between `start`'s foreground and daemonized paths - the
+ *  only difference between them is where `rows`/`managerPid` come from. */
+function printStartupSummary(
+	managerPid: number,
+	rows: StartupSummaryRow[],
+): void {
+	const aliveCount = rows.filter((row) => row.alive).length;
+	console.log(
+		`${braidTag()} ${aliveCount} process${aliveCount === 1 ? "" : "es"} running (pid ${managerPid})`,
+	);
+	for (const row of [...rows].sort((a, b) => a.name.localeCompare(b.name))) {
+		const parts = [`  ${row.alive ? "●" : "○"} ${row.name}`];
+		if (row.url) parts.push(row.url);
+		if (row.pid !== undefined) parts.push(`pid ${row.pid}`);
+		console.log(parts.join("  "));
+	}
 }
 
 /**
@@ -461,10 +526,9 @@ async function runForeground(
 		logs: config.logs,
 		statsPollIntervalMs: config.statsPollIntervalMs,
 		cwd,
-		onReady: () => {
-			console.log(
-				`${braidTag()} running in foreground (pid ${process.pid}). Press Ctrl-C to stop.`,
-			);
+		onReady: (workers) => {
+			printStartupSummary(process.pid, workers);
+			console.log(`${braidTag()} running in foreground. Press Ctrl-C to stop.`);
 			const running = findRunningPidfile(pidfilePath);
 			// istanbul ignore else -- `running` is only ever falsy here if something outside braid
 			// deletes/corrupts the pidfile in the zero-yield-point window between manager.ts's own
@@ -532,7 +596,22 @@ async function runStartCommand({
 		console.error(`${braidTag()} ${outcome.message}`);
 		return 1;
 	}
-	console.log(`${braidTag()} started (pid ${outcome.pid})`);
+	const running = findRunningPidfile(pidfilePath);
+	// istanbul ignore next -- the control server has already completed a "ready" handshake by this
+	// point (controlServerReady fires well before it), so `running` coming back undefined, or the
+	// live fetch itself failing, would mean the daemon crashed in the handful of ms since - not
+	// reachable from a test without literally racing that window. Falls back to the pidfile's own
+	// name/pid/alive (no url: that only comes from live config the pidfile doesn't carry) rather
+	// than failing `start` itself over a display line.
+	const rows: StartupSummaryRow[] =
+		(running && (await fetchLiveStatus(running))) ||
+		statusFromPidfile(pidfilePath).map(({ name, pid, alive }) => ({
+			name,
+			pid,
+			alive,
+		}));
+	printStartupSummary(outcome.pid, rows);
+	for (const line of outcome.logLines) console.log(line);
 	return 0;
 }
 
@@ -541,6 +620,7 @@ type LogsCommandArgs = {
 	processName: string | undefined;
 	follow: boolean;
 	lines: number | undefined;
+	json: boolean;
 };
 
 /** Handles `braid logs [name]`, streaming a running daemon's `/api/logs` straight to this terminal. */
@@ -549,6 +629,7 @@ async function runLogsCommand({
 	processName,
 	follow,
 	lines,
+	json,
 }: LogsCommandArgs): Promise<number> {
 	const running = findRunningPidfile(pidfilePath);
 	if (!running) {
@@ -559,6 +640,7 @@ async function runLogsCommand({
 		...(processName ? { name: processName } : {}),
 		...(follow ? { follow: "true" } : {}),
 		...(lines !== undefined ? { lines: String(lines) } : {}),
+		...(json ? { json: "true" } : {}),
 	});
 
 	// Handle both: Ctrl-C sends SIGINT, but pnpm re-sends interruption as SIGTERM.
@@ -659,10 +741,17 @@ async function runRestartCommand({
  * case. `findRunningPidfile` is only used here to decide whether it's worth trying to reach a
  * daemon at all.
  */
-async function runStatusCommand(pidfilePath: string): Promise<number> {
+async function runStatusCommand(
+	pidfilePath: string,
+	json: boolean,
+): Promise<number> {
 	const running = findRunningPidfile(pidfilePath);
 	const live = running ? await fetchLiveStatus(running) : undefined;
 	const statuses: LiveProcessStatus[] = live ?? statusFromPidfile(pidfilePath);
+	if (json) {
+		console.log(JSON.stringify(statuses));
+		return 0;
+	}
 	if (statuses.length === 0) {
 		console.log("Nothing running.");
 		return 0;
@@ -679,8 +768,16 @@ async function runStatusCommand(pidfilePath: string): Promise<number> {
 			status.cpu !== undefined && status.memory !== undefined
 				? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
 				: "";
+		const restarts =
+			status.restartCount !== undefined
+				? `  restarts ${status.restartCount}`
+				: "";
+		const uptime =
+			status.alive && status.startedAt
+				? `  up ${formatUptime(status.startedAt)}`
+				: "";
 		console.log(
-			`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}`,
+			`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}${restarts}${uptime}`,
 		);
 	}
 	return 0;
@@ -688,7 +785,7 @@ async function runStatusCommand(pidfilePath: string): Promise<number> {
 
 function printUsage(): void {
 	console.error(
-		"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon] [--no-watch]",
+		"Usage: braid <start [name]|stop [name]|restart <name>|status|logs [name]> [--config <path>] [--follow] [--lines <n>] [--foreground|--daemon] [--no-watch] [--json]",
 	);
 }
 
@@ -701,6 +798,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 		lines,
 		foreground,
 		noWatch,
+		json,
 	} = parseArgs(argv, cwd);
 	const pidfilePath = resolve(cwd, DEFAULT_PIDFILE_PATH);
 
@@ -715,13 +813,13 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
 				cwd,
 			});
 		case "logs":
-			return runLogsCommand({ pidfilePath, processName, follow, lines });
+			return runLogsCommand({ pidfilePath, processName, follow, lines, json });
 		case "stop":
 			return runStopCommand({ pidfilePath, processName });
 		case "restart":
 			return runRestartCommand({ pidfilePath, processName });
 		case "status":
-			return runStatusCommand(pidfilePath);
+			return runStatusCommand(pidfilePath, json);
 		default:
 			printUsage();
 			return 1;

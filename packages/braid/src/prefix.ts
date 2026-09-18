@@ -15,6 +15,20 @@ export function colorize(text: string, color?: string): string {
 	return code ? `\x1b[${code}m${text}\x1b[0m` : text;
 }
 
+// The well-known `ansi-regex` pattern (sindresorhus/ansi-regex), vendored rather than hand-rolled:
+// a process's own raw output is unconstrained (it can emit its own colors, OSC 8 hyperlinks, cursor
+// movement), so a narrower SGR-color-only pattern would under-strip and leave stray escape bytes in
+// text meant to be machine-parsed (see `logs --json`, the one consumer of this).
+const ANSI_PATTERN = [
+	"[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)",
+	"(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))",
+].join("|");
+
+/** Strips ANSI escape sequences (color, cursor movement, OSC hyperlinks, ...) from `text`. */
+export function stripAnsi(text: string): string {
+	return text.replace(new RegExp(ANSI_PATTERN, "g"), "");
+}
+
 // Every process gets its own configured color for its "[name]" prefix - braid's own messages
 // (and plugins') use one fixed, neutral color instead, so they read as clearly "not a process"
 // wherever they appear alongside real process output (most visibly interleaved in `--foreground`).

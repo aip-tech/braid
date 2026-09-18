@@ -5,6 +5,45 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [0.9.5] - 2026-09-18
+
+### Added
+
+- Per-process restart count and uptime, surfaced everywhere process
+  status already is: `PluginContext.getProcesses()`/`GET
+  /api/status`/`braid status` now include `restartCount` (0, not absent,
+  for a process that's never restarted) and a computed `up Xh Ym`
+  suffix, and the web dashboard's table/detail views gained matching
+  "Restarts"/"Uptime" columns. `restartCount` is tracked in a new,
+  never-cleared-on-respawn `Map` in `manager.ts`, incremented once per
+  completed restart at the single confirmed choke point every restart
+  trigger (watch, `autoRestart`, a manual restart, a `dependsOn`
+  cascade) already funnels through - no per-trigger plumbing needed.
+  Uptime needed no new state at all: it's a pure display computation
+  from the `startedAt` timestamp already tracked.
+- A one-time startup summary block, printed once every process has
+  forked (foreground or daemonized alike): a header ("N processes
+  running (pid M)") and one line per configured process with its own
+  `●`/`○` alive marker, `ProcessConfig.url` if it set one, and its pid.
+  `url` is a new, purely informational `ProcessConfig` field (braid
+  never verifies anything is actually listening there). The daemonized
+  path fetches this from the same `/api/status` route the dashboard
+  already polls, falling back to the bare pidfile if that live fetch
+  can't succeed for some reason; a plugin's own pre-ready `ctx.log()`
+  line (e.g. the dashboard's "open this URL" line) is now buffered and
+  printed *after* this table instead of before it, matching the
+  ordering a user would expect.
+- `braid status --json` and `braid logs --json`: machine-readable
+  output for both, for scripting/CI consumption. `status --json` prints
+  the same objects the dashboard already gets, verbatim. `logs --json`
+  frames each line as newline-delimited JSON (`{name, text}`), with
+  ANSI codes stripped from `text` - the `[name]`/timestamp prefix itself
+  is left in place, since stripping it back out isn't reliably
+  distinguishable from a process's own output that happens to look the
+  same. Works for both a `follow`ed live stream and `/api/logs/history`,
+  and for both a single named process and the default
+  every-process-interleaved view.
+
 ## [0.9.4] - 2026-09-18
 
 ### Fixed

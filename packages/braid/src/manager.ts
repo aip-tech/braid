@@ -26,6 +26,7 @@ import {
 	createPluginContextFactory,
 	registerPlugin,
 	safeEmit,
+	type WorkerSnapshot,
 } from "./plugin-runtime.js";
 import { braidTag, linePrefixer } from "./prefix.js";
 import type {
@@ -75,8 +76,9 @@ export type RunManagerOptions = {
 	 * (e.g. a foreground `start`) rather than as a daemon already forked into the right directory.
 	 */
 	cwd?: string;
-	/** Called once every process has forked and the pidfile is written, before awaiting exit. */
-	onReady?: () => void;
+	/** Called once every process has forked and the pidfile is written, before awaiting exit, with
+	 *  the same snapshot `GET /api/status` would return at that moment. */
+	onReady?: (workers: WorkerSnapshot[]) => void;
 	/** How often to sample CPU/memory via `pidusage`. See `BraidConfig.statsPollIntervalMs`. @default 2000 */
 	statsPollIntervalMs?: number;
 };
@@ -347,6 +349,11 @@ export async function runManager(
 	// Latest cpu/memory sample per process name, refreshed by pollStats() below - kept separate
 	// from pidfileWorkers since it's sampled on its own cadence, not tied to a worker (re)starting.
 	const statsByName = new Map<string, { cpu: number; memory: number }>();
+	// Total completed restarts per process name, for the whole life of this daemon - unlike
+	// statsByName, never cleared on respawn (it's cumulative, not tied to a particular pid).
+	// Incremented once per restart in handleFreshStart, the one function every restart trigger
+	// (watch, autoRestart, a manual restart, a dependsOn cascade) already funnels through.
+	const restartCountByName = new Map<string, number>();
 	// Guards against two pollStats() ticks overlapping if a `ps`/`/proc` read is ever slow -
 	// pidusage keeps an unlocked, module-level history keyed by pid, so overlapping calls against
 	// the same pid could corrupt a delta calculation.
@@ -361,8 +368,17 @@ export async function runManager(
 	// its first fork.
 	const getWorkers = () =>
 		configs.map((config) => {
+			const restartCount = restartCountByName.get(config.name) ?? 0;
 			const worker = pidfileWorkers.find((w) => w.name === config.name);
-			if (!worker) return { name: config.name, pid: undefined, alive: false };
+			if (!worker) {
+				return {
+					name: config.name,
+					pid: undefined,
+					alive: false,
+					restartCount,
+					...(config.url ? { url: config.url } : {}),
+				};
+			}
 			const alive = isAlive(worker.pid);
 			const stats = alive ? statsByName.get(worker.name) : undefined;
 			return {
@@ -370,7 +386,9 @@ export async function runManager(
 				pid: worker.pid,
 				alive,
 				startedAt: worker.startedAt,
+				restartCount,
 				...(stats ? { cpu: stats.cpu, memory: stats.memory } : {}),
+				...(config.url ? { url: config.url } : {}),
 			};
 		});
 	const contextFor = createPluginContextFactory({
@@ -978,6 +996,14 @@ export async function runManager(
 		// zero-yield-point timing issue as restartDependent's own top-of-function guard. The
 		// post-readyPattern-wait check below (a real, later point in time) is covered directly.
 		if (shuttingDown) return;
+		// The respawn itself has already happened by the time this runs (a "started" message, or
+		// a direct spawnWorker() call, always precedes this call) - so this counts as a completed
+		// restart regardless of what happens next (a readyPattern timeout, a failing onRestart
+		// hook), as long as shutdown didn't beat it here.
+		restartCountByName.set(
+			config.name,
+			(restartCountByName.get(config.name) ?? 0) + 1,
+		);
 		if (config.readyPattern) {
 			const timeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
 			const ready = await waitForReadyPattern(
@@ -1165,7 +1191,7 @@ export async function runManager(
 	}
 
 	rewritePidfile();
-	options.onReady?.();
+	options.onReady?.(getWorkers());
 
 	process.on("SIGINT", onSignal);
 	process.on("SIGTERM", onSignal);

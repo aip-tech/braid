@@ -17,6 +17,7 @@ import {
 	applyNoWatch,
 	DEFAULT_PIDFILE_PATH,
 	followLogs,
+	formatUptime,
 	isMainModule,
 	loadConfig,
 	parseArgs,
@@ -88,6 +89,32 @@ async function waitFor(
 		await new Promise((resolve) => setTimeout(resolve, intervalMs));
 	}
 }
+
+describe("formatUptime", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("formats seconds, minutes, hours, and days at each threshold", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+		const startedAt = (offsetMs: number) =>
+			new Date(Date.now() - offsetMs).toISOString();
+
+		expect(formatUptime(startedAt(5_000))).toBe("5s");
+		expect(formatUptime(startedAt(65_000))).toBe("1m 5s");
+		expect(formatUptime(startedAt(2 * 3600_000 + 5 * 60_000))).toBe("2h 5m");
+		expect(formatUptime(startedAt(3 * 86_400_000 + 4 * 3600_000))).toBe(
+			"3d 4h",
+		);
+	});
+
+	it("never reports a negative uptime for a startedAt that's (implausibly) in the future", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+		expect(formatUptime(new Date(Date.now() + 5000).toISOString())).toBe("0s");
+	});
+});
 
 describe("parseArgs", () => {
 	it("defaults to braid.config.ts resolved against cwd", () => {
@@ -167,6 +194,11 @@ describe("parseArgs", () => {
 	it("defaults noWatch to false and parses --no-watch", () => {
 		expect(parseArgs(["start"], "/repo").noWatch).toBe(false);
 		expect(parseArgs(["start", "--no-watch"], "/repo").noWatch).toBe(true);
+	});
+
+	it("defaults json to false and parses --json", () => {
+		expect(parseArgs(["status"], "/repo").json).toBe(false);
+		expect(parseArgs(["status", "--json"], "/repo").json).toBe(true);
 	});
 });
 
@@ -490,6 +522,30 @@ describe("runCli", () => {
 		expect(await startPromise).toBe(0);
 		expect(existsSync(pidfilePath)).toBe(false);
 
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("status --json prints one JSON array of the same objects the daemon reports, not the human-readable text", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+		// A daemonized `start` resolves only after its own startup summary has printed (it fetches
+		// live status first) - awaited fully here (rather than just waiting for the pidfile to
+		// exist) so that printing doesn't race with this test's own logSpy.mockClear() below.
+		expect(await runCli(["start"], tmpDir)).toBe(0);
+
+		logSpy.mockClear();
+		expect(await runCli(["status", "--json"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledTimes(1);
+		const printed = JSON.parse(logSpy.mock.calls[0][0] as string);
+		expect(printed).toEqual([
+			expect.objectContaining({
+				name: "solo",
+				alive: true,
+				restartCount: 0,
+			}),
+		]);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
 		logSpy.mockRestore();
 	}, 10000);
 
@@ -912,7 +968,7 @@ describe("runCli", () => {
 		dummy.kill();
 	});
 
-	it("prints the daemon's pid on a successful start and leaves a daemon.log behind", async () => {
+	it("prints the daemon's pid and a per-process summary on a successful start, and leaves a daemon.log behind", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
 
@@ -921,8 +977,14 @@ describe("runCli", () => {
 		expect(
 			logSpy.mock.calls.some((call) => {
 				const text = String(call[0]);
-				return text.includes("[braid]") && /started \(pid \d+\)/.test(text);
+				return (
+					text.includes("[braid]") &&
+					/\d+ process(es)? running \(pid \d+\)/.test(text)
+				);
 			}),
+		).toBe(true);
+		expect(
+			logSpy.mock.calls.some((call) => String(call[0]).includes("solo")),
 		).toBe(true);
 		expect(existsSync(join(tmpDir, ".braid", "daemon.log"))).toBe(true);
 
@@ -930,7 +992,47 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 10000);
 
-	it("relays a plugin's early ctx.log() line to this terminal when daemonized, before the started line", async () => {
+	it("includes a configured process's own url in the daemonized startup summary", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [{ name: "solo", command: "node", args: ["${fixture}"], url: "http://localhost:4000" }];\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		expect(await runCli(["start"], tmpDir)).toBe(0);
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("http://localhost:4000"),
+			),
+		).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("includes a configured process's own url in the foreground startup summary", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [{ name: "solo", command: "node", args: ["${fixture}"], url: "http://localhost:4000" }];\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+		const startPromise = runCli(["start", "--foreground"], tmpDir);
+		await waitFor(() =>
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("http://localhost:4000"),
+			),
+		);
+
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(await startPromise).toBe(0);
+		logSpy.mockRestore();
+	}, 10000);
+
+	it("relays a plugin's early ctx.log() line to this terminal when daemonized, after the summary table", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
 		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
@@ -953,12 +1055,15 @@ describe("runCli", () => {
 			const text = String(call[0]);
 			return text.includes("[plugin:ok]") && text.includes("registered");
 		});
-		const startedIndex = logSpy.mock.calls.findIndex((call) =>
-			/started \(pid \d+\)/.test(String(call[0])),
+		const summaryIndex = logSpy.mock.calls.findIndex((call) =>
+			/\d+ process(es)? running \(pid \d+\)/.test(String(call[0])),
 		);
 		expect(relayedIndex).toBeGreaterThanOrEqual(0);
-		expect(startedIndex).toBeGreaterThanOrEqual(0);
-		expect(relayedIndex).toBeLessThan(startedIndex);
+		expect(summaryIndex).toBeGreaterThanOrEqual(0);
+		// The relay arrives over IPC well before "ready" (see DaemonHandshakeMessage's own doc
+		// comment) - buffered and flushed only after the summary table, not printed as it arrives,
+		// so it doesn't appear before there's a table to put it after.
+		expect(relayedIndex).toBeGreaterThan(summaryIndex);
 
 		await stopFromPidfile(pidfilePath);
 		logSpy.mockRestore();
@@ -1029,7 +1134,10 @@ describe("runCli", () => {
 		expect(
 			logSpy.mock.calls.some((call) => {
 				const text = String(call[0]);
-				return text.includes("[braid]") && /started \(pid \d+\)/.test(text);
+				return (
+					text.includes("[braid]") &&
+					/\d+ process(es)? running \(pid \d+\)/.test(text)
+				);
 			}),
 		).toBe(true);
 
@@ -1206,6 +1314,41 @@ describe("runCli", () => {
 			// An unconfigured name 404s cleanly rather than streaming anything.
 			writeSpy.mockClear();
 			expect(await runCli(["logs", "nonexistent"], tmpDir)).toBe(1);
+
+			await stopFromPidfile(pidfilePath);
+			writeSpy.mockRestore();
+		}, 10000);
+
+		it("logs --json streams ndjson lines instead of the raw prefixed text", async () => {
+			const writeSpy = vi
+				.spyOn(process.stdout, "write")
+				.mockImplementation(() => true);
+			const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+			expect(await runCli(["start"], tmpDir)).toBe(0);
+			const logPath = join(tmpDir, ".braid", "logs", "solo.log");
+			await waitFor(
+				() => existsSync(logPath) && readFileSync(logPath, "utf8").length > 0,
+			);
+
+			expect(await runCli(["logs", "solo", "--json"], tmpDir)).toBe(0);
+			const written = writeSpy.mock.calls
+				.map((call) => Buffer.from(call[0]).toString())
+				.join("");
+			const parsed = written
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			expect(parsed.length).toBeGreaterThan(0);
+			for (const line of parsed) {
+				expect(line).toEqual({ name: "solo", text: expect.any(String) });
+				// The whole point: no ANSI escape bytes or "[name]" bracket left in a JSON field a
+				// script would parse - both already covered directly in logger.spec.ts, checked here
+				// too since this is the actual CLI flag a user/script would run. Built from a code
+				// point, not a literal \x1b, since biome's noControlCharactersInRegex rule (correctly)
+				// disallows a raw control character inside a regex literal.
+				expect(line.text.includes(String.fromCharCode(0x1b))).toBe(false);
+			}
 
 			await stopFromPidfile(pidfilePath);
 			writeSpy.mockRestore();

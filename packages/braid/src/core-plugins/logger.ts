@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 import { join } from "node:path";
 import SonicBoom from "sonic-boom";
 import { DEFAULT_LOG_MAX_SIZE_BYTES } from "../config.js";
+import { stripAnsi } from "../prefix.js";
 import type { BraidPlugin } from "../types.js";
 
 type LoggerOptions = { dir?: string; maxSizeBytes?: number };
@@ -27,7 +28,20 @@ type Destination = {
 	 * ordinary append (see the history route below for how a one-generation gap is reinterpreted).
 	 */
 	generation: number;
+	/** Buffers a chunk that might end mid-line, so a `json` follower only ever gets whole lines to
+	 *  frame - a raw stdout/stderr chunk from the OS pipe isn't guaranteed to align with the
+	 *  complete-line writes `linePrefixer` made on the sending side. Plain-text followers and the
+	 *  persisted file don't need this: they just relay/append bytes as they arrive, line boundaries
+	 *  irrelevant. Only ever updated while at least one `json` follower exists for this name (see
+	 *  the processOutput handler) - nothing is lost by not tracking it while nobody's watching that
+	 *  way, since a newly-connecting json follower only cares about lines from here on anyway. */
+	jsonPendingLine: string;
 };
+
+/** A live `/api/logs?follow=true` subscriber - `json` picked per-connection (via its own `?json=`
+ *  query param), so a plain-text and a `json` client watching the same process each get correctly
+ *  different framing from the same underlying output. */
+type Follower = { res: ServerResponse; json: boolean };
 
 /** Renames `filePath` to `${filePath}.1` if it exists, and reports whether it did. */
 function rotateFileIfExists(filePath: string): boolean {
@@ -93,9 +107,9 @@ export const loggerPlugin: BraidPlugin = {
 		mkdirSync(dir, { recursive: true });
 
 		const destinations = new Map<string, Destination>();
-		const followers = new Map<string, Set<ServerResponse>>();
+		const followers = new Map<string, Set<Follower>>();
 
-		function getFollowerSet(key: string): Set<ServerResponse> {
+		function getFollowerSet(key: string): Set<Follower> {
 			let set = followers.get(key);
 			if (!set) {
 				set = new Set();
@@ -104,16 +118,39 @@ export const loggerPlugin: BraidPlugin = {
 			return set;
 		}
 
-		function registerFollower(key: string, res: ServerResponse): void {
+		function registerFollower(key: string, follower: Follower): void {
 			const set = getFollowerSet(key);
-			set.add(res);
-			res.on("close", () => set.delete(res));
+			set.add(follower);
+			follower.res.on("close", () => set.delete(follower));
 			// istanbul ignore next -- symmetric cleanup for the same set entry 'close' above already
 			// removes; reliably forcing a real 'error' (as opposed to a client-initiated 'close', which
 			// is what an aborted fetch/dropped connection actually produces and is covered above)
 			// needs a genuinely broken socket, not something a test can construct deterministically
 			// without flaking.
-			res.on("error", () => set.delete(res));
+			follower.res.on("error", () => set.delete(follower));
+		}
+
+		/** All current followers of `name`, whether registered by that exact name or via the
+		 *  "every process interleaved" bucket. */
+		function followersFor(name: string): Follower[] {
+			return [
+				...(followers.get(name) ?? []),
+				...(followers.get(ALL_PROCESSES_KEY) ?? []),
+			];
+		}
+
+		/** Splits `chunk` on `destination`'s own pending-partial-line buffer, returning only the
+		 *  now-complete lines and carrying the trailing partial (if any) forward. */
+		function splitCompleteLines(
+			destination: Destination,
+			chunk: string,
+		): string[] {
+			const combined = destination.jsonPendingLine + chunk;
+			const parts = combined.split("\n");
+			// istanbul ignore next -- String.split always returns at least one element, so pop() here
+			// can never actually be undefined.
+			destination.jsonPendingLine = parts.pop() ?? "";
+			return parts;
 		}
 
 		// Created lazily on first output, not at register() time, since no process has forked yet.
@@ -143,6 +180,7 @@ export const loggerPlugin: BraidPlugin = {
 				bytesWritten: 0,
 				ended: false,
 				generation: rotated ? 1 : 0,
+				jsonPendingLine: "",
 			};
 			destinations.set(name, destination);
 			return destination;
@@ -162,7 +200,7 @@ export const loggerPlugin: BraidPlugin = {
 
 		const heartbeat = setInterval(() => {
 			for (const set of followers.values()) {
-				for (const res of set) res.write("");
+				for (const follower of set) follower.res.write("");
 			}
 		}, HEARTBEAT_INTERVAL_MS);
 		heartbeat.unref();
@@ -177,8 +215,22 @@ export const loggerPlugin: BraidPlugin = {
 			if (destination.bytesWritten >= maxSizeBytes) {
 				rotateNow(event.name);
 			}
-			for (const res of followers.get(event.name) ?? []) res.write(text);
-			for (const res of followers.get(ALL_PROCESSES_KEY) ?? []) res.write(text);
+
+			const relevant = followersFor(event.name);
+			// json followers all share one lazily-computed split of this same chunk, computed at
+			// most once regardless of how many json followers are watching - see splitCompleteLines.
+			let framedLines: string[] | undefined;
+			for (const follower of relevant) {
+				if (!follower.json) {
+					follower.res.write(text);
+					continue;
+				}
+				framedLines ??= splitCompleteLines(destination, text).map(
+					(line) =>
+						`${JSON.stringify({ name: event.name, text: stripAnsi(line) })}\n`,
+				);
+				for (const framed of framedLines) follower.res.write(framed);
+			}
 		});
 
 		ctx.on("processRestart", (event) => {
@@ -190,7 +242,7 @@ export const loggerPlugin: BraidPlugin = {
 		ctx.on("daemonShutdown", () => {
 			clearInterval(heartbeat);
 			for (const set of followers.values()) {
-				for (const res of set) res.end();
+				for (const follower of set) follower.res.end();
 				set.clear();
 			}
 			for (const destination of destinations.values()) {
@@ -213,12 +265,50 @@ export const loggerPlugin: BraidPlugin = {
 			const name = url.searchParams.get("name") || undefined;
 			const follow = url.searchParams.get("follow") === "true";
 			const lines = parseLines(url.searchParams);
+			const json = url.searchParams.get("json") === "true";
 			const key = name ?? ALL_PROCESSES_KEY;
 
 			if (name && !ctx.getProcesses().some((p) => p.name === name)) {
 				res
 					.writeHead(404, { "content-type": "text/plain" })
 					.end(`Unknown process "${name}"`);
+				return;
+			}
+
+			if (json) {
+				// Built from each destination's own lines (tagged with its real name) rather than
+				// concatenating raw file text and splitting afterwards, the way the plain-text branch
+				// below does - by the time text from multiple processes is joined into one string,
+				// which portion came from which process is already lost. Same (Map-insertion) process
+				// order as the plain-text branch for the no-name case - not chronologically
+				// interleaved there either, an existing property of this route, not a regression.
+				let jsonLines: Array<{ name: string; text: string }>;
+				if (name) {
+					const destination = destinations.get(name);
+					jsonLines = (
+						destination ? readLogLines(destination.filePath) : []
+					).map((line) => ({ name, text: stripAnsi(line) }));
+				} else {
+					jsonLines = [...destinations].flatMap(([destName, destination]) =>
+						readLogLines(destination.filePath).map((line) => ({
+							name: destName,
+							text: stripAnsi(line),
+						})),
+					);
+				}
+				if (lines !== undefined) jsonLines = jsonLines.slice(-lines);
+
+				res.writeHead(200, {
+					"content-type": "application/x-ndjson; charset=utf-8",
+				});
+				res.flushHeaders();
+				for (const line of jsonLines) res.write(`${JSON.stringify(line)}\n`);
+
+				if (follow) {
+					registerFollower(key, { res, json: true });
+				} else {
+					res.end();
+				}
 				return;
 			}
 
@@ -244,7 +334,7 @@ export const loggerPlugin: BraidPlugin = {
 			if (initial) res.write(initial);
 
 			if (follow) {
-				registerFollower(key, res);
+				registerFollower(key, { res, json: false });
 			} else {
 				res.end();
 			}
@@ -260,6 +350,7 @@ export const loggerPlugin: BraidPlugin = {
 			const name = url.searchParams.get("name");
 			const pageSize =
 				parseLines(url.searchParams) ?? DEFAULT_HISTORY_PAGE_LINES;
+			const json = url.searchParams.get("json") === "true";
 
 			if (!name || !ctx.getProcesses().some((p) => p.name === name)) {
 				res
@@ -272,7 +363,10 @@ export const loggerPlugin: BraidPlugin = {
 				res.writeHead(200, { "content-type": "application/json" });
 				res.end(
 					JSON.stringify({
-						lines,
+						// `json` here only means "clean, ANSI-free text for a scripting consumer" - this
+						// route is already always JSON, and already scoped to one `name`, so there's no
+						// per-line name to attach the way the interleaved /api/logs route needs.
+						lines: json ? lines.map(stripAnsi) : lines,
 						cursor: cursor ? encodeCursor(cursor) : null,
 					}),
 				);

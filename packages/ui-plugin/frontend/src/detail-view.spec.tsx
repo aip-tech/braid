@@ -13,6 +13,7 @@ function makeProcess(overrides: Partial<ProcessStatus> = {}): ProcessStatus {
 		startedAt: new Date(0).toISOString(),
 		cpu: 1.2,
 		memory: 2 * 1024 * 1024,
+		restartCount: 0,
 		...overrides,
 	};
 }
@@ -97,6 +98,58 @@ describe("DetailView", () => {
 			"unknown",
 		);
 		expect(container.querySelector(".badge-pid")?.textContent).toBe("-");
+		expect(container.querySelector(".detail-meta")?.textContent).toContain(
+			"Restarts -",
+		);
+		expect(container.querySelector(".detail-meta")?.textContent).toContain(
+			"Uptime -",
+		);
+	});
+
+	it("shows the restart count and a formatted uptime for a running process", () => {
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({
+						alive: true,
+						restartCount: 4,
+						startedAt: new Date(Date.now() - 5000).toISOString(),
+					})}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const meta = container.querySelector(".detail-meta")?.textContent ?? "";
+		expect(meta).toContain("Restarts 4");
+		expect(meta).toMatch(/Uptime \ds/);
+	});
+
+	it("shows an em-dash for uptime while the process is stopped, even though restartCount is known", () => {
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({ alive: false, restartCount: 2 })}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const meta = container.querySelector(".detail-meta")?.textContent ?? "";
+		expect(meta).toContain("Restarts 2");
+		expect(meta).toContain("Uptime -");
 	});
 
 	it('shows a blank status badge instead of "unknown" while the first status fetch is still in flight', () => {
@@ -155,6 +208,27 @@ describe("DetailView", () => {
 		expect(container.querySelector(".charts")).not.toBeNull();
 		expect(container.querySelector(".chart-value")?.textContent).toBe(
 			formattedLastCpu(),
+		);
+	});
+
+	it('shows "-" for restarts when talking to a pre-0.9.5 daemon that doesn\'t send restartCount', () => {
+		act(() =>
+			render(
+				<DetailView
+					name="api"
+					process={makeProcess({ restartCount: undefined })}
+					statusLoaded={true}
+					history={[]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		expect(container.querySelector(".detail-meta")?.textContent).toContain(
+			"Restarts -",
 		);
 	});
 

@@ -66,18 +66,28 @@ describe("startDaemon", () => {
 	it("resolves ok with the child's pid on a ready handshake, and disconnects + unrefs it", async () => {
 		const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
 		send({ type: "ready" });
-		await expect(promise).resolves.toEqual({ ok: true, pid: 4242 });
+		await expect(promise).resolves.toEqual({
+			ok: true,
+			pid: 4242,
+			logLines: [],
+		});
 		expect(child.disconnect).toHaveBeenCalledTimes(1);
 		expect(child.unref).toHaveBeenCalledTimes(1);
 	});
 
-	it("relays a 'log' handshake message via console.log without settling the race", async () => {
+	it("buffers a 'log' handshake message instead of printing it immediately, without settling the race", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
 		send({ type: "log", message: "hello from a plugin" });
-		expect(logSpy).toHaveBeenCalledWith("hello from a plugin");
+		// Buffered, not printed as it arrives - the caller (cli.ts's runStartCommand) flushes
+		// `logLines` itself, only after it has printed the startup summary table.
+		expect(logSpy).not.toHaveBeenCalled();
 		send({ type: "ready" });
-		await expect(promise).resolves.toEqual({ ok: true, pid: 4242 });
+		await expect(promise).resolves.toEqual({
+			ok: true,
+			pid: 4242,
+			logLines: ["hello from a plugin"],
+		});
 		logSpy.mockRestore();
 	});
 

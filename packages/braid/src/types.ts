@@ -146,6 +146,11 @@ export type ProcessConfig = {
 	 * matching file change retries the whole cycle rather than requiring a manual restart.
 	 */
 	beforeRestart?: RestartHook;
+	/**
+	 * Purely informational - shown in the startup summary and status output as
+	 * `http://<host>:<port>`. braid never verifies the process is actually listening here.
+	 */
+	url?: string;
 };
 
 /** `source` tags braid's own worker->manager IPC protocol, distinct from any other message shape. */
@@ -296,6 +301,11 @@ export type PluginContext = {
 		cpu?: number;
 		/** RSS in bytes, sampled every `statsPollIntervalMs`. Absent until the first sample. */
 		memory?: number;
+		/** Total completed restarts (watch-triggered, `autoRestart`, manual, or `dependsOn`-cascaded)
+		 *  since this daemon started - 0, not absent, for a process that hasn't restarted. */
+		restartCount: number;
+		/** This process's own `ProcessConfig.url`, if it set one. Purely informational. */
+		url?: string;
 	}>;
 	/**
 	 * Stops one named process. Available to any plugin, not just core - a plugin can stop/restart

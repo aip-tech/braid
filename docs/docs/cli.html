@@ -60,6 +60,13 @@ braid start --daemon</code></pre>
 						reachable, and is a safe no-op if the process is already running.
 					</p>
 					<pre><code class="language-bash">braid start cron</code></pre>
+					<p>
+						Once every process has forked, prints a one-time summary: a header
+						counting how many are actually alive, and one line per process with its
+						alive marker, <a href="./config.html#startup-summary"><code>url</code></a>
+						(if set), and pid. See <a href="./config.html#startup-summary">Startup
+						summary and <code>url</code></a>.
+					</p>
 				</section>
 
 				<section id="status">
@@ -67,9 +74,12 @@ braid start --daemon</code></pre>
 					<p>
 						Lists each configured process's name, PID, and state: running, stopped
 						(ran before, has since exited), or not started (an <code>autoStart:
-						false</code> process nobody's started yet in this daemon's lifetime).
+						false</code> process nobody's started yet in this daemon's lifetime) &mdash;
+						along with its restart count and uptime once it's sampled either. See
+						<a href="./config.html#stats">Process stats, restart count, and uptime</a>.
 					</p>
-					<pre><code class="language-bash">braid status</code></pre>
+					<pre><code class="language-bash">braid status
+braid status --json    # one JSON array of the same status objects, for scripting/CI</code></pre>
 				</section>
 
 				<section id="logs">
@@ -78,7 +88,12 @@ braid start --daemon</code></pre>
 					<pre><code class="language-bash">braid logs                    # every process, interleaved
 braid logs api                # just "api"
 braid logs api --follow       # keep streaming new output
-braid logs api --lines 50     # only the last 50 lines</code></pre>
+braid logs api --lines 50     # only the last 50 lines
+braid logs api --json         # newline-delimited JSON, ANSI stripped</code></pre>
+					<p>
+						See <a href="./config.html#json-output">Machine-readable output</a> for
+						the exact shape <code>--json</code> streams.
+					</p>
 				</section>
 
 				<section id="stop">
@@ -119,6 +134,7 @@ braid logs api --lines 50     # only the last 50 lines</code></pre>
 						<li><code>--no-watch</code> &mdash; <code>start</code> only; ignore every process's <code>watch</code>/<code>beforeRestart</code> for this run.</li>
 						<li><code>--follow</code> &mdash; <code>logs</code> only; keep the connection open and stream new output as it arrives.</li>
 						<li><code>--lines &lt;n&gt;</code> &mdash; <code>logs</code> only; only print the last <code>n</code> lines.</li>
+						<li><code>--json</code> &mdash; <code>status</code>/<code>logs</code> only; machine-readable output instead of the default human-readable text.</li>
 					</ul>
 				</section>
 			</main>

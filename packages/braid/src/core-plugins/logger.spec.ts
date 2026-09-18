@@ -8,12 +8,19 @@ import { createPluginContextFactory } from "../plugin-runtime.js";
 import { loggerPlugin } from "./logger.js";
 
 const WORKERS = [
-	{ name: "web", pid: 111, alive: true, startedAt: new Date(0).toISOString() },
+	{
+		name: "web",
+		pid: 111,
+		alive: true,
+		startedAt: new Date(0).toISOString(),
+		restartCount: 0,
+	},
 	{
 		name: "worker",
 		pid: 222,
 		alive: true,
 		startedAt: new Date(0).toISOString(),
+		restartCount: 0,
 	},
 ];
 
@@ -61,7 +68,12 @@ type HistoryResponse = { lines: string[]; cursor: string | null };
 
 async function fetchHistory(
 	h: Awaited<ReturnType<typeof createHarness>>,
-	params: { name: string; lines?: number; before?: string | null },
+	params: {
+		name: string;
+		lines?: number;
+		before?: string | null;
+		json?: boolean;
+	},
 ): Promise<{ status: number; body: HistoryResponse | undefined }> {
 	const url = new URL(`http://127.0.0.1:${h.port}/api/logs/history`);
 	url.searchParams.set("name", params.name);
@@ -69,6 +81,7 @@ async function fetchHistory(
 		url.searchParams.set("lines", String(params.lines));
 	}
 	if (params.before) url.searchParams.set("before", params.before);
+	if (params.json) url.searchParams.set("json", "true");
 	const res = await fetch(url, {
 		headers: { Authorization: `Bearer ${h.token}` },
 	});
@@ -407,6 +420,147 @@ describe("core:logger plugin", () => {
 				vi.useRealTimers();
 			}
 		});
+
+		describe("?json=true", () => {
+			it("returns one ndjson line per log line, ANSI stripped, for a known process", async () => {
+				const h = await createHarness();
+				emitOutput(h.emitter, "web", "\x1b[34m[web]\x1b[0m one\nplain two\n");
+				const res = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&json=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				expect(res.headers.get("content-type")).toContain(
+					"application/x-ndjson",
+				);
+				const body = await res.text();
+				expect(
+					body
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line)),
+				).toEqual([
+					{ name: "web", text: "[web] one" },
+					{ name: "web", text: "plain two" },
+				]);
+				await h.cleanup();
+			});
+
+			it("honors ?lines= against the ndjson output the same as the plain-text route", async () => {
+				const h = await createHarness();
+				emitOutput(h.emitter, "web", "one\ntwo\nthree\nfour\n");
+				const res = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&json=true&lines=2`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const lines = (await res.text())
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(lines).toEqual([
+					{ name: "web", text: "three" },
+					{ name: "web", text: "four" },
+				]);
+				await h.cleanup();
+			});
+
+			it("tags each line with its own process's real name when interleaving (no ?name= given)", async () => {
+				const h = await createHarness();
+				emitOutput(h.emitter, "web", "a\n");
+				emitOutput(h.emitter, "worker", "b\n");
+				const res = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?json=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const lines = (await res.text())
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(lines).toContainEqual({ name: "web", text: "a" });
+				expect(lines).toContainEqual({ name: "worker", text: "b" });
+				await h.cleanup();
+			});
+
+			it("streams live output as framed, ANSI-stripped ndjson to a follow request", async () => {
+				const h = await createHarness();
+				const res = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&json=true&follow=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const reader = res.body?.getReader();
+				if (!reader) throw new Error("expected a readable response body");
+
+				emitOutput(h.emitter, "web", "\x1b[32mlive\x1b[0m line\n");
+				const { value } = await reader.read();
+				expect(
+					JSON.parse(Buffer.from(value ?? new Uint8Array()).toString()),
+				).toEqual({ name: "web", text: "live line" });
+
+				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				await h.cleanup();
+			});
+
+			it("buffers a line split across two chunks instead of framing it as two partial lines", async () => {
+				const h = await createHarness();
+				const res = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&json=true&follow=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const reader = res.body?.getReader();
+				if (!reader) throw new Error("expected a readable response body");
+
+				// Two chunks, neither a complete line on its own - the split must wait for the "\n".
+				emitOutput(h.emitter, "web", "partial-");
+				emitOutput(h.emitter, "web", "line\nsecond\n");
+				const chunk = Buffer.from(
+					(await reader.read()).value ?? new Uint8Array(),
+				).toString();
+				const lines = chunk
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(lines).toEqual([
+					{ name: "web", text: "partial-line" },
+					{ name: "web", text: "second" },
+				]);
+
+				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				await h.cleanup();
+			});
+
+			it("gives a plain-text follower raw bytes and a json follower framed lines from the same event", async () => {
+				const h = await createHarness();
+				const plainRes = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&follow=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const jsonRes = await fetch(
+					`http://127.0.0.1:${h.port}/api/logs?name=web&json=true&follow=true`,
+					{ headers: { Authorization: `Bearer ${h.token}` } },
+				);
+				const plainReader = plainRes.body?.getReader();
+				const jsonReader = jsonRes.body?.getReader();
+				if (!plainReader || !jsonReader) {
+					throw new Error("expected readable response bodies");
+				}
+
+				emitOutput(h.emitter, "web", "shared\n");
+				const [plainChunk, jsonChunk] = await Promise.all([
+					plainReader.read(),
+					jsonReader.read(),
+				]);
+				expect(
+					Buffer.from(plainChunk.value ?? new Uint8Array()).toString(),
+				).toBe("shared\n");
+				expect(
+					JSON.parse(
+						Buffer.from(jsonChunk.value ?? new Uint8Array()).toString(),
+					),
+				).toEqual({ name: "web", text: "shared" });
+
+				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				await h.cleanup();
+			});
+		});
 	});
 
 	describe("GET /api/logs/history", () => {
@@ -443,6 +597,14 @@ describe("core:logger plugin", () => {
 			emitOutput(h.emitter, "web", "one\ntwo\nthree");
 			const { body } = await fetchHistory(h, { name: "web", lines: 2 });
 			expect(body?.lines).toEqual(["two", "three"]);
+			await h.cleanup();
+		});
+
+		it("strips ANSI codes from each line when ?json=true, keeping the same {lines,cursor} shape", async () => {
+			const h = await createHarness();
+			emitOutput(h.emitter, "web", "\x1b[34m[web]\x1b[0m one\nplain two\n");
+			const { body } = await fetchHistory(h, { name: "web", json: true });
+			expect(body?.lines).toEqual(["[web] one", "plain two"]);
 			await h.cleanup();
 		});
 

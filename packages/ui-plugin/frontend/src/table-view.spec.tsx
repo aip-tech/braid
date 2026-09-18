@@ -13,6 +13,7 @@ function makeProcess(overrides: Partial<ProcessStatus> = {}): ProcessStatus {
 		startedAt: new Date(0).toISOString(),
 		cpu: 1.2,
 		memory: 2 * 1024 * 1024,
+		restartCount: 0,
 		...overrides,
 	};
 }
@@ -212,6 +213,63 @@ describe("TableView", () => {
 		expect(container.querySelector(".btn-restart")?.textContent).toContain(
 			"...",
 		);
+	});
+
+	it("shows the restart count, and an em-dash for uptime while stopped", () => {
+		act(() =>
+			render(
+				<TableView
+					processes={[makeProcess({ alive: false, restartCount: 3 })]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const statCells = container.querySelectorAll(".stat-cell");
+		expect(statCells[2]?.textContent).toBe("3");
+		expect(statCells[3]?.textContent).toBe("–");
+	});
+
+	it("shows a formatted uptime for a running process", () => {
+		act(() =>
+			render(
+				<TableView
+					processes={[
+						makeProcess({
+							alive: true,
+							startedAt: new Date(Date.now() - 5000).toISOString(),
+						}),
+					]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const statCells = container.querySelectorAll(".stat-cell");
+		expect(statCells[3]?.textContent).toMatch(/^\ds$/);
+	});
+
+	it("shows an em-dash for restarts (not undefined/0) when talking to a pre-0.9.5 daemon that doesn't send it", () => {
+		act(() =>
+			render(
+				<TableView
+					processes={[makeProcess({ restartCount: undefined })]}
+					pending={new Set()}
+					rowErrors={new Map()}
+					onAction={() => {}}
+				/>,
+				container,
+			),
+		);
+
+		const statCells = container.querySelectorAll(".stat-cell");
+		expect(statCells[2]?.textContent).toBe("–");
 	});
 
 	it("calls onAction with the action and process name when a button is clicked", () => {

@@ -83,11 +83,11 @@
 					<h2>What it shows</h2>
 					<p>
 						Every configured process's name, pid, running/stopped/not-started
-						status, CPU (percent of one core) and memory (RSS), and start time,
-						polling every 2 seconds &mdash; the same data <code>braid status</code>
-						prints. CPU/memory need <code>@aip-tech/braid</code>
-						<code>&gt;=0.5.0</code>; on an older version those two columns
-						just show as empty. Stop and Restart buttons per process, backed by
+						status, CPU (percent of one core) and memory (RSS), restart count,
+						uptime, and start time, polling every 2 seconds &mdash; the same data
+						<code>braid status</code> prints. CPU/memory need <code>@aip-tech/braid</code>
+						<code>&gt;=0.5.0</code>; restart count/uptime need <code>&gt;=0.9.5</code>;
+						on an older version those columns just show as empty. Stop and Restart buttons per process, backed by
 						the same <code>braid stop &lt;name&gt;</code>/<code>restart
 						&lt;name&gt;</code> routes the CLI itself uses. A process configured
 						with <code>autoStart: false</code> that's never been started (needs

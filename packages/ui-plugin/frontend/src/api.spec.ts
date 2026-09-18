@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	fetchBraidVersion,
 	formatCpu,
 	formatMemory,
 	formatStarted,
+	formatUptime,
 	type HistorySample,
 	type ProcessStatus,
 	postAction,
@@ -18,6 +19,7 @@ function makeProcess(overrides: Partial<ProcessStatus> = {}): ProcessStatus {
 		startedAt: new Date(0).toISOString(),
 		cpu: 1,
 		memory: 1024,
+		restartCount: 0,
 		...overrides,
 	};
 }
@@ -54,6 +56,34 @@ describe("formatStarted", () => {
 
 	it("returns the raw string unchanged when it isn't a valid date", () => {
 		expect(formatStarted("not-a-date")).toBe("not-a-date");
+	});
+});
+
+describe("formatUptime", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-01-15T12:00:00.000Z"));
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("formats seconds, minutes, hours, and days at each threshold", () => {
+		const now = Date.now();
+		expect(formatUptime(new Date(now - 5 * 1000).toISOString())).toBe("5s");
+		expect(formatUptime(new Date(now - 65 * 1000).toISOString())).toBe("1m 5s");
+		expect(
+			formatUptime(new Date(now - (2 * 3600 + 5 * 60) * 1000).toISOString()),
+		).toBe("2h 5m");
+		expect(
+			formatUptime(new Date(now - (3 * 86400 + 4 * 3600) * 1000).toISOString()),
+		).toBe("3d 4h");
+	});
+
+	it("never reports a negative uptime for a startedAt that's (implausibly) in the future", () => {
+		const future = new Date(Date.now() + 5000).toISOString();
+		expect(formatUptime(future)).toBe("0s");
 	});
 });
 

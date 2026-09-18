@@ -35,7 +35,9 @@
 					<li><a href="#restarting-on-crash">Restarting on crash</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
-					<li><a href="#stats">Process stats</a></li>
+					<li><a href="#stats">Process stats, restart count, and uptime</a></li>
+					<li><a href="#startup-summary">Startup summary and <code>url</code></a></li>
+					<li><a href="#json-output">Machine-readable output</a></li>
 				</ul>
 
 				<section id="basics">
@@ -361,7 +363,7 @@ export default defineConfig({
 				</section>
 
 				<section id="stats">
-					<h2>Process stats</h2>
+					<h2>Process stats, restart count, and uptime</h2>
 					<p>
 						Each process's CPU (percent of one core) and memory (RSS) usage is
 						sampled on a timer via <a href="https://www.npmjs.com/package/pidusage"><code>pidusage</code></a>,
@@ -379,6 +381,65 @@ export default defineConfig({
 						A process that's stopped (or hasn't been sampled yet) simply has no
 						<code>cpu</code>/<code>memory</code> fields, rather than stale or zeroed
 						values.
+					</p>
+					<p>
+						The same status object also carries <code>restartCount</code>
+						&mdash; every completed restart since the daemon started (watch-triggered,
+						<code>autoRestart</code>, a manual <code>braid restart</code>, or a
+						<code>dependsOn</code> cascade), <code>0</code> rather than absent for a
+						process that's never restarted &mdash; and an <code>up Xh Ym</code>-style
+						uptime, computed from its <code>startedAt</code> timestamp. Both show up in
+						<code>braid status</code>'s text output and the dashboard's table/detail
+						views alongside CPU/memory.
+					</p>
+				</section>
+
+				<section id="startup-summary">
+					<h2>Startup summary and <code>url</code></h2>
+					<p>
+						Once every process has forked, <code>start</code> prints a one-time
+						summary &mdash; a header counting how many are actually alive, and one
+						line per configured process with its own alive marker, address (if it
+						set one), and pid:
+					</p>
+					<pre><code class="language-text">[braid] 3 processes running (pid 40213)
+  ● api      http://localhost:4000    pid 40214
+  ● web      http://localhost:5173    pid 40215
+  ● worker                            pid 40216</code></pre>
+					<p>
+						The address column comes from a process's own <code>url</code>, purely
+						informational &mdash; braid never verifies anything is actually
+						listening there, since there's no reliable, cross-platform way to detect
+						what a child process bound to without either it telling braid or
+						shelling out to something like <code>lsof</code> per-pid:
+					</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [
+		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], url: "http://localhost:4000" },
+	],
+});</code></pre>
+					<p>
+						This same summary prints in <code>--foreground</code> mode too, right
+						before the "Press Ctrl-C to stop" line. If <code>@aip-tech/braid-plugin-ui</code>
+						is configured, its own "open this URL" line prints right after the
+						summary, not before it.
+					</p>
+				</section>
+
+				<section id="json-output">
+					<h2>Machine-readable output</h2>
+					<p>
+						<code>braid status --json</code> and <code>braid logs [name] --json</code>
+						give the same data as their human-readable counterparts in a form meant
+						for scripting or CI, rather than a terminal:
+					</p>
+					<ul>
+						<li><code>status --json</code> prints one JSON array of the same status objects <code>GET /api/status</code> and the dashboard already use &mdash; no separate shape to learn.</li>
+						<li><code>logs [name] --json</code> streams newline-delimited JSON, one object per line: <code>{"name": "api", "text": "..."}</code>. ANSI color codes are stripped from <code>text</code>; the <code>[name]</code>/timestamp prefix itself is left in, since it's real, reconstructable text with no delimiter that reliably tells it apart from a process's own output that happens to look the same.</li>
+					</ul>
+					<p>
+						Both work with <code>--follow</code>/<code>--lines</code> exactly like the
+						default text output does, and with or without a specific process name.
 					</p>
 				</section>
 			</main>
