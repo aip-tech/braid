@@ -1732,18 +1732,25 @@ describe("runManager dependsOn", () => {
 		await triggerWatchedRestart(watchFile);
 
 		const clientLog = join(tmpDir, "logs", "client.log");
+		// Bumped from 10000/20000 - this test flaked on CI's shared/loaded runners with no source
+		// regression (confirmed via debug instrumentation: the hook's cwd resolves correctly and the
+		// full started->stopping->cwd->started sequence appears in well under 2s once the system
+		// isn't under load - see the identical, already-documented class of flake on the
+		// readyPattern describe block's "holds off a dependent's restart..." test, which needed its
+		// own margins widened more than once). Real subprocess spawn/watch-settle overhead just has
+		// less slack here than on a typical dev machine.
 		await waitFor(
 			() =>
 				existsSync(clientLog) &&
 				readFileSync(clientLog, "utf8").includes(workDir),
 			{
-				timeoutMs: 10000,
+				timeoutMs: 20000,
 			},
 		);
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
-	}, 15000);
+	}, 30000);
 
 	it("stops a dependent, runs its hook, and restarts it once its dependency restarts via a watch trigger", async () => {
 		const watchFile = join(tmpDir, "watch.trigger");
