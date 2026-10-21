@@ -70,8 +70,12 @@ describe("runWorker", () => {
 	let stdoutWrites: string[];
 	let stderrWrites: string[];
 	let sentMessages: unknown[];
+	// "app" messages (the app's pid, sent on every spawn) are recorded separately, so the many
+	// assertions below about the restart/started/crash protocol don't each have to skip over them.
+	let appMessages: unknown[];
 	let exitCalls: Array<number | undefined>;
 	let originalSend: typeof process.send;
+	let streamErrorListeners: Array<[NodeJS.WriteStream, unknown[]]>;
 
 	function lastChild(): FakeChild {
 		const call = spawnCalls.at(-1);
@@ -88,8 +92,13 @@ describe("runWorker", () => {
 		stdoutWrites = [];
 		stderrWrites = [];
 		sentMessages = [];
+		appMessages = [];
 		exitCalls = [];
 		originalSend = process.send;
+		streamErrorListeners = [
+			[process.stdout, process.stdout.listeners("error")],
+			[process.stderr, process.stderr.listeners("error")],
+		];
 		delete process.env.BRAID_LOG_TIMESTAMPS;
 		// mockImplementation() below only sets what a mock *does* - it doesn't reset .mock.calls, so
 		// without this, e.g. vi.mocked(watchFiles).mock.calls[0] would keep pointing at the very
@@ -133,7 +142,9 @@ describe("runWorker", () => {
 			return true;
 		});
 		process.send = ((message: unknown, callback?: () => void) => {
-			sentMessages.push(message);
+			if ((message as { type?: string }).type === "app")
+				appMessages.push(message);
+			else sentMessages.push(message);
 			callback?.();
 			return true;
 		}) as unknown as typeof process.send;
@@ -152,6 +163,16 @@ describe("runWorker", () => {
 		// MaxListenersExceededWarning) and a later test's process.emit("SIGTERM") would also fire
 		// every earlier test's now-stale listener.
 		process.removeAllListeners("SIGTERM");
+		process.removeAllListeners("SIGINT");
+		process.removeAllListeners("disconnect");
+		// Only the listeners runWorker itself added - the test runner may have its own on these.
+		for (const [stream, before] of streamErrorListeners) {
+			for (const listener of stream.listeners("error")) {
+				if (!before.includes(listener)) {
+					stream.off("error", listener as (...args: unknown[]) => void);
+				}
+			}
+		}
 	});
 
 	describe("a non-watched process", () => {
@@ -853,6 +874,173 @@ describe("runWorker", () => {
 			secondChild.emit("exit", 0);
 			await vi.advanceTimersByTimeAsync(0);
 			expect(exitCalls).toEqual([0]);
+		});
+	});
+	describe("app process group and spawn failures", () => {
+		it("spawns the app detached (its own process group) and reports its pid on every spawn", async () => {
+			runWorker({ name: "web", command: "node", watch: ["src"] });
+			expect(spawnCalls[0].options.detached).toBe(true);
+			expect(appMessages).toEqual([
+				{ source: "braid-worker", type: "app", pid: spawnCalls[0].child.pid },
+			]);
+
+			watcher.emit("all", "change", "src/a.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			lastChild().emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(appMessages).toHaveLength(2);
+			expect(appMessages[1]).toMatchObject({ pid: lastChild().pid });
+		});
+
+		it("doesn't report an app pid when spawn didn't produce one", () => {
+			vi.mocked(spawn).mockImplementationOnce(((command: string) => {
+				const child = Object.assign(makeFakeChild(0), { pid: undefined });
+				spawnCalls.push({
+					command,
+					args: [],
+					options: {},
+					child: child as never,
+				});
+				return child as unknown as ChildProcess;
+			}) as unknown as typeof spawn);
+			runWorker({ name: "web", command: "node" });
+			expect(appMessages).toEqual([]);
+		});
+
+		it("reports a spawn error (e.g. ENOENT) as a crash, prefixed into the process's own log, without retrying even with autoRestart", async () => {
+			runWorker({ name: "web", command: "not-a-binary", autoRestart: true });
+			lastChild().emit(
+				"error",
+				Object.assign(new Error("spawn not-a-binary ENOENT"), {
+					code: "ENOENT",
+				}),
+			);
+			await vi.advanceTimersByTimeAsync(10_000);
+
+			expect(stderrWrites.join("")).toContain(
+				'braid: failed to start "not-a-binary": spawn not-a-binary ENOENT',
+			);
+			expect(sentMessages).toEqual([
+				{ source: "braid-worker", type: "crash", code: null },
+			]);
+			expect(exitCalls).toEqual([1]);
+			expect(spawnCalls).toHaveLength(1);
+		});
+
+		it("handles only the first of an 'error' and a following 'exit' for the same spawn", async () => {
+			runWorker({ name: "web", command: "not-a-binary" });
+			lastChild().emit("error", new Error("spawn EACCES"));
+			lastChild().emit("exit", 1);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sentMessages).toHaveLength(1);
+			expect(exitCalls).toEqual([1]);
+		});
+
+		it("ignores an 'error' that follows an 'exit' for the same spawn", async () => {
+			runWorker({ name: "web", command: "node" });
+			lastChild().emit("exit", 0);
+			lastChild().emit("error", new Error("late"));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sentMessages).toEqual([]);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("goes idle after a spawn error while watched, rather than exiting", async () => {
+			runWorker({ name: "web", command: "not-a-binary", watch: ["src"] });
+			lastChild().emit("error", new Error("spawn ENOENT"));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(sentMessages).toEqual([
+				{ source: "braid-worker", type: "crash", code: null },
+			]);
+			expect(exitCalls).toEqual([]);
+		});
+	});
+
+	describe("losing the manager (IPC disconnect)", () => {
+		it("stops writing to the dead manager's pipes, kills the app, and exits once it's gone", async () => {
+			runWorker({ name: "web", command: "node" });
+			const app = lastChild();
+
+			process.emit("disconnect");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(treeKillCalls).toEqual([{ pid: app.pid, signal: "SIGTERM" }]);
+
+			app.stdout.emit("data", Buffer.from("written after the manager died\n"));
+			app.stderr.emit("data", Buffer.from("stderr after the manager died\n"));
+			expect(stdoutWrites.join("")).not.toContain("after the manager died");
+			expect(stderrWrites.join("")).not.toContain("after the manager died");
+
+			app.emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("doesn't listen for a disconnect when not forked with IPC", () => {
+			process.send = undefined;
+			runWorker({ name: "web", command: "node" });
+			expect(process.listenerCount("disconnect")).toBe(0);
+		});
+
+		it("survives an EPIPE on its own stdout/stderr (the manager's end of the pipe is gone)", () => {
+			runWorker({ name: "web", command: "node" });
+			const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+			expect(() => process.stdout.emit("error", epipe)).not.toThrow();
+			expect(() => process.stderr.emit("error", epipe)).not.toThrow();
+		});
+	});
+
+	describe("SIGINT (a terminal Ctrl-C in the foreground)", () => {
+		it("runs the same stop sequence as SIGTERM, and ignores a repeat", async () => {
+			runWorker({ name: "web", command: "node" });
+			const app = lastChild();
+
+			process.emit("SIGINT");
+			process.emit("SIGINT");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(treeKillCalls).toEqual([{ pid: app.pid, signal: "SIGTERM" }]);
+			expect(exitCalls).toEqual([]);
+
+			app.emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(exitCalls).toEqual([0]);
+		});
+	});
+
+	describe("fatal (an error nothing else in the worker caught)", () => {
+		it("SIGKILLs the app's whole process group, logs the error, and exits 1", () => {
+			const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+			const worker = runWorker({ name: "web", command: "node" });
+			const app = lastChild();
+
+			worker.fatal(new Error("worker bug"));
+
+			expect(killSpy).toHaveBeenCalledWith(-app.pid, "SIGKILL");
+			expect(stderrWrites.join("")).toContain(
+				"braid: worker internal error: Error: worker bug",
+			);
+			expect(exitCalls).toEqual([1]);
+		});
+
+		it("still exits when the group is already gone, there's no app, or the error isn't an Error", async () => {
+			vi.spyOn(process, "kill").mockImplementation(() => {
+				throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+			});
+			const worker = runWorker({ name: "web", command: "node" });
+			worker.fatal("a string");
+			expect(stderrWrites.join("")).toContain(
+				"braid: worker internal error: a string",
+			);
+
+			const idle = runWorker({ name: "idle", command: "node", watch: ["src"] });
+			lastChild().emit("exit", 0); // watched + clean exit: no app running now
+			await vi.advanceTimersByTimeAsync(0);
+			const noStack = new Error("no stack");
+			noStack.stack = undefined;
+			idle.fatal(noStack);
+			expect(stderrWrites.join("")).toContain(
+				"braid: worker internal error: no stack",
+			);
+			expect(exitCalls).toEqual([1, 1]);
 		});
 	});
 });

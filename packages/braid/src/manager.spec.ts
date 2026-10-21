@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -15,9 +16,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	findRunningPidfile,
 	runManager,
+	shutdownBudgetMs,
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
+import { sourceExecArgv } from "./module-path.js";
 import type { Pidfile, ProcessConfig } from "./types.js";
 
 // Lets one test simulate a delayed pidusage() *resolution* landing after a restart, to land the
@@ -3153,4 +3156,365 @@ describe("pidfile helpers with no pidfile present", () => {
 	it("stopFromPidfile returns an empty array and does not throw", async () => {
 		await expect(stopFromPidfile(missingPath)).resolves.toEqual([]);
 	});
+});
+
+describe("unexpected deaths: braid's own wrapper processes", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+	const leftoverPids: number[] = [];
+
+	/** The app's own pid, from the `started <pid>` line every fixture app prints first. */
+	function appPidFromLog(name: string): number | undefined {
+		const logPath = join(dirname(pidfilePath), "logs", `${name}.log`);
+		if (!existsSync(logPath)) return undefined;
+		const match = /started (\d+)/.exec(readFileSync(logPath, "utf8"));
+		return match ? Number(match[1]) : undefined;
+	}
+
+	async function waitForAppPid(name: string): Promise<number> {
+		await waitFor(() => appPidFromLog(name) !== undefined, { timeoutMs: 8000 });
+		const pid = appPidFromLog(name) as number;
+		leftoverPids.push(pid);
+		return pid;
+	}
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-unexpected-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		for (const pid of leftoverPids.splice(0)) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// already gone, as it should be
+			}
+		}
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("treats a command that can't be spawned as a crash, stopping the stack", async () => {
+		const stderr = vi.spyOn(process.stderr, "write");
+		const exit = runManager(
+			[
+				{ name: "bad", command: "definitely-not-a-binary-braid-test" },
+				{
+					name: "ok",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+					// Kept up long enough that the crash, not a clean finish, is what stops it.
+				},
+			],
+			pidfilePath,
+		);
+		expect(await exit).toBe(1);
+		expect(
+			stderr.mock.calls.some(([line]) =>
+				String(line).includes('"bad" crashed, stopping all processes'),
+			),
+		).toBe(true);
+		const badLog = readFileSync(
+			join(dirname(pidfilePath), "logs", "bad.log"),
+			"utf8",
+		);
+		expect(badLog).toContain(
+			'braid: failed to start "definitely-not-a-binary-braid-test"',
+		);
+		stderr.mockRestore();
+	}, 15000);
+
+	it("treats a worker that dies from its own internal error (no crash report) as a crash", async () => {
+		const stderr = vi.spyOn(process.stderr, "write");
+		const exit = runManager(
+			[
+				// Not an array - spawn() throws inside the worker itself, before it can report anything.
+				{ name: "broken", command: "node", args: "dev" as unknown as string[] },
+				{
+					name: "ok",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+				},
+			],
+			pidfilePath,
+		);
+		expect(await exit).toBe(1);
+		expect(
+			stderr.mock.calls.some(([line]) =>
+				String(line).includes('"broken" worker exited unexpectedly (code 1)'),
+			),
+		).toBe(true);
+		stderr.mockRestore();
+	}, 15000);
+
+	it("treats a SIGKILLed worker as a crash, and kills the app it left behind", async () => {
+		const exit = runManager(
+			[
+				{
+					name: "solo",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+				},
+			],
+			pidfilePath,
+		);
+		const appPid = await waitForAppPid("solo");
+		const [worker] = statusFromPidfile(pidfilePath);
+		process.kill(worker.pid, "SIGKILL");
+
+		expect(await exit).toBe(1);
+		await waitFor(() => !isPidAlive(appPid));
+	}, 15000);
+
+	it("doesn't treat a one-shot process's clean exit as a crash", async () => {
+		const exit = runManager(
+			[{ name: "once", command: "node", args: ["-e", "process.exit(0)"] }],
+			pidfilePath,
+		);
+		expect(await exit).toBe(0);
+	}, 15000);
+
+	describe("a manager that dies or is interrupted", () => {
+		const managers: ReturnType<typeof spawn>[] = [];
+
+		afterEach(() => {
+			for (const manager of managers.splice(0)) {
+				if (manager.exitCode === null && manager.signalCode === null) {
+					manager.kill("SIGKILL");
+				}
+			}
+		});
+
+		/** Runs runManager in a separate process group of its own, so tests can signal it (or its
+		 *  whole group) without hitting the test runner. */
+		function startManagerProcess(configs: ProcessConfig[]) {
+			const manager = spawn(
+				process.execPath,
+				[
+					...sourceExecArgv(import.meta.url),
+					join(FIXTURES, "run-manager.mjs"),
+					JSON.stringify(configs),
+					pidfilePath,
+				],
+				{ cwd: tmpDir, detached: true, stdio: ["ignore", "pipe", "pipe"] },
+			);
+			let stderr = "";
+			manager.stderr?.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString();
+			});
+			managers.push(manager);
+			const exited = new Promise<number | null>((resolve) =>
+				manager.once("exit", (code) => resolve(code)),
+			);
+			return { manager, exited, stderr: () => stderr };
+		}
+
+		it("stops a silent app when the manager is SIGKILLed", async () => {
+			const { manager, exited } = startManagerProcess([
+				{
+					name: "quiet",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+				},
+			]);
+			const appPid = await waitForAppPid("quiet");
+			manager.kill("SIGKILL");
+			await exited;
+			await waitFor(() => !isPidAlive(appPid), { timeoutMs: 8000 });
+		}, 20000);
+
+		it("stops a constantly-writing app when the manager is SIGKILLed (no EPIPE death first)", async () => {
+			const { manager, exited } = startManagerProcess([
+				{
+					name: "stream",
+					command: "node",
+					args: [join(FIXTURES, "stream-forever.js")],
+				},
+			]);
+			const appPid = await waitForAppPid("stream");
+			manager.kill("SIGKILL");
+			await exited;
+			await waitFor(() => !isPidAlive(appPid), { timeoutMs: 8000 });
+		}, 20000);
+
+		it("escalates to SIGKILL for an app that ignores SIGTERM when the manager is SIGKILLed", async () => {
+			const { manager, exited } = startManagerProcess([
+				{
+					name: "stubborn",
+					command: "node",
+					args: [join(FIXTURES, "stream-forever.js"), "trap-term"],
+					stopTimeoutMs: 500,
+				},
+			]);
+			const appPid = await waitForAppPid("stubborn");
+			manager.kill("SIGKILL");
+			await exited;
+			await waitFor(() => !isPidAlive(appPid), { timeoutMs: 8000 });
+		}, 20000);
+
+		it.skipIf(process.platform === "win32")(
+			"stops an app that ignores SIGINT on a foreground Ctrl-C, exiting cleanly with no crash reported",
+			async () => {
+				const { manager, exited, stderr } = startManagerProcess([
+					{
+						name: "trapint",
+						command: "sh",
+						args: [
+							"-c",
+							"trap '' INT; echo started $$; while true; do sleep 0.2; done",
+						],
+					},
+				]);
+				const appPid = await waitForAppPid("trapint");
+				// What a terminal does on Ctrl-C: SIGINT to the whole foreground process group.
+				process.kill(-(manager.pid as number), "SIGINT");
+				expect(await exited).toBe(0);
+				await waitFor(() => !isPidAlive(appPid), { timeoutMs: 8000 });
+				expect(stderr()).not.toContain("crashed");
+			},
+			20000,
+		);
+	});
+});
+
+describe("shutdownBudgetMs", () => {
+	it("covers the daemonShutdown window, the slowest single stop, and a margin", () => {
+		// 2000 (event window) + max(5000 hook default, 9000+2000 worker budget) + 2000
+		expect(
+			shutdownBudgetMs([
+				{ name: "a", command: "node" },
+				{ name: "b", command: "node", stopTimeoutMs: 9000 },
+			]),
+		).toBe(2000 + 11_000 + 2000);
+		// With only fast configs, a hook child's default 5000 still sets the floor... except every
+		// worker's own budget already includes its 2000 grace over the 5000 default.
+		expect(shutdownBudgetMs([{ name: "a", command: "node" }])).toBe(
+			2000 + 7000 + 2000,
+		);
+		expect(shutdownBudgetMs([])).toBe(2000 + 5000 + 2000);
+	});
+});
+
+describe("runManager: signal option and pidfile write failures", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-signal-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		if (existsSync(pidfilePath)) chmodSync(pidfilePath, 0o600);
+		await forceStopFromPidfile(pidfilePath);
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	const keepAlive = (name: string): ProcessConfig => ({
+		name,
+		command: "node",
+		args: [join(FIXTURES, "keep-alive.js")],
+	});
+
+	it("shuts down with code 1, stopping every process, when its signal aborts", async () => {
+		const controller = new AbortController();
+		const managerPromise = runManager([keepAlive("solo")], pidfilePath, {
+			signal: controller.signal,
+		});
+		await waitFor(() => existsSync(pidfilePath));
+		const [worker] = statusFromPidfile(pidfilePath);
+
+		controller.abort();
+
+		expect(await managerPromise).toBe(1);
+		expect(isPidAlive(worker.pid)).toBe(false);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 10000);
+
+	it("shuts straight down once started if its signal was already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		expect(
+			await runManager([keepAlive("solo")], pidfilePath, {
+				signal: controller.signal,
+			}),
+		).toBe(1);
+	}, 10000);
+
+	it("ignores a crash that lands after a shutdown has already started", async () => {
+		const stderr = vi.spyOn(process.stderr, "write");
+		const controller = new AbortController();
+		const managerPromise = runManager(
+			[
+				// Crashes ~500ms in: inside the shutdown below, which the plugin holds open for 1.5s
+				// before any process is asked to stop.
+				{
+					name: "late",
+					command: "node",
+					args: [join(FIXTURES, "exit-fail.js"), "500"],
+				},
+			],
+			pidfilePath,
+			{
+				plugins: [join(FIXTURES, "plugins", "slow-shutdown-plugin.js")],
+				configPath: join(tmpDir, "braid.config.ts"),
+				signal: controller.signal,
+			},
+		);
+		await waitFor(() => existsSync(pidfilePath));
+		controller.abort();
+
+		expect(await managerPromise).toBe(1);
+		expect(
+			stderr.mock.calls.some(([line]) =>
+				String(line).includes('"late" crashed, stopping all processes'),
+			),
+		).toBe(false);
+		stderr.mockRestore();
+	}, 15000);
+
+	it.skipIf(process.getuid?.() === 0)(
+		"keeps running when a later pidfile rewrite fails, logging it once until a write succeeds again",
+		async () => {
+			const stderr = vi.spyOn(process.stderr, "write");
+			const managerPromise = runManager([keepAlive("solo")], pidfilePath);
+			await waitFor(() => existsSync(pidfilePath));
+			const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile;
+			const restart = () =>
+				fetch(
+					`http://127.0.0.1:${pidfile.controlPort}/api/processes/restart?name=solo`,
+					{
+						method: "POST",
+						headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+					},
+				);
+			const failureLines = () =>
+				stderr.mock.calls.filter(([line]) =>
+					String(line).includes("couldn't update the pidfile"),
+				).length;
+
+			// Owner read-only: rewriting it now fails with EACCES.
+			chmodSync(pidfilePath, 0o400);
+			expect((await restart()).status).toBe(200);
+			expect((await restart()).status).toBe(200);
+			expect(failureLines()).toBe(1);
+
+			// Writable again: the next rewrite succeeds and re-arms the one-shot log.
+			chmodSync(pidfilePath, 0o600);
+			expect((await restart()).status).toBe(200);
+			chmodSync(pidfilePath, 0o400);
+			expect((await restart()).status).toBe(200);
+			expect(failureLines()).toBe(2);
+
+			// One more successful rewrite, so the pidfile names the live worker again - in-process,
+			// stopFromPidfile can only stop what the pidfile points at.
+			chmodSync(pidfilePath, 0o600);
+			expect((await restart()).status).toBe(200);
+			stderr.mockRestore();
+			await stopFromPidfile(pidfilePath);
+			await managerPromise;
+		},
+		20000,
+	);
 });

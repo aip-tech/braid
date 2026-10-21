@@ -131,22 +131,45 @@ async function runHookWithRetries(
 	return false;
 }
 
-export function runWorker(config: ProcessConfig): void {
+export type WorkerHandle = {
+	/**
+	 * Last-resort cleanup for an error nothing else caught inside this worker: SIGKILLs the app's
+	 * whole process group, reports the error, and exits 1. Without it, an uncaught exception here
+	 * would exit the worker and leave its app reparented to init, out of everyone's reach. Wired to
+	 * `uncaughtException`/`unhandledRejection` by the entrypoint at the bottom of this file, not by
+	 * runWorker itself, so an in-process caller (tests) isn't saddled with process-wide handlers.
+	 */
+	fatal(error: unknown): void;
+};
+
+export function runWorker(config: ProcessConfig): WorkerHandle {
 	// A separate env var rather than a field on ProcessConfig itself - it's a global logs setting
 	// (see RunManagerOptions.logs), not something an individual process's own config carries.
 	const timestamps = process.env.BRAID_LOG_TIMESTAMPS === "1";
+	// Cleared once the manager is gone (see the "disconnect" handler below): stdout/stderr are
+	// pipes to it, so every write after that point could only fail.
+	let outputOpen = true;
 	const stdoutPrefixer = linePrefixer(
-		(line) => process.stdout.write(line),
+		(line) => {
+			if (outputOpen) process.stdout.write(line);
+		},
 		config.name,
 		config.color,
 		timestamps,
 	);
 	const stderrPrefixer = linePrefixer(
-		(line) => process.stderr.write(line),
+		(line) => {
+			if (outputOpen) process.stderr.write(line);
+		},
 		config.name,
 		config.color,
 		timestamps,
 	);
+	// stdout/stderr are pipes to the manager. If it dies, the next write fails with EPIPE - which,
+	// unhandled, kills this worker before it can stop its app, orphaning it. Never fatal here.
+	const ignoreStreamError = (): void => {};
+	process.stdout.on("error", ignoreStreamError);
+	process.stderr.on("error", ignoreStreamError);
 	const watched = Boolean(config.watch && config.watch.length > 0);
 
 	let child: ChildProcess | null = null;
@@ -212,55 +235,84 @@ export function runWorker(config: ProcessConfig): void {
 
 	function spawnApp(): void {
 		lastSpawnAt = Date.now();
-		child = spawn(config.command, config.args ?? [], {
+		const spawned = spawn(config.command, config.args ?? [], {
 			env: { ...process.env, ...config.env },
+			// Its own process group: a terminal Ctrl-C (sent to the whole foreground group) then
+			// reaches only braid's processes, which stop the app in order, rather than racing them to
+			// it. It also gives the app a group id (its own pid) that can be killed in one call, with
+			// no process-tree walk, when this worker has to give up abruptly (see `fatal`).
+			detached: true,
 		});
+		child = spawned;
+		// Node can emit 'error' (a spawn failure: ENOENT, EACCES) and may or may not follow it with
+		// 'exit' - settled makes whichever arrives first the only one that counts.
+		let settled = false;
+		if (typeof spawned.pid === "number") {
+			send({ source: "braid-worker", type: "app", pid: spawned.pid }, () => {});
+		}
 		// Re-attached on every respawn, not just once - otherwise output after the first restart
 		// would silently stop reaching the logs.
-		child.stdout?.on("data", (chunk: Buffer) => stdoutPrefixer.write(chunk));
-		child.stderr?.on("data", (chunk: Buffer) => stderrPrefixer.write(chunk));
-		child.on("exit", (code) => {
-			stdoutPrefixer.flush();
-			stderrPrefixer.flush();
-			if (awaitingExit) {
-				const done = awaitingExit;
-				awaitingExit = undefined;
-				child = null;
-				done();
-				return;
-			}
-			if (code === 0) {
-				// Clean, unplanned exit - not a crash. For a non-watched config this exits the worker
-				// exactly as before; for a watched one, go idle until the next matching file change.
-				if (!watched) process.exit(0);
-				child = null;
-				return;
-			}
-			const minUptimeMs = config.minUptimeMs ?? DEFAULT_MIN_UPTIME_MS;
-			if (Date.now() - lastSpawnAt >= minUptimeMs) consecutiveCrashes = 0;
-			consecutiveCrashes++;
-			if (
-				config.autoRestart &&
-				consecutiveCrashes <= (config.maxRestarts ?? DEFAULT_MAX_RESTARTS)
-			) {
-				child = null;
-				scheduleAutoRestart(code);
-				return;
-			}
-			if (config.autoRestart) {
-				stderrPrefixer.write(
-					`braid: "${config.name}" crashed ${consecutiveCrashes} times within its uptime window, giving up\n`,
-				);
-			}
-			if (!watched) {
-				send({ source: "braid-worker", type: "crash", code }, () =>
-					process.exit(code ?? 1),
-				);
-			} else {
-				send({ source: "braid-worker", type: "crash", code }, () => {});
-				child = null;
-			}
+		spawned.stdout?.on("data", (chunk: Buffer) => stdoutPrefixer.write(chunk));
+		spawned.stderr?.on("data", (chunk: Buffer) => stderrPrefixer.write(chunk));
+		spawned.on("error", (error) => {
+			if (settled) return;
+			settled = true;
+			stderrPrefixer.write(
+				`braid: failed to start "${config.command}": ${error.message}\n`,
+			);
+			// Not retried via autoRestart: a missing or non-executable command fails identically
+			// every time, so backing off and retrying would only delay the report.
+			onAppExit(null, { retry: false });
 		});
+		spawned.on("exit", (code) => {
+			if (settled) return;
+			settled = true;
+			onAppExit(code, { retry: true });
+		});
+	}
+
+	function onAppExit(code: number | null, { retry }: { retry: boolean }): void {
+		stdoutPrefixer.flush();
+		stderrPrefixer.flush();
+		if (awaitingExit) {
+			const done = awaitingExit;
+			awaitingExit = undefined;
+			child = null;
+			done();
+			return;
+		}
+		if (code === 0) {
+			// Clean, unplanned exit - not a crash. For a non-watched config this exits the worker
+			// exactly as before; for a watched one, go idle until the next matching file change.
+			if (!watched) process.exit(0);
+			child = null;
+			return;
+		}
+		const minUptimeMs = config.minUptimeMs ?? DEFAULT_MIN_UPTIME_MS;
+		if (Date.now() - lastSpawnAt >= minUptimeMs) consecutiveCrashes = 0;
+		consecutiveCrashes++;
+		if (
+			retry &&
+			config.autoRestart &&
+			consecutiveCrashes <= (config.maxRestarts ?? DEFAULT_MAX_RESTARTS)
+		) {
+			child = null;
+			scheduleAutoRestart(code);
+			return;
+		}
+		if (retry && config.autoRestart) {
+			stderrPrefixer.write(
+				`braid: "${config.name}" crashed ${consecutiveCrashes} times within its uptime window, giving up\n`,
+			);
+		}
+		if (!watched) {
+			send({ source: "braid-worker", type: "crash", code }, () =>
+				process.exit(code ?? 1),
+			);
+		} else {
+			send({ source: "braid-worker", type: "crash", code }, () => {});
+			child = null;
+		}
 	}
 
 	spawnApp();
@@ -269,52 +321,65 @@ export function runWorker(config: ProcessConfig): void {
 	// (manager.ts's stopChild sends it there for every manager-initiated stop: a manual `braid
 	// stop`, a dependsOn cascade's respawn, or daemon shutdown) regardless of whether its own
 	// inner `child` app actually complied - leaving a `child` that ignores SIGTERM running forever,
-	// orphaned once this fork exits out from under it. This handler makes the fork's own exit
+	// orphaned once this fork exits out from under it. stopAndExit makes the fork's own exit
 	// (which manager.ts's stopChild waits on) actually mean "the inner app is confirmed dead too".
 	let stopping = false;
-	process.on("SIGTERM", () => {
-		if (stopping) return; // a second SIGTERM while already stopping - ignore, in progress
+	async function stopAndExit(): Promise<void> {
+		if (stopping) return; // a second signal while already stopping - ignore, in progress
 		stopping = true;
-		void (async () => {
-			if (pendingAutoRestartTimer) {
-				// Mid an autoRestart backoff wait - `restarting` is already true for this whole
-				// window (see scheduleAutoRestart), but nothing is actually running right now, so
-				// there's nothing to wait out or kill: cancel the pending retry immediately rather
-				// than sitting through the rest of it only to spawn a fresh instance and
-				// immediately kill that instead. Handled before `whenNotRestarting()` below - that
-				// call is only for an in-flight *watch-triggered* restart's own kill sequence,
-				// which genuinely is mid-flight and must be waited out, not cancelled out from
-				// under it.
-				clearTimeout(pendingAutoRestartTimer);
-				pendingAutoRestartTimer = undefined;
-				markRestartingDone();
-			} else {
-				// A watch-triggered restart already in flight owns `child`/`awaitingExit` right
-				// now - wait for it to finish rather than racing it for either.
-				await whenNotRestarting();
-				restarting = true; // claim it for our own kill below, so nothing else (a file
-				try {
-					// change, a fresh crash) can start a competing cycle meanwhile
-					if (child?.pid) {
-						const pid = child.pid;
-						const exited = new Promise<void>((resolveExit) => {
-							awaitingExit = resolveExit;
-						});
-						void killTree(pid, "SIGTERM");
-						const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
-						await escalateIfNotExited(pid, exited, timeoutMs, () =>
-							stderrPrefixer.write(
-								`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
-							),
-						);
-					}
-				} finally {
-					markRestartingDone();
+
+		if (pendingAutoRestartTimer) {
+			// Mid an autoRestart backoff wait - `restarting` is already true for this whole
+			// window (see scheduleAutoRestart), but nothing is actually running right now, so
+			// there's nothing to wait out or kill: cancel the pending retry immediately rather
+			// than sitting through the rest of it only to spawn a fresh instance and
+			// immediately kill that instead. Handled before `whenNotRestarting()` below - that
+			// call is only for an in-flight *watch-triggered* restart's own kill sequence,
+			// which genuinely is mid-flight and must be waited out, not cancelled out from
+			// under it.
+			clearTimeout(pendingAutoRestartTimer);
+			pendingAutoRestartTimer = undefined;
+			markRestartingDone();
+		} else {
+			// A watch-triggered restart already in flight owns `child`/`awaitingExit` right
+			// now - wait for it to finish rather than racing it for either.
+			await whenNotRestarting();
+			restarting = true; // claim it for our own kill below, so nothing else (a file
+			try {
+				// change, a fresh crash) can start a competing cycle meanwhile
+				if (child?.pid) {
+					const pid = child.pid;
+					const exited = new Promise<void>((resolveExit) => {
+						awaitingExit = resolveExit;
+					});
+					void killTree(pid, "SIGTERM");
+					const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+					await escalateIfNotExited(pid, exited, timeoutMs, () =>
+						stderrPrefixer.write(
+							`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+						),
+					);
 				}
+			} finally {
+				markRestartingDone();
 			}
-			process.exit(0);
-		})();
-	});
+		}
+		process.exit(0);
+	}
+	process.on("SIGTERM", () => void stopAndExit());
+	// In the foreground, a terminal Ctrl-C reaches this worker too (the manager stops it by SIGTERM
+	// regardless) - without a handler, the default disposition kills it on the spot, skipping the
+	// stop-the-app sequence above and orphaning an app that ignores SIGINT.
+	process.on("SIGINT", () => void stopAndExit());
+	if (process.send) {
+		// The IPC channel only closes under us if the manager itself is gone (a normal stop always
+		// SIGTERMs this worker, and waits on its exit, first) - stop the app rather than leave it
+		// running unsupervised, and stop writing to the now-dead manager's pipes.
+		process.on("disconnect", () => {
+			outputOpen = false;
+			void stopAndExit();
+		});
+	}
 
 	if (watched) {
 		// process.cwd() is already config.cwd-resolved (manager forks this worker with that cwd) -
@@ -397,10 +462,33 @@ export function runWorker(config: ProcessConfig): void {
 			);
 		});
 	}
+
+	return {
+		fatal(error) {
+			const pid = child?.pid;
+			if (typeof pid === "number") {
+				try {
+					// Negative pid: the app's whole process group (it was spawned detached), in one
+					// synchronous call - no async process-tree walk that this dying worker might not
+					// live to finish.
+					process.kill(-pid, "SIGKILL");
+				} catch {
+					// already gone
+				}
+			}
+			const message =
+				error instanceof Error ? (error.stack ?? error.message) : String(error);
+			stderrPrefixer.write(`braid: worker internal error: ${message}\n`);
+			stderrPrefixer.flush();
+			process.exit(1);
+		},
+	};
 }
 
 // Exercised via manager.spec.ts through a real forked process, not unit-tested directly.
 /* istanbul ignore next */
 if (process.env.BRAID_CONFIG) {
-	runWorker(loadConfig());
+	const worker = runWorker(loadConfig());
+	process.on("uncaughtException", worker.fatal);
+	process.on("unhandledRejection", worker.fatal);
 }

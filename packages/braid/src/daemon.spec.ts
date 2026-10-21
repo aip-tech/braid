@@ -5,6 +5,15 @@ import type { ProcessConfig } from "./types.js";
 const runManagerMock = vi.fn();
 vi.mock("./manager.js", () => ({
 	runManager: (...args: unknown[]) => runManagerMock(...args),
+	shutdownBudgetMs: () => 9000,
+}));
+// main() installs process-wide fatal handlers - real ones would outlive each test inside the test
+// runner's own process (and could even exit it via their watchdog), so they're stubbed here.
+// fatal-handlers.spec.ts covers them directly.
+const installFatalHandlersMock = vi.fn(() => () => {});
+vi.mock("./fatal-handlers.js", () => ({
+	installFatalHandlers: (...args: unknown[]) =>
+		installFatalHandlersMock(...(args as [])),
 }));
 
 // daemon.ts runs `main()` for real, at module load, if BRAID_DAEMON_INPUT happens to already be
@@ -21,8 +30,14 @@ describe("daemon.ts", () => {
 	const originalInput = process.env.BRAID_DAEMON_INPUT;
 	const originalSend = process.send;
 
+	const originalConnected = process.connected;
+
 	beforeEach(() => {
 		runManagerMock.mockReset();
+		installFatalHandlersMock.mockClear();
+		// `send` only attempts IPC while connected - pin it, rather than depending on whether the
+		// test runner's own worker happens to be IPC-connected.
+		process.connected = true;
 	});
 
 	afterEach(() => {
@@ -33,6 +48,7 @@ describe("daemon.ts", () => {
 			process.env.BRAID_DAEMON_INPUT = originalInput;
 		}
 		process.send = originalSend;
+		process.connected = originalConnected;
 		vi.restoreAllMocks();
 	});
 
@@ -67,14 +83,39 @@ describe("daemon.ts", () => {
 
 	describe("send", () => {
 		it("forwards the message to process.send when connected", () => {
+			process.connected = true;
 			const sendSpy = vi.fn(() => true);
 			process.send = sendSpy as unknown as typeof process.send;
 			send({ type: "ready" });
-			expect(sendSpy).toHaveBeenCalledWith({ type: "ready" });
+			expect(sendSpy).toHaveBeenCalledWith(
+				{ type: "ready" },
+				expect.any(Function),
+			);
 		});
 
 		it("does nothing (does not throw) when process.send is undefined", () => {
+			process.connected = true;
 			process.send = undefined;
+			expect(() => send({ type: "ready" })).not.toThrow();
+		});
+
+		it("does not attempt a send once the CLI has disconnected (e.g. after its startup timeout)", () => {
+			process.connected = false;
+			const sendSpy = vi.fn(() => true);
+			process.send = sendSpy as unknown as typeof process.send;
+			send({ type: "ready" });
+			expect(sendSpy).not.toHaveBeenCalled();
+		});
+
+		it("absorbs a send that loses the race with a disconnect instead of throwing", () => {
+			process.connected = true;
+			const sendSpy = vi.fn(
+				(_message: unknown, callback?: (e: Error) => void) => {
+					callback?.(new Error("ERR_IPC_CHANNEL_CLOSED"));
+					return false;
+				},
+			);
+			process.send = sendSpy as unknown as typeof process.send;
 			expect(() => send({ type: "ready" })).not.toThrow();
 		});
 	});
@@ -110,6 +151,14 @@ describe("daemon.ts", () => {
 				statsPollIntervalMs: input.statsPollIntervalMs,
 			});
 
+			// The fatal-error handlers abort exactly the signal runManager was given, with a watchdog
+			// sized from the stack's own shutdown budget (stubbed to 9000 above) plus margin.
+			expect(installFatalHandlersMock).toHaveBeenCalledTimes(1);
+			const [controller, watchdogMs] = installFatalHandlersMock.mock
+				.calls[0] as unknown as [AbortController, number];
+			expect(watchdogMs).toBe(14_000);
+			expect(options.signal).toBe(controller.signal);
+
 			// The exit code passed to process.exit() must be exactly what runManager resolved with,
 			// not a hardcoded 0 - this is what lets a crashed stack (see manager.ts's `shutdown`)
 			// propagate a non-zero exit code all the way out to whatever launched `braid start`.
@@ -119,7 +168,10 @@ describe("daemon.ts", () => {
 			// just plumbing through the parsed input) - calling it must send the "ready" handshake.
 			expect(sendSpy).not.toHaveBeenCalled();
 			options.onReady();
-			expect(sendSpy).toHaveBeenCalledWith({ type: "ready" });
+			expect(sendSpy).toHaveBeenCalledWith(
+				{ type: "ready" },
+				expect.any(Function),
+			);
 		});
 
 		it("passes undefined for every optional field a minimal input omits", async () => {
@@ -171,10 +223,10 @@ describe("daemon.ts", () => {
 			expect(writeSpy).toHaveBeenCalledWith(
 				`${braidTag()} daemon failed to start: config is bad\n`,
 			);
-			expect(sendSpy).toHaveBeenCalledWith({
-				type: "error",
-				message: "config is bad",
-			});
+			expect(sendSpy).toHaveBeenCalledWith(
+				{ type: "error", message: "config is bad" },
+				expect.any(Function),
+			);
 		});
 
 		it("stringifies a non-Error thrown value instead of rendering it as [object Object]", () => {
@@ -189,10 +241,10 @@ describe("daemon.ts", () => {
 			expect(writeSpy).toHaveBeenCalledWith(
 				`${braidTag()} daemon failed to start: just a string\n`,
 			);
-			expect(sendSpy).toHaveBeenCalledWith({
-				type: "error",
-				message: "just a string",
-			});
+			expect(sendSpy).toHaveBeenCalledWith(
+				{ type: "error", message: "just a string" },
+				expect.any(Function),
+			);
 		});
 
 		it("still reports (without throwing) when process.send is undefined", () => {

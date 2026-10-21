@@ -259,6 +259,26 @@ describe("createPluginContextFactory", () => {
 			expect(message.message).toContain("hello");
 		});
 
+		it("absorbs a send that loses the race with a disconnect (the error reaches its callback, not an 'error' event)", () => {
+			originalSend = process.send;
+			originalConnected = process.connected;
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			process.connected = true;
+			// What Node does when the channel closed between the `connected` check and the send:
+			// with a callback, ERR_IPC_CHANNEL_CLOSED is handed to it instead of being emitted.
+			const sendSpy = vi.fn(
+				(_message: unknown, callback?: (e: Error) => void) => {
+					callback?.(new Error("ERR_IPC_CHANNEL_CLOSED"));
+					return false;
+				},
+			);
+			process.send = sendSpy as unknown as typeof process.send;
+			const ctx = createPluginContextFactory(buildOptions())("my-plugin");
+
+			expect(() => ctx.log("hello")).not.toThrow();
+			expect(sendSpy.mock.calls[0]?.[1]).toBeTypeOf("function");
+		});
+
 		it("does not attempt IPC when not connected, even if process.send exists", () => {
 			originalSend = process.send;
 			originalConnected = process.connected;

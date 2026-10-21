@@ -16,7 +16,7 @@
 				<h1>Config</h1>
 				<p class="lede">
 					<code>braid.config.ts</code> default-exports a <code>{ processes, plugins?,
-					logs?, foreground?, statsPollIntervalMs? }</code> object (or a bare
+					logs?, foreground?, statsPollIntervalMs?, startupTimeoutMs? }</code> object (or a bare
 					<code>ProcessConfig[]</code>, treated the
 					same way). Full field list and defaults live in
 					<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/src/types.ts"><code>src/types.ts</code></a>.
@@ -35,6 +35,7 @@
 					<li><a href="#restarting-on-crash">Restarting on crash</a></li>
 					<li><a href="#logs">Logs</a></li>
 					<li><a href="#foreground">Foreground mode</a></li>
+					<li><a href="#startup-timeout">Startup timeout</a></li>
 					<li><a href="#stats">Process stats, restart count, and uptime</a></li>
 					<li><a href="#startup-summary">Startup summary and <code>url</code></a></li>
 					<li><a href="#json-output">Machine-readable output</a></li>
@@ -308,6 +309,19 @@ export default defineConfig({
 						heavy <code>onRestart</code> hook will re-run more than once if the
 						process keeps failing fast.
 					</p>
+					<p>
+						A <code>command</code> that can't be started at all (not found, not
+						executable) stops the stack straight away with a <code>failed to start</code>
+						line in that process's log &mdash; it isn't retried even with
+						<code>autoRestart</code>, since it would fail the same way every time.
+					</p>
+					<p>
+						Each process runs under a small braid wrapper process. If that wrapper is
+						killed from outside braid by anything other than a plain
+						<code>SIGTERM</code>/<code>SIGINT</code> (a <code>kill -9</code>, the OOM
+						killer), braid kills the app it was supervising and treats it as a crash
+						too, rather than leaving the app running unsupervised.
+					</p>
 				</section>
 
 				<section id="logs">
@@ -360,6 +374,29 @@ export default defineConfig({
 						Override this per invocation with <code>braid start --foreground</code> or
 						<code>braid start --daemon</code>, regardless of what the config says.
 					</p>
+					<p>
+						Each process runs in its own process group, so Ctrl-C reaches braid rather
+						than every app directly: braid then stops each one the same way it does in
+						daemon mode, with <code>SIGTERM</code> and a <code>SIGKILL</code> after
+						<code>stopTimeoutMs</code>. An app that ignores <code>SIGINT</code> no
+						longer outlives the stop.
+					</p>
+				</section>
+
+				<section id="startup-timeout">
+					<h2>Startup timeout</h2>
+					<p>
+						A daemonized <code>start</code> waits for the daemon to confirm that every
+						plugin has registered and every process has forked. If that takes longer
+						than <code>startupTimeoutMs</code>, <code>start</code> fails and stops the
+						daemon, rather than leaving it running in the background. Raise it if a
+						plugin's <code>register()</code> or a cold TypeScript compile is
+						legitimately slow:
+					</p>
+					<pre><code class="language-typescript">export default defineConfig({
+	processes: [ /* ... */ ],
+	startupTimeoutMs: 5000, // @default 5000
+});</code></pre>
 				</section>
 
 				<section id="stats">

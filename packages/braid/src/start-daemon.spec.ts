@@ -24,15 +24,21 @@ import { startDaemon } from "./cli.js";
 
 type FakeChild = EventEmitter & {
 	pid: number;
+	exitCode: number | null;
+	signalCode: NodeJS.Signals | null;
 	disconnect: () => void;
 	unref: () => void;
+	kill: (signal?: NodeJS.Signals) => boolean;
 };
 
 function makeFakeChild(pid: number): FakeChild {
 	return Object.assign(new EventEmitter(), {
 		pid,
+		exitCode: null,
+		signalCode: null,
 		disconnect: vi.fn(),
 		unref: vi.fn(),
+		kill: vi.fn(() => true),
 	});
 }
 
@@ -122,16 +128,84 @@ describe("startDaemon", () => {
 		);
 	});
 
-	it("times out with a clear message if the daemon never confirms startup", async () => {
+	it("times out with a clear message if the daemon never confirms startup, and stops it", async () => {
 		vi.useFakeTimers();
 		try {
 			const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
 			await vi.advanceTimersByTimeAsync(5000);
+			expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+			// Still waiting for the SIGTERMed daemon to actually exit before returning.
+			let settled = false;
+			void promise.then(() => {
+				settled = true;
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			expect(settled).toBe(false);
+			child.emit("exit", null, "SIGTERM");
 			const outcome = await promise;
 			expect(outcome.ok).toBe(false);
 			expect(!outcome.ok && outcome.message).toContain(
-				"did not confirm startup within 5000ms",
+				"did not confirm startup within 5000ms; stopped it",
 			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("honours the config's own startupTimeoutMs", async () => {
+		vi.useFakeTimers();
+		try {
+			const promise = startDaemon(
+				{ ...CONFIG, startupTimeoutMs: 20_000 },
+				configPath,
+				pidfilePath,
+				tmpDir,
+			);
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(child.kill).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+			child.emit("exit", null, "SIGTERM");
+			const outcome = await promise;
+			expect(!outcome.ok && outcome.message).toContain(
+				"did not confirm startup within 20000ms",
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("gives up waiting for a timed-out daemon that won't exit after a bounded wait", async () => {
+		vi.useFakeTimers();
+		try {
+			const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
+			await vi.advanceTimersByTimeAsync(5000 + 3000);
+			const outcome = await promise;
+			expect(outcome.ok).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("doesn't signal a timed-out daemon that has already exited, or throw if kill() itself fails", async () => {
+		vi.useFakeTimers();
+		try {
+			child.exitCode = 1;
+			const first = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
+			await vi.advanceTimersByTimeAsync(5000);
+			await first;
+			expect(child.kill).not.toHaveBeenCalled();
+
+			const second = makeFakeChild(4343);
+			second.kill = vi.fn(() => {
+				throw new Error("ESRCH");
+			});
+			vi.mocked(fork).mockReturnValue(
+				second as unknown as ReturnType<typeof fork>,
+			);
+			const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
+			await vi.advanceTimersByTimeAsync(5000 + 3000);
+			await expect(promise).resolves.toMatchObject({ ok: false });
 		} finally {
 			vi.useRealTimers();
 		}

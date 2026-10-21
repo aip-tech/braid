@@ -5,6 +5,58 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
+## [Unreleased]
+
+### Added
+
+- `startupTimeoutMs` config option: how long a daemonized `braid start`
+  waits for the daemon to confirm startup (default 5000, unchanged).
+
+### Changed
+
+- A daemon that doesn't confirm startup in time is now stopped, rather
+  than left running in the background with nobody knowing about it.
+  `start` waits (bounded) for it to exit before returning.
+- Each app now runs in its own process group. In the foreground, Ctrl-C
+  reaches braid rather than every app at once, and braid stops each app
+  the same way it does in daemon mode (SIGTERM, then SIGKILL after
+  `stopTimeoutMs`), instead of the app and its wrapper racing each other
+  to the terminal's SIGINT.
+- A per-process wrapper that dies without braid asking it to (a
+  `kill -9`, the OOM killer, an internal error) is now treated as a
+  crash: its app is killed and the stack stops. A wrapper that receives
+  a plain SIGTERM or SIGINT still stops its app cleanly, as before.
+- A `command` that can't be spawned (ENOENT, EACCES) is reported as a
+  crash straight away, with a "failed to start" line in that process's
+  own log, and is not retried by `autoRestart`.
+
+### Fixed
+
+- One malformed request could crash the daemon and orphan every process
+  it supervised: an absolute-form request target such as `http://[`
+  (rejected before auth), bad percent-encoding under a static prefix, a
+  static file that couldn't be read after its stat, a client resetting
+  an upgrade socket, or a plugin upgrade handler that threw or rejected.
+  These now get a 400, a closed connection, or a destroyed socket. A
+  route handler that throws after sending headers now has its
+  connection cut, rather than "Internal error" appended to a 200 body.
+- The daemon crashed with `ERR_IPC_CHANNEL_CLOSED` if it finished
+  booting after the CLI had stopped waiting for it, orphaning every
+  process. Handshake and `ctx.log` sends now check the channel and
+  absorb a disconnect that races the check.
+- When the manager died (crash, SIGKILL, a closed terminal), every app
+  kept running, unsupervised. Workers now stop their app when the
+  manager disappears, and survive the broken pipe (EPIPE) to it long
+  enough to do so.
+- A foreground Ctrl-C left behind any app that ignores SIGINT.
+- An error nothing else caught, in the daemon or a foreground `start`,
+  killed the process outright and orphaned everything. It's now logged
+  ("internal error, stopping all processes"), every process is stopped
+  in order, and a watchdog exits the process if that shutdown itself
+  can't finish. A failure to rewrite the pidfile after a restart (a
+  deleted `.braid`, a full disk) is logged once instead of escalating
+  into such an error; the first pidfile write still fails startup.
+
 ## [0.9.5] - 2026-09-18
 
 ### Added

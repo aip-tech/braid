@@ -161,6 +161,14 @@ export type WorkerStatusMessage =
 			/** The process has respawned after a watch-triggered restart - never fires at initial start. */
 			source: "braid-worker";
 			type: "started";
+	  }
+	| {
+			/** Sent on every spawn of the app (initial and each respawn), carrying its pid - which is
+			 *  also its process group id, since the worker spawns it detached. Lets the manager clean
+			 *  up an app whose worker died without getting the chance to (e.g. SIGKILLed). */
+			source: "braid-worker";
+			type: "app";
+			pid: number;
 	  };
 
 export type PidfileWorker = { name: string; pid: number; startedAt: string };
@@ -208,6 +216,13 @@ export type BraidConfig = {
 	 * process counts, but this is here to tune if it ever matters. @default 2000
 	 */
 	statsPollIntervalMs?: number;
+	/**
+	 * How long `braid start` waits for the background daemon to confirm it started (every plugin
+	 * registered, the control server listening, every process forked) before giving up and stopping
+	 * it. Raise this if a plugin's `register()` or a cold TypeScript compile is legitimately slow.
+	 * Ignored with `--foreground`. @default 5000
+	 */
+	startupTimeoutMs?: number;
 };
 
 /** Lifecycle events plugins can subscribe to via PluginContext.on(). */
