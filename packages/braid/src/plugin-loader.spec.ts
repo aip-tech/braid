@@ -21,6 +21,7 @@ function stubContext(): PluginContext {
 		stopProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		restartProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		startProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
+		shutdown: vi.fn(),
 		log: vi.fn(),
 	};
 }

@@ -11,6 +11,13 @@ version bump.
 
 - `startupTimeoutMs` config option: how long a daemonized `braid start`
   waits for the daemon to confirm startup (default 5000, unchanged).
+- `PluginContext.shutdown()` and a core `POST /api/shutdown` route: an
+  orderly shutdown of the whole stack, which is now what a bare
+  `braid stop` uses.
+- The pidfile records each process's exact identity on Linux
+  (`startId`, `managerStartId`) and the stack's stop budget
+  (`shutdownTimeoutMs`). Both are optional, so a pidfile from an older
+  braid still works.
 
 ### Changed
 
@@ -29,9 +36,50 @@ version bump.
 - A `command` that can't be spawned (ENOENT, EACCES) is reported as a
   crash straight away, with a "failed to start" line in that process's
   own log, and is not retried by `autoRestart`.
+- `braid stop` now asks the daemon to shut down and waits until every
+  process has actually stopped (printing "Stopping..." first), instead
+  of signalling pids and returning straight away. Past the stack's stop
+  budget, whatever is left is SIGKILLed. A crashed daemon's leftover
+  processes are still stopped directly.
+- Restarting a process that hasn't been started yet (still waiting on
+  `startAfter`, or `autoStart: false`) now starts it the way
+  `startProcess` does, without counting it as a restart or cascading to
+  `dependsOn` dependents.
+- The control server rejects a request whose `Host` isn't a loopback
+  name (421), and a non-GET request or an upgrade whose `Origin` doesn't
+  match the Host it was sent to (403). Only hostnames are compared, so
+  SSH tunnels and devcontainer port forwards keep working.
 
 ### Fixed
 
+- `braid stop && braid start` could lose the new daemon: the old one
+  deleted the pidfile when it finished stopping, by then the new one's,
+  leaving a running stack that `status` and `stop` couldn't see. A
+  manager now only ever removes its own pidfile.
+- `stop` and `status` trusted any live pid in a stale pidfile, so after
+  a reboot or a container restart `stop` could kill unrelated processes
+  that had reused those pids. Pids are now checked against the identity
+  recorded for them before anything is signalled.
+- Two `braid start`s at once could both start a full stack. A start
+  lock (`.braid/start.lock`), held from the start of boot, now lets only
+  one through. A second `start` is refused before it rotates the first
+  one's `daemon.log`.
+- A stop landing in the 100ms watch debounce window could hang the
+  worker and start a fresh copy of the app. A stop now cancels a pending
+  watch-triggered restart, and a restart already in flight finishes
+  its kill but doesn't respawn.
+- A stop during a failing `beforeRestart` hook kept retrying the hook,
+  then started the app only to kill it. The hook is now killed and not
+  retried.
+- A stop waiting on an app whose exit never arrives, even after SIGKILL,
+  no longer hangs forever.
+- Restarting a process still waiting on its `startAfter` chain started
+  a second, untracked copy that was never stopped, even at shutdown.
+- A normal `braid stop` could be reported as a crash, exiting 1, when an
+  app happened to exit before its wrapper noticed it was being stopped.
+  Stops now signal only the wrapper, which stops its app itself, and a
+  crash report from a process being stopped is ignored. A process that
+  has already exited is never signalled.
 - One malformed request could crash the daemon and orphan every process
   it supervised: an absolute-form request target such as `http://[`
   (rejected before auth), bad percent-encoding under a static prefix, a

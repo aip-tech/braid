@@ -5,6 +5,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -29,6 +30,12 @@ import {
 	type WorkerSnapshot,
 } from "./plugin-runtime.js";
 import { braidTag, linePrefixer } from "./prefix.js";
+import {
+	currentStartId,
+	liveRecordedPids,
+	type ProcessRecord,
+} from "./process-identity.js";
+import { acquireStartLock } from "./start-lock.js";
 import type {
 	BraidConfig,
 	Pidfile,
@@ -124,37 +131,44 @@ function killPid(
 	});
 }
 
-/** Resolves once `child` has actually exited (not just once a kill signal was sent). */
+/** Resolves once `child` - not yet exited - actually exits (not just once a kill signal was sent). */
 function waitForExit(child: ChildProcess): Promise<void> {
-	if (child.exitCode !== null || child.signalCode !== null) {
-		return Promise.resolve();
-	}
 	return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
 /**
- * Sends SIGTERM to `child`'s whole process tree and waits for it to actually exit, escalating to
- * SIGKILL after `timeoutMs` if it hasn't - without this, a process that traps/ignores SIGTERM (or
- * a wrapper script that doesn't forward it to its own children) would hang stop/restart/shutdown
- * forever, since `waitForExit` alone has no way to give up.
+ * Sends SIGTERM to `child` (its whole process tree, unless `tree: false`) and waits for it to
+ * actually exit, escalating to a tree-wide SIGKILL after `timeoutMs` if it hasn't - without this, a
+ * process that traps/ignores SIGTERM (or a wrapper script that doesn't forward it to its own
+ * children) would hang stop/restart/shutdown forever, since `waitForExit` alone has no way to give
+ * up.
+ *
+ * `tree: false` is for worker forks: the SIGTERM goes to the worker alone, which stops its own app
+ * in order. Signalling the app at the same moment would let it die before the worker knows it's
+ * being stopped, so the worker would report that exit as a crash.
+ *
+ * A child that has already exited is never signalled - its pid may already belong to something
+ * else.
  *
  * Exported so `manager-stop-child.spec.ts` can drive the SIGKILL-escalation branch directly, with
- * `tree-kill` mocked and a fake `child` that deliberately never emits `exit`: worker.ts (the real
- * `child` this is always called with in production) installs no `SIGTERM` handler of its own, so
- * the underlying Node process always dies from the signal's default disposition well within any
- * realistic `timeoutMs` - there's no way to make a *real* forked worker hang long enough to
- * observe this path from an end-to-end test.
+ * `tree-kill` mocked and a fake `child` that deliberately never emits `exit`.
  */
 export async function stopChild(
 	child: ChildProcess,
 	{
 		timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
 		label,
-	}: { timeoutMs?: number; label?: string } = {},
+		tree = true,
+	}: { timeoutMs?: number; label?: string; tree?: boolean } = {},
 ): Promise<void> {
 	if (typeof child.pid !== "number") return;
+	if (child.exitCode !== null || child.signalCode !== null) return;
 	const exited = waitForExit(child);
-	await killPid(child.pid, "SIGTERM");
+	if (tree) {
+		await killPid(child.pid, "SIGTERM");
+	} else {
+		child.kill("SIGTERM");
+	}
 	let timer: NodeJS.Timeout | undefined;
 	const timedOut = new Promise<boolean>((resolve) => {
 		timer = setTimeout(() => resolve(true), timeoutMs);
@@ -196,34 +210,145 @@ function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Returns the pidfile's contents, but only if at least one PID in it is still alive. */
+/** Every process a pidfile vouches for - the manager and each worker - as identity records. */
+function pidfileRecords(pidfile: Pidfile): ProcessRecord[] {
+	return [
+		{
+			pid: pidfile.managerPid,
+			startedAt: pidfile.startedAt,
+			startId: pidfile.managerStartId,
+		},
+		...pidfile.workers,
+	];
+}
+
+/** Returns the pidfile's contents, but only if at least one process in it is still the very one
+ *  recorded - a pid since reused by something unrelated doesn't count (see process-identity.ts). */
 export function findRunningPidfile(pidfilePath: string): Pidfile | undefined {
 	const pidfile = readPidfile(pidfilePath);
 	if (!pidfile) return undefined;
-	const anyAlive =
-		isAlive(pidfile.managerPid) ||
-		pidfile.workers.some((worker) => isAlive(worker.pid));
-	return anyAlive ? pidfile : undefined;
+	return liveRecordedPids(pidfileRecords(pidfile)).size > 0
+		? pidfile
+		: undefined;
 }
 
-/** Kills every process recorded in the pidfile (and their descendants), then removes it. */
+// How long stopFromPidfile gives a manager to accept POST /api/shutdown before signalling it.
+const SHUTDOWN_REQUEST_TIMEOUT_MS = 2000;
+// How long stopFromPidfile waits for an orderly stop when the pidfile doesn't say (braid <0.10).
+const DEFAULT_STOP_DEADLINE_MS = 15_000;
+const STOP_POLL_INTERVAL_MS = 50;
+
+/** Asks a running manager to shut itself down; true if it accepted. */
+async function requestShutdown(pidfile: Pidfile): Promise<boolean> {
+	try {
+		const response = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/shutdown`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+				signal: AbortSignal.timeout(SHUTDOWN_REQUEST_TIMEOUT_MS),
+			},
+		);
+		await response.body?.cancel();
+		// A braid <0.10 daemon has no such route (404) - treated like any other refusal.
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+/** Polls `done` until it holds or `deadline` (epoch ms) passes; resolves whether it held. */
+async function waitUntil(
+	done: () => boolean,
+	deadline: number,
+): Promise<boolean> {
+	while (!done()) {
+		if (Date.now() >= deadline) return false;
+		await delay(STOP_POLL_INTERVAL_MS);
+	}
+	return true;
+}
+
+/** Whether `pidfilePath` still holds the pidfile written by the same run as `pidfile`. */
+function isSamePidfile(pidfilePath: string, pidfile: Pidfile): boolean {
+	const current = readPidfile(pidfilePath);
+	return (
+		current?.managerPid === pidfile.managerPid &&
+		current.controlToken === pidfile.controlToken
+	);
+}
+
+/**
+ * Stops everything a pidfile records, and resolves only once it's actually stopped. Returns the
+ * names of the processes that were running.
+ *
+ * A live manager is asked to shut down (POST /api/shutdown, or SIGTERM if that's refused), so it
+ * stops its own processes in order, and removes its own pidfile; this then waits for it to finish,
+ * for up to the stop budget the pidfile records. Only past that deadline - or if the manager is
+ * already gone, leaving workers behind - are processes killed directly, and then only ones still
+ * verifiably the processes recorded, never whatever now holds a reused pid. Called from inside
+ * the manager's own process (an in-process `runManager`, as in tests), it waits for the workers
+ * and the pidfile instead of for its own pid.
+ *
+ * The pidfile is removed at the end only if it still belongs to the run that was stopped - a new
+ * `braid start` may already have written its own.
+ */
 export async function stopFromPidfile(pidfilePath: string): Promise<string[]> {
 	const pidfile = readPidfile(pidfilePath);
 	if (!pidfile) return [];
+	const live = liveRecordedPids(pidfileRecords(pidfile));
+	const liveWorkers = pidfile.workers.filter((worker) => live.has(worker.pid));
+	const inProcess = pidfile.managerPid === process.pid;
+	const managerLive = inProcess || live.has(pidfile.managerPid);
+	const deadline =
+		Date.now() + (pidfile.shutdownTimeoutMs ?? DEFAULT_STOP_DEADLINE_MS);
+	const workersGone = () => liveWorkers.every((worker) => !isAlive(worker.pid));
 
-	const stopped: string[] = [];
-	for (const worker of pidfile.workers) {
-		if (isAlive(worker.pid)) {
-			await killPid(worker.pid);
-			stopped.push(worker.name);
+	let stoppedInOrder = false;
+	let accepted = false;
+	if (managerLive) {
+		accepted = await requestShutdown(pidfile);
+		if (inProcess) {
+			stoppedInOrder =
+				accepted &&
+				(await waitUntil(
+					() => workersGone() && !isSamePidfile(pidfilePath, pidfile),
+					deadline,
+				));
+		} else {
+			if (!accepted) {
+				try {
+					process.kill(pidfile.managerPid, "SIGTERM");
+				} catch {
+					// exited in the meantime
+				}
+			}
+			stoppedInOrder = await waitUntil(
+				() => !isAlive(pidfile.managerPid),
+				deadline,
+			);
 		}
 	}
-	// Don't tree-kill our own PID if called from within the manager process itself.
-	if (pidfile.managerPid !== process.pid && isAlive(pidfile.managerPid)) {
-		await killPid(pidfile.managerPid);
+
+	if (!stoppedInOrder) {
+		// Nobody left to stop the workers in order (no manager, or an in-process one that couldn't
+		// be asked): SIGTERM them directly first, as the manager would have.
+		if (!managerLive || (inProcess && !accepted)) {
+			await Promise.all(liveWorkers.map((worker) => killPid(worker.pid)));
+			await waitUntil(workersGone, deadline);
+		}
+		// Whatever is still running past the deadline is SIGKILLed.
+		await Promise.all(
+			liveWorkers
+				.filter((worker) => isAlive(worker.pid))
+				.map((worker) => killPid(worker.pid, "SIGKILL")),
+		);
+		if (!inProcess && managerLive && isAlive(pidfile.managerPid)) {
+			await killPid(pidfile.managerPid, "SIGKILL");
+		}
 	}
-	rmSync(pidfilePath, { force: true });
-	return stopped;
+	if (isSamePidfile(pidfilePath, pidfile)) rmSync(pidfilePath, { force: true });
+	return liveWorkers.map((worker) => worker.name);
 }
 
 export function statusFromPidfile(
@@ -231,9 +356,10 @@ export function statusFromPidfile(
 ): Array<PidfileWorker & { alive: boolean }> {
 	const pidfile = readPidfile(pidfilePath);
 	if (!pidfile) return [];
+	const live = liveRecordedPids(pidfile.workers);
 	return pidfile.workers.map((worker) => ({
 		...worker,
-		alive: isAlive(worker.pid),
+		alive: live.has(worker.pid),
 	}));
 }
 
@@ -295,6 +421,9 @@ export async function runManager(
 	// explicitly rather than relying on it having been created with the right mode in the first place.
 	mkdirSync(dirname(pidfilePath), { recursive: true, mode: 0o700 });
 	chmodSync(dirname(pidfilePath), 0o700);
+	// Taken only now - after validation (a bad config never touches it) and once the directory is
+	// sure to exist - and released at the end of shutdown(), or straight away if startup fails.
+	const releaseStartLock = acquireStartLock(dirname(pidfilePath));
 	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
 
 	const children = new Map<string, ChildProcess>();
@@ -415,6 +544,7 @@ export async function runManager(
 				...(config.url ? { url: config.url } : {}),
 			};
 		});
+	let requestShutdownFromPlugin: (() => void) | undefined;
 	const contextFor = createPluginContextFactory({
 		controlServer,
 		getWorkers,
@@ -422,6 +552,15 @@ export async function runManager(
 		stopProcess: (name) => stopProcessByName(name),
 		restartProcess: (name) => restartProcessByName(name),
 		startProcess: (name) => startProcessByName(name),
+		// Late-bound: `shutdown` is only defined further down, after plugins have registered - a
+		// call from inside register() (before then) is logged and ignored rather than throwing.
+		shutdown: () => {
+			if (requestShutdownFromPlugin) requestShutdownFromPlugin();
+			else
+				process.stderr.write(
+					`${braidTag()} ignoring a plugin's shutdown() call during startup\n`,
+				);
+		},
 	});
 
 	// Options per core plugin, by name - not every core plugin needs config.
@@ -431,22 +570,31 @@ export async function runManager(
 			maxSizeBytes: options.logs?.maxSizeBytes,
 		},
 	};
-	for (const plugin of CORE_PLUGINS) {
-		await registerPlugin(
-			plugin,
-			contextFor(plugin.name),
-			corePluginOptions[plugin.name],
-		);
+	let controlPort: number;
+	try {
+		for (const plugin of CORE_PLUGINS) {
+			await registerPlugin(
+				plugin,
+				contextFor(plugin.name),
+				corePluginOptions[plugin.name],
+			);
+		}
+		if (options.plugins && options.plugins.length > 0) {
+			// options.configPath is guaranteed set here by the guard above.
+			await loadExternalPlugins(
+				options.plugins,
+				options.configPath as string,
+				contextFor,
+			);
+		}
+		({ port: controlPort } = await controlServer.listen());
+	} catch (error) {
+		// Nothing has forked yet: undo just the lock and the server, so a later start (or, in
+		// process, the next runManager) isn't blocked by a manager that never got going.
+		releaseStartLock();
+		await controlServer.close().catch(() => {});
+		throw error;
 	}
-	if (options.plugins && options.plugins.length > 0) {
-		// options.configPath is guaranteed set here by the guard above.
-		await loadExternalPlugins(
-			options.plugins,
-			options.configPath as string,
-			contextFor,
-		);
-	}
-	const { port: controlPort } = await controlServer.listen();
 	// Fired once, after every plugin has already had a chance to register an "controlServerReady"
 	// listener during its own register() - lets a plugin serving browser content (e.g. a web UI)
 	// construct and log a self-referencing URL without needing listen() reordered earlier.
@@ -521,7 +669,14 @@ export async function runManager(
 	);
 
 	function upsertWorkerRecord(name: string, pid: number): void {
-		const record = { name, pid, startedAt: new Date().toISOString() };
+		const startId = currentStartId(pid);
+		const record: PidfileWorker = {
+			name,
+			pid,
+			startedAt: new Date().toISOString(),
+			// Undefined off Linux - and then left out of the JSON entirely.
+			startId,
+		};
 		const index = pidfileWorkers.findIndex((worker) => worker.name === name);
 		if (index === -1) pidfileWorkers.push(record);
 		else pidfileWorkers[index] = record;
@@ -549,6 +704,8 @@ export async function runManager(
 		}
 	}
 
+	const managerStartId = currentStartId(process.pid);
+
 	function writePidfile(): void {
 		const pidfile: Pidfile = {
 			managerPid: process.pid,
@@ -556,14 +713,28 @@ export async function runManager(
 			workers: pidfileWorkers,
 			controlPort,
 			controlToken: controlServer.token,
+			managerStartId,
+			shutdownTimeoutMs: shutdownBudgetMs(configs),
 		};
-		// mode only applies to a *new* file (it's ignored if pidfilePath already exists), so
-		// chmodSync explicitly too - otherwise a stale file left with looser permissions from before
-		// this was added would carry the control token unprotected across every later rewrite.
-		writeFileSync(pidfilePath, JSON.stringify(pidfile, null, 2), {
-			mode: 0o600,
-		});
-		chmodSync(pidfilePath, 0o600);
+		// Written to a temp file and renamed into place, so a concurrent reader (`braid status`, a
+		// second `start`) never sees half a file. The temp file is created 0600 from the start, since
+		// it carries the control token; chmod covers a umask that stripped more than that.
+		const tmpPath = `${pidfilePath}.${process.pid}.tmp`;
+		writeFileSync(tmpPath, JSON.stringify(pidfile, null, 2), { mode: 0o600 });
+		chmodSync(tmpPath, 0o600);
+		renameSync(tmpPath, pidfilePath);
+	}
+
+	/** Removes the pidfile, but only if it's still this run's - a `braid stop && braid start` may
+	 *  already have replaced it with a new daemon's by the time this one finishes shutting down. */
+	function removePidfileIfOwned(): void {
+		const current = readPidfile(pidfilePath);
+		if (
+			current?.managerPid === process.pid &&
+			current.controlToken === controlServer.token
+		) {
+			rmSync(pidfilePath, { force: true });
+		}
 	}
 
 	const onSignal = (): void => {
@@ -637,11 +808,13 @@ export async function runManager(
 			),
 			controlServer.close(),
 		]);
-		rmSync(pidfilePath, { force: true });
+		removePidfileIfOwned();
+		releaseStartLock();
 		process.off("SIGINT", onSignal);
 		process.off("SIGTERM", onSignal);
 		resolveExitPromise(exitCode);
 	};
+	requestShutdownFromPlugin = () => void shutdown(0);
 
 	/**
 	 * Runs a restart hook once, its output line-prefixed with `logName` (the owning process's own
@@ -722,6 +895,7 @@ export async function runManager(
 		return stopChild(child, {
 			timeoutMs: workerStopTimeoutMs(configsByName.get(name)),
 			label: name,
+			tree: false,
 		});
 	}
 
@@ -871,9 +1045,14 @@ export async function runManager(
 				}
 				return;
 			}
-			// A crash report from a worker the manager is stopping is that stop racing the app's
-			// own exit, not a crash.
-			if (message.type === "crash" && !stoppingChildren.has(child)) {
+			if (message.type === "crash") {
+				// A crash report from a worker the manager is stopping is that stop racing the app's
+				// own exit, not a crash. Defence in depth: stopWorker signals only the worker, which
+				// marks itself as stopping before it touches its app, so this needs an app to crash on
+				// its own in the instant between stopWorker's call and the worker's signal handler
+				// running - real, but not something a test can line up on cue.
+				// istanbul ignore if
+				if (stoppingChildren.has(child)) return;
 				handleCrash(config, message.code);
 			}
 		});
@@ -1196,6 +1375,14 @@ export async function runManager(
 		// engineering a test that reliably lands a real HTTP request inside it without flaking would
 		// need mocking this function's internals directly rather than timing a real request.
 		if (shuttingDown) return "busy";
+		// Never forked yet - still waiting on its own startAfter chain, or an autoStart:false process
+		// nobody has started: "restart" can only mean start it, the same way startProcess does.
+		// Forking it here instead would duplicate the spawn ensureReady still owns, leaving one
+		// worker untracked (never stopped, even at shutdown).
+		if (pendingFirstSpawn.has(name)) {
+			void ensureReady(name);
+			return "ok";
+		}
 		return withRestartLock(name, async (): Promise<ProcessActionResult> => {
 			manuallyStopped.delete(name);
 			const current = children.get(name);
@@ -1294,8 +1481,14 @@ export async function runManager(
 	}
 
 	// Deliberately the throwing variant: if the first write fails, the CLI must hear "failed", not
-	// "ready" - a daemon with no pidfile can never be found, stopped, or reached again.
-	writePidfile();
+	// "ready" - a daemon with no pidfile can never be found, stopped, or reached again. Every process
+	// has already forked by now, so they're stopped (and the lock released) before rethrowing.
+	try {
+		writePidfile();
+	} catch (error) {
+		await shutdown(1);
+		throw error;
+	}
 	options.onReady?.(getWorkers());
 
 	process.on("SIGINT", onSignal);

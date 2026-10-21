@@ -21,6 +21,7 @@ import {
 } from "./manager.js";
 import { siblingModulePath, sourceExecArgv } from "./module-path.js";
 import { braidTag } from "./prefix.js";
+import { findLiveStartLock } from "./start-lock.js";
 import type {
 	BraidConfig,
 	DaemonHandshakeMessage,
@@ -636,6 +637,15 @@ async function runStartCommand({
 		);
 		return 1;
 	}
+	// Checked before anything else touches .braid - startDaemon rotates daemon.log, which would
+	// otherwise yank the live log out from under a daemon that's still booting.
+	const starting = findLiveStartLock(dirname(pidfilePath));
+	if (starting) {
+		console.error(
+			`braid is already starting (pid ${starting.pid}). Run "stop" first if that's unexpected.`,
+		);
+		return 1;
+	}
 	const loadedConfig = await loadConfig(configPath);
 	const config = noWatch ? applyNoWatch(loadedConfig) : loadedConfig;
 	const runInForeground = foreground ?? config.foreground ?? false;
@@ -748,6 +758,9 @@ async function runStopCommand({
 		console.log(ok ? `Stopped: ${processName}` : `${braidTag()} ${message}`);
 		return ok ? 0 : 1;
 	}
+	// stopFromPidfile waits until everything has actually stopped (up to the stack's own stop
+	// budget), so say so up front rather than sitting silent.
+	if (findRunningPidfile(pidfilePath)) console.log("Stopping...");
 	const stopped = await stopFromPidfile(pidfilePath);
 	console.log(
 		stopped.length > 0 ? `Stopped: ${stopped.join(", ")}` : "Nothing running.",

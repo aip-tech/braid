@@ -133,13 +133,34 @@ describe("stopChild", () => {
 		writeSpy.mockRestore();
 	});
 
-	it("treats a child with exitCode already set as already exited, without waiting", async () => {
-		const child = makeFakeChild(4242);
-		child.exitCode = 0;
+	it("never signals a child that has already exited (its pid may have been reused)", async () => {
+		const exited = makeFakeChild(4242);
+		exited.exitCode = 0;
+		await stopChild(exited as unknown as ChildProcess, { timeoutMs: 1000 });
+		const killed = makeFakeChild(4343);
+		killed.signalCode = "SIGKILL";
+		await stopChild(killed as unknown as ChildProcess, { timeoutMs: 1000 });
+		expect(treeKillCalls).toEqual([]);
+	});
+
+	it("with tree: false, SIGTERMs only the child itself, but still escalates to a tree-wide SIGKILL", async () => {
+		const writeSpy = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		const child = Object.assign(makeFakeChild(4242), {
+			kill: vi.fn(() => true),
+		});
 		const promise = stopChild(child as unknown as ChildProcess, {
 			timeoutMs: 1000,
+			tree: false,
 		});
+		expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+		expect(treeKillCalls).toEqual([]);
+
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(treeKillCalls).toEqual([{ pid: 4242, signal: "SIGKILL" }]);
+		child.emit("exit");
 		await promise;
-		expect(treeKillCalls).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+		writeSpy.mockRestore();
 	});
 });

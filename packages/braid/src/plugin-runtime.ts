@@ -26,6 +26,7 @@ type ContextFactoryOptions = {
 	stopProcess: (name: string) => Promise<ProcessActionResult>;
 	restartProcess: (name: string) => Promise<ProcessActionResult>;
 	startProcess: (name: string) => Promise<ProcessActionResult>;
+	shutdown: () => void;
 };
 
 /** Builds one PluginContext per plugin, so log() can prefix the right plugin name. */
@@ -39,6 +40,7 @@ export function createPluginContextFactory(
 		stopProcess,
 		restartProcess,
 		startProcess,
+		shutdown,
 	} = options;
 	return (pluginName: string): PluginContext => ({
 		registerRoute: controlServer.registerRoute,
@@ -51,6 +53,7 @@ export function createPluginContextFactory(
 		stopProcess,
 		restartProcess,
 		startProcess,
+		shutdown,
 		log(message) {
 			const line = `${pluginTag(pluginName)} ${message}`;
 			process.stderr.write(`${line}\n`);

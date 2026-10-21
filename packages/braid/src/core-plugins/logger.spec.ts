@@ -35,6 +35,7 @@ async function createHarness(options?: { maxSizeBytes?: number }) {
 		stopProcess: async () => "ok",
 		restartProcess: async () => "ok",
 		startProcess: async () => "ok",
+		shutdown: () => {},
 	});
 	await loggerPlugin.register(contextFor("core:logger"), {
 		dir: tmpDir,
@@ -111,6 +112,7 @@ describe("core:logger plugin", () => {
 				stopProcess: async () => "ok",
 				restartProcess: async () => "ok",
 				startProcess: async () => "ok",
+				shutdown: () => {},
 			});
 			await loggerPlugin.register(contextFor("core:logger"));
 			await controlServer.listen();
@@ -169,6 +171,7 @@ describe("core:logger plugin", () => {
 			stopProcess: async () => "ok",
 			restartProcess: async () => "ok",
 			startProcess: async () => "ok",
+			shutdown: () => {},
 		});
 
 		await loggerPlugin.register(contextFor("core:logger"), { dir: tmpDir });
@@ -186,6 +189,7 @@ describe("core:logger plugin", () => {
 			stopProcess: async () => "ok",
 			restartProcess: async () => "ok",
 			startProcess: async () => "ok",
+			shutdown: () => {},
 		});
 		await loggerPlugin.register(contextFor2("core:logger"), { dir: tmpDir });
 		await controlServer2.listen();

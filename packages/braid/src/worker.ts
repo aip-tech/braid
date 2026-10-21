@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { join, resolve } from "node:path";
-import { watch as watchFiles } from "chokidar";
+import { type FSWatcher, watch as watchFiles } from "chokidar";
 import treeKill from "tree-kill";
 import { type LinePrefixer, linePrefixer } from "./prefix.js";
 import type {
@@ -22,6 +22,9 @@ export const DEFAULT_STOP_TIMEOUT_MS = 5000;
 export const DEFAULT_MAX_RESTARTS = 10;
 export const DEFAULT_RESTART_DELAY_MS = 1000;
 export const DEFAULT_MIN_UPTIME_MS = 1000;
+// How long to keep waiting for an exit after SIGKILL before giving up on ever seeing one - a lost
+// exit event must not hang a stop (or every later restart) forever.
+export const SIGKILL_EXIT_WAIT_MS = 2000;
 // Ceiling on a single autoRestart backoff wait - not user-configurable, just a backstop against a
 // pathological restartDelayMs producing multi-minute per-attempt waits.
 export const DEFAULT_MAX_RESTART_DELAY_MS = 10_000;
@@ -71,7 +74,8 @@ function killTree(pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> {
 
 /**
  * Races `exited` against `timeoutMs`; SIGKILLs `pid` and awaits `exited` again if it times out,
- * calling `onEscalate` first (for the caller's own "sending SIGKILL" log line). The caller is
+ * calling `onEscalate` first (for the caller's own "sending SIGKILL" log line), and `onGiveUp` if
+ * even that exit never arrives within SIGKILL_EXIT_WAIT_MS. The caller is
  * responsible for having already sent the initial SIGTERM and wired up `exited` (via
  * `awaitingExit`) before calling this - this only owns the "did it comply in time" half.
  */
@@ -80,6 +84,7 @@ async function escalateIfNotExited(
 	exited: Promise<void>,
 	timeoutMs: number,
 	onEscalate: () => void,
+	onGiveUp: () => void,
 ): Promise<void> {
 	let timer: NodeJS.Timeout | undefined;
 	const timedOut = new Promise<boolean>((resolveTimeout) => {
@@ -90,21 +95,32 @@ async function escalateIfNotExited(
 	if (didTimeOut) {
 		onEscalate();
 		void killTree(pid, "SIGKILL");
-		await exited;
+		let killTimer: NodeJS.Timeout | undefined;
+		const gaveUp = await Promise.race([
+			exited.then(() => false),
+			new Promise<boolean>((resolveGiveUp) => {
+				killTimer = setTimeout(() => resolveGiveUp(true), SIGKILL_EXIT_WAIT_MS);
+			}),
+		]);
+		clearTimeout(killTimer);
+		if (gaveUp) onGiveUp();
 	}
 }
 
-/** Runs `hook` once, piping its output through the same prefixers as the process's own output. */
+/** Runs `hook` once, piping its output through the same prefixers as the process's own output.
+ *  `onSpawn` is handed the hook's process, so a stop can kill one that's mid-run. */
 function runHookOnce(
 	hook: RestartHook,
 	stdoutPrefixer: LinePrefixer,
 	stderrPrefixer: LinePrefixer,
+	onSpawn: (child: ChildProcess) => void,
 ): Promise<boolean> {
 	return new Promise((resolveHook) => {
 		const hookChild = spawn(hook.command, hook.args ?? [], {
 			cwd: hook.cwd ? join(process.cwd(), hook.cwd) : process.cwd(),
 			env: process.env,
 		});
+		onSpawn(hookChild);
 		hookChild.stdout?.on("data", (chunk: Buffer) =>
 			stdoutPrefixer.write(chunk),
 		);
@@ -116,17 +132,24 @@ function runHookOnce(
 	});
 }
 
-/** Retries `hook`, since whatever it needs (a dependency, a build) may still be catching up. */
+/** Retries `hook`, since whatever it needs (a dependency, a build) may still be catching up -
+ *  unless `shouldAbort` says the worker is stopping, in which case it gives up straight away. */
 async function runHookWithRetries(
 	hook: RestartHook,
 	stdoutPrefixer: LinePrefixer,
 	stderrPrefixer: LinePrefixer,
+	shouldAbort: () => boolean,
+	onSpawn: (child: ChildProcess) => void,
 ): Promise<boolean> {
 	const retries = hook.retries ?? DEFAULT_HOOK_RETRIES;
 	const retryDelayMs = hook.retryDelayMs ?? DEFAULT_HOOK_RETRY_DELAY_MS;
 	for (let attempt = 0; attempt <= retries; attempt++) {
-		if (await runHookOnce(hook, stdoutPrefixer, stderrPrefixer)) return true;
+		if (await runHookOnce(hook, stdoutPrefixer, stderrPrefixer, onSpawn)) {
+			return true;
+		}
+		if (shouldAbort()) return false;
 		if (attempt < retries) await delay(retryDelayMs);
+		if (shouldAbort()) return false;
 	}
 	return false;
 }
@@ -233,6 +256,15 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 		}, delayMs);
 	}
 
+	/** After a SIGKILL whose exit never arrives (see SIGKILL_EXIT_WAIT_MS): stop waiting on it. */
+	function giveUpWaiting(): void {
+		stderrPrefixer.write(
+			`braid: "${config.name}" still hadn't exited ${SIGKILL_EXIT_WAIT_MS}ms after SIGKILL; giving up waiting on it\n`,
+		);
+		awaitingExit = undefined;
+		child = null;
+	}
+
 	function spawnApp(): void {
 		lastSpawnAt = Date.now();
 		const spawned = spawn(config.command, config.args ?? [], {
@@ -324,9 +356,19 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 	// orphaned once this fork exits out from under it. stopAndExit makes the fork's own exit
 	// (which manager.ts's stopChild waits on) actually mean "the inner app is confirmed dead too".
 	let stopping = false;
+	// Hoisted out of the `if (watched)` block below so a stop can cancel them: a watch-triggered
+	// restart that's still only debouncing must never start once a stop has begun, and a
+	// beforeRestart hook that's mid-run must not keep retrying under it.
+	let debounceTimer: NodeJS.Timeout | undefined;
+	let watcher: FSWatcher | undefined;
+	let runningHook: ChildProcess | undefined;
 	async function stopAndExit(): Promise<void> {
 		if (stopping) return; // a second signal while already stopping - ignore, in progress
 		stopping = true;
+		clearTimeout(debounceTimer);
+		void watcher?.close();
+		if (typeof runningHook?.pid === "number")
+			void killTree(runningHook.pid, "SIGTERM");
 
 		if (pendingAutoRestartTimer) {
 			// Mid an autoRestart backoff wait - `restarting` is already true for this whole
@@ -354,10 +396,15 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 					});
 					void killTree(pid, "SIGTERM");
 					const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
-					await escalateIfNotExited(pid, exited, timeoutMs, () =>
-						stderrPrefixer.write(
-							`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
-						),
+					await escalateIfNotExited(
+						pid,
+						exited,
+						timeoutMs,
+						() =>
+							stderrPrefixer.write(
+								`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+							),
+						giveUpWaiting,
 					);
 				}
 			} finally {
@@ -398,7 +445,7 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 			const resolved = resolve(process.cwd(), path);
 			return [resolved, `${resolved}/**`];
 		});
-		const watcher = watchFiles(paths, {
+		const fileWatcher = watchFiles(paths, {
 			ignored: [...DEFAULT_IGNORED, ...excluded],
 			ignoreInitial: true,
 			// chokidar's own default (2000ms) is too slow for a prompt, reliable restart.
@@ -406,10 +453,12 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 		});
 
 		// `restarting` is declared at the top of runWorker (shared with autoRestart's crash-branch
-		// logic) - not re-declared here.
-		let debounceTimer: NodeJS.Timeout | undefined;
+		// logic), and `debounceTimer` next to `stopping` - neither is re-declared here.
 
 		async function triggerRestart(): Promise<void> {
+			// A stop that began while this was still debouncing owns `child` now (normally the timer
+			// is cleared by then, but its callback may already have been queued).
+			if (stopping) return;
 			restarting = true;
 			try {
 				// Sent before the kill, same observable timing as before - manager's handling of this
@@ -425,18 +474,31 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 					// Without this, an app that traps/ignores SIGTERM would hang this restart forever -
 					// `restarting` never clears, so every later file change is silently swallowed too.
 					const timeoutMs = config.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
-					await escalateIfNotExited(pid, exited, timeoutMs, () =>
-						stderrPrefixer.write(
-							`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
-						),
+					await escalateIfNotExited(
+						pid,
+						exited,
+						timeoutMs,
+						() =>
+							stderrPrefixer.write(
+								`braid: "${config.name}" did not exit within ${timeoutMs}ms of SIGTERM; sending SIGKILL\n`,
+							),
+						giveUpWaiting,
 					);
 				}
+				// A stop that landed while the old app was being killed takes it from here.
+				if (stopping) return;
 				if (config.beforeRestart) {
 					const ok = await runHookWithRetries(
 						config.beforeRestart,
 						stdoutPrefixer,
 						stderrPrefixer,
+						() => stopping,
+						(hookChild) => {
+							runningHook = hookChild;
+						},
 					);
+					runningHook = undefined;
+					if (stopping) return;
 					if (!ok) {
 						stderrPrefixer.write(
 							`braid: beforeRestart hook "${config.beforeRestart.command}" kept failing; leaving it stopped\n`,
@@ -451,7 +513,8 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 			}
 		}
 
-		watcher.on("all", (_event, changedPath) => {
+		watcher = fileWatcher;
+		fileWatcher.on("all", (_event, changedPath) => {
 			if (restarting) return;
 			const ext = changedPath.split(".").pop()?.toLowerCase();
 			if (!ext || !allowedExts.includes(ext)) return;

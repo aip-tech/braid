@@ -18,6 +18,7 @@ import {
 	loadConfig,
 	RESTART_DEBOUNCE_MS,
 	runWorker,
+	SIGKILL_EXIT_WAIT_MS,
 } from "./worker.js";
 
 type FakeChild = EventEmitter & {
@@ -67,6 +68,7 @@ describe("runWorker", () => {
 	let spawnCalls: SpawnCall[];
 	let treeKillCalls: Array<{ pid: number; signal: string }>;
 	let watcher: EventEmitter;
+	let watcherClose: ReturnType<typeof vi.fn>;
 	let stdoutWrites: string[];
 	let stderrWrites: string[];
 	let sentMessages: unknown[];
@@ -88,7 +90,8 @@ describe("runWorker", () => {
 		nextPid = 1000;
 		spawnCalls = [];
 		treeKillCalls = [];
-		watcher = new EventEmitter();
+		watcherClose = vi.fn(async () => {});
+		watcher = Object.assign(new EventEmitter(), { close: watcherClose });
 		stdoutWrites = [];
 		stderrWrites = [];
 		sentMessages = [];
@@ -847,7 +850,7 @@ describe("runWorker", () => {
 			expect(exitCalls).toEqual([0]);
 		});
 
-		it("waits for an in-flight watch-triggered restart to finish, instead of racing it for the same child/awaitingExit", async () => {
+		it("lets an in-flight watch-triggered restart finish its kill, but not respawn, once a stop has begun", async () => {
 			runWorker({ name: "web", command: "node", watch: ["/project/src"] });
 			const firstChild = lastChild();
 
@@ -856,23 +859,114 @@ describe("runWorker", () => {
 
 			process.emit("SIGTERM"); // lands while that restart's own kill is still in flight
 			await vi.advanceTimersByTimeAsync(0);
-			expect(exitCalls).toEqual([]); // hasn't hijacked anything yet
+			expect(exitCalls).toEqual([]); // waits for the restart's kill rather than racing it
 
 			firstChild.emit("exit", 0); // the restart's own kill completes
-			await vi.advanceTimersByTimeAsync(0); // triggerRestart finishes: respawns, sends started, clears restarting
+			await vi.advanceTimersByTimeAsync(0);
 
-			expect(spawnCalls).toHaveLength(2); // the in-flight restart's own respawn completed normally
-			const secondChild = lastChild();
-			// Only now does the SIGTERM handler proceed, against the NEW (post-restart) child - the
-			// first entry here is the restart's own kill of the original child, already asserted
-			// implicitly by this point; the second is the SIGTERM handler's, added after waiting.
+			// No respawn - starting a fresh app only for the stop to kill it would be wasted work -
+			// and no "started" for the manager to mistake for a completed restart.
+			expect(spawnCalls).toHaveLength(1);
+			expect(sentMessages).toEqual([
+				{ source: "braid-worker", type: "restart" },
+			]);
 			expect(treeKillCalls).toEqual([
 				{ pid: firstChild.pid, signal: "SIGTERM" },
-				{ pid: secondChild.pid, signal: "SIGTERM" },
 			]);
+			expect(exitCalls).toEqual([0]);
+		});
 
-			secondChild.emit("exit", 0);
+		it("cancels a watch-triggered restart that's still only debouncing when a stop lands (no respawn, no hang)", async () => {
+			runWorker({ name: "web", command: "node", watch: ["/project/src"] });
+			const app = lastChild();
+
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS / 2);
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+
+			expect(watcherClose).toHaveBeenCalled();
+			expect(sentMessages).toEqual([]); // the restart never began
+			expect(treeKillCalls).toEqual([{ pid: app.pid, signal: "SIGTERM" }]);
+			app.emit("exit", null);
 			await vi.advanceTimersByTimeAsync(0);
+			expect(spawnCalls).toHaveLength(1);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("ignores a debounce callback that was already queued when the stop began", async () => {
+			runWorker({ name: "web", command: "node", watch: ["/project/src"] });
+			watcher.emit("all", "change", "/project/src/index.ts");
+			// Fire the debounce and the stop in the same tick, debounce first.
+			const clear = vi
+				.spyOn(globalThis, "clearTimeout")
+				.mockImplementation(() => {});
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			clear.mockRestore();
+			expect(sentMessages).toEqual([]);
+		});
+
+		it("stops retrying a failing beforeRestart hook, and kills a running one, once a stop lands", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				watch: ["/project/src"],
+				beforeRestart: { command: "build", retries: 5, retryDelayMs: 1000 },
+			});
+			const app = lastChild();
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			app.emit("exit", null); // the restart's kill completes; the hook starts
+			await vi.advanceTimersByTimeAsync(0);
+			const firstHook = lastChild();
+			expect(spawnCalls.at(-1)?.command).toBe("build");
+			firstHook.emit("exit", 1); // fails; waiting out the retry delay now
+			await vi.advanceTimersByTimeAsync(500);
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(5000);
+
+			expect(spawnCalls.map((call) => call.command)).toEqual(["node", "build"]);
+			expect(stderrWrites.join("")).not.toContain("kept failing");
+			expect(sentMessages).not.toContainEqual({
+				source: "braid-worker",
+				type: "started",
+			});
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("kills a beforeRestart hook that's mid-run when a stop lands", async () => {
+			runWorker({
+				name: "web",
+				command: "node",
+				watch: ["/project/src"],
+				beforeRestart: { command: "build" },
+			});
+			const app = lastChild();
+			watcher.emit("all", "change", "/project/src/index.ts");
+			await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+			app.emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			const hook = lastChild();
+
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(treeKillCalls).toContainEqual({
+				pid: hook.pid,
+				signal: "SIGTERM",
+			});
+			hook.emit("exit", null);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(spawnCalls.map((call) => call.command)).toEqual(["node", "build"]);
+			expect(exitCalls).toEqual([0]);
+		});
+
+		it("gives up waiting on an app whose exit never arrives even after SIGKILL, instead of hanging", async () => {
+			runWorker({ name: "web", command: "node", stopTimeoutMs: 300 });
+			process.emit("SIGTERM");
+			await vi.advanceTimersByTimeAsync(300 + SIGKILL_EXIT_WAIT_MS);
+			expect(stderrWrites.join("")).toContain("giving up waiting on it");
 			expect(exitCalls).toEqual([0]);
 		});
 	});

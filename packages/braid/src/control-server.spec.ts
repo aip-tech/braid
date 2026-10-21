@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createControlServer,
 	decodeStaticPath,
+	isLoopbackHost,
+	isSameOriginRequest,
 	parseRequestUrl,
 } from "./control-server.js";
 
@@ -59,6 +61,82 @@ describe("parseRequestUrl", () => {
 
 	it("returns undefined instead of throwing for a target URL rejects", () => {
 		expect(parseRequestUrl("http://[")).toBeUndefined();
+	});
+});
+
+describe("isLoopbackHost", () => {
+	it("accepts loopback hostnames on any port, case-insensitively", () => {
+		for (const host of [
+			"127.0.0.1:4000",
+			"localhost:9000",
+			"LOCALHOST:1",
+			"[::1]:4000",
+			"localhost",
+		]) {
+			expect(isLoopbackHost(host)).toBe(true);
+		}
+	});
+
+	it("rejects any other name (DNS rebinding), a missing Host, and garbage", () => {
+		for (const host of [
+			"evil.example:4000",
+			"127.0.0.2:4000",
+			"localhost.evil.example",
+			undefined,
+			"",
+			"bad host",
+		]) {
+			expect(isLoopbackHost(host)).toBe(false);
+		}
+	});
+});
+
+describe("isSameOriginRequest", () => {
+	it("allows no Origin at all (a non-browser client) and an Origin matching the Host, even forwarded", () => {
+		expect(isSameOriginRequest({ host: "127.0.0.1:4000" })).toBe(true);
+		expect(
+			isSameOriginRequest({
+				host: "127.0.0.1:4000",
+				origin: "http://127.0.0.1:4000",
+				"sec-fetch-site": "same-origin",
+			}),
+		).toBe(true);
+		expect(
+			isSameOriginRequest({
+				host: "LOCALHOST:9000",
+				origin: "http://localhost:9000",
+			}),
+		).toBe(true);
+		expect(
+			isSameOriginRequest({ host: "localhost", "sec-fetch-site": "none" }),
+		).toBe(true);
+	});
+
+	it("rejects another port, another host, an opaque origin, a missing Host, and a cross-site fetch", () => {
+		expect(
+			isSameOriginRequest({
+				host: "127.0.0.1:4000",
+				origin: "http://127.0.0.1:9999",
+			}),
+		).toBe(false);
+		expect(
+			isSameOriginRequest({
+				host: "127.0.0.1:4000",
+				origin: "http://evil.example",
+			}),
+		).toBe(false);
+		expect(
+			isSameOriginRequest({ host: "127.0.0.1:4000", origin: "null" }),
+		).toBe(false);
+		expect(isSameOriginRequest({ origin: "http://127.0.0.1:4000" })).toBe(
+			false,
+		);
+		expect(
+			isSameOriginRequest({
+				host: "127.0.0.1:4000",
+				"sec-fetch-site": "cross-site",
+			}),
+		).toBe(false);
 	});
 });
 
@@ -755,5 +833,136 @@ describe("createControlServer", () => {
 		});
 		expect(after.status).toBe(404);
 		await server.close();
+	});
+	describe("Host and Origin checks", () => {
+		/** A request with arbitrary Host/Origin headers, which fetch() won't let a caller set. */
+		function rawHttp(
+			port: number,
+			method: string,
+			path: string,
+			headers: Record<string, string>,
+		): Promise<number> {
+			return new Promise((resolve, reject) => {
+				const req = httpRequest(
+					{ port, host: "127.0.0.1", method, path, headers },
+					(res) => {
+						res.resume();
+						resolve(res.statusCode as number);
+					},
+				);
+				req.on("error", reject);
+				req.end();
+			});
+		}
+
+		async function serverWithPostRoute() {
+			const server = createControlServer();
+			server.registerRoute("POST", "/act", (_req, res) => {
+				res.writeHead(200).end("done");
+			});
+			server.registerRoute("GET", "/read", (_req, res) => {
+				res.writeHead(200).end("read");
+			});
+			const { port } = await server.listen();
+			return { server, port, auth: `Bearer ${server.token}` };
+		}
+
+		it("421s a request whose Host isn't loopback, before auth", async () => {
+			const { server, port, auth } = await serverWithPostRoute();
+			expect(
+				await rawHttp(port, "GET", "/read", {
+					Host: `evil.example:${port}`,
+					Authorization: auth,
+				}),
+			).toBe(421);
+			await server.close();
+		});
+
+		it("403s a cross-origin POST - another local port, or a cross-site fetch - but serves a same-origin or Origin-less one", async () => {
+			const { server, port, auth } = await serverWithPostRoute();
+			const host = `127.0.0.1:${port}`;
+			expect(
+				await rawHttp(port, "POST", "/act", {
+					Host: host,
+					Origin: "http://127.0.0.1:9999",
+					Authorization: auth,
+				}),
+			).toBe(403);
+			expect(
+				await rawHttp(port, "POST", "/act", {
+					Host: host,
+					"Sec-Fetch-Site": "same-site",
+					Authorization: auth,
+				}),
+			).toBe(403);
+			expect(
+				await rawHttp(port, "POST", "/act", {
+					Host: host,
+					Origin: `http://${host}`,
+					Authorization: auth,
+				}),
+			).toBe(200);
+			// What the CLI sends: Node's fetch adds no Origin.
+			const cli = await fetch(`http://${host}/act`, {
+				method: "POST",
+				headers: { Authorization: auth },
+			});
+			expect(cli.status).toBe(200);
+			// A cross-origin GET can't change anything, so it isn't Origin-checked.
+			expect(
+				await rawHttp(port, "GET", "/read", {
+					Host: host,
+					Origin: "http://127.0.0.1:9999",
+					Authorization: auth,
+				}),
+			).toBe(200);
+			await server.close();
+		});
+
+		it("still works through a port forward, where the browser sees a different port", async () => {
+			const { server, port, auth } = await serverWithPostRoute();
+			expect(
+				await rawHttp(port, "POST", "/act", {
+					Host: "localhost:9000",
+					Origin: "http://localhost:9000",
+					Authorization: auth,
+				}),
+			).toBe(200);
+			await server.close();
+		});
+
+		it("destroys an upgrade from a foreign Origin or a non-loopback Host, but accepts a same-origin one", async () => {
+			const server = createControlServer();
+			server.registerUpgrade("/ws", (_req, socket) => {
+				socket.end(
+					"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+				);
+			});
+			const { port } = await server.listen();
+			const upgrade = (headers: Record<string, string>) =>
+				new Promise<"upgraded" | "closed">((resolve) => {
+					const req = httpRequest({
+						port,
+						host: "127.0.0.1",
+						path: `/ws?token=${server.token}`,
+						headers: {
+							Connection: "Upgrade",
+							Upgrade: "websocket",
+							...headers,
+						},
+					});
+					req.on("upgrade", () => resolve("upgraded"));
+					req.on("error", () => resolve("closed"));
+					req.on("close", () => resolve("closed"));
+					req.end();
+				});
+
+			expect(await upgrade({ Origin: "http://127.0.0.1:9999" })).toBe("closed");
+			expect(await upgrade({ Host: "evil.example" })).toBe("closed");
+			expect(await upgrade({ Origin: `http://127.0.0.1:${port}` })).toBe(
+				"upgraded",
+			);
+			await server.close();
+		});
 	});
 });
