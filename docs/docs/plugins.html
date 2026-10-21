@@ -43,9 +43,10 @@
 						resolved from the <em>config file's own location</em>, so it's found in
 						your project's <code>node_modules</code>, not braid's. braid's own internal
 						core plugins (<code>/api/status</code>; per-process log persistence behind
-						<code>braid logs</code>; and the <code>/api/processes/stop</code> and
-						<code>/api/processes/restart</code> routes behind
-						<code>braid stop &lt;name&gt;</code>/<code>restart &lt;name&gt;</code>) aren't
+						<code>braid logs</code>; the <code>/api/processes/stop</code>,
+						<code>/api/processes/restart</code> and <code>/api/processes/start</code>
+						routes behind <code>braid stop/restart/start &lt;name&gt;</code>; and
+						<code>/api/shutdown</code> behind a bare <code>braid stop</code>) aren't
 						configurable and aren't listed in <code>plugins</code>.
 						<a href="/braid/docs/ui-plugin.html"><code>@aip-tech/braid-plugin-ui</code></a>
 						is the first real external plugin built against this API &mdash; a web
@@ -92,12 +93,13 @@ export default helloPlugin;</code></pre>
 						<li><code>on(type, handler)</code> &mdash; subscribes to a process lifecycle event, see below.</li>
 						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt?, cpu?, memory? }[]</code> for every <em>configured</em> process, the same data <code>status</code> renders &mdash; including one with <code>autoStart: false</code> that's never been started (<code>pid</code>/<code>startedAt</code> absent, <code>alive: false</code>). <code>cpu</code>/<code>memory</code> are likewise absent until the daemon's first sample, or while a process is stopped.</li>
 						<li><code>stopProcess(name)</code> &mdash; stops one named process. Resolves <code>"ok"</code>, <code>"unknown"</code> (not configured, or not currently running), or <code>"busy"</code> (a restart is already in progress for it).</li>
-						<li><code>restartProcess(name)</code> &mdash; stops and respawns one named process, then runs its own <code>onRestart</code> hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a watch-triggered restart would. Can take a while to resolve if <code>onRestart</code> keeps retrying. Resolves <code>"ok"</code>, <code>"unknown"</code>, or <code>"busy"</code>.</li>
+						<li><code>shutdown()</code> &mdash; stops every process and shuts the daemon down, the same orderly way <code>braid stop</code> does. Returns immediately. Ignored (and logged) if called during <code>register()</code>, before the daemon is up.</li>
+						<li><code>restartProcess(name)</code> &mdash; stops and respawns one named process, then runs its own <code>onRestart</code> hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a watch-triggered restart would. Can take a while to resolve if <code>onRestart</code> keeps retrying. For a process that hasn't been started yet (still waiting on its own <code>startAfter</code>, or <code>autoStart: false</code>), it starts it exactly as <code>startProcess</code> would, with no cascade. Resolves <code>"ok"</code>, <code>"unknown"</code>, or <code>"busy"</code>.</li>
 						<li><code>startProcess(name)</code> &mdash; starts a configured process that isn't currently running; the counterpart to <code>restartProcess</code> for one that's stopped or has <code>autoStart: false</code> and has never run. Idempotent: resolves <code>"ok"</code> as a no-op if it's already alive, rather than killing and respawning it the way <code>restartProcess</code> would. A genuine first start doesn't cascade to <code>dependsOn</code> dependents the way a restart does, but does honor the process's own <code>startAfter</code> if it sets one.</li>
 						<li><code>log(message)</code> &mdash; writes a line to stderr, prefixed with this plugin's own name. If sent before the daemon's ready handshake (e.g. from a <code>controlServerReady</code> handler), also relayed straight to the terminal that ran <code>braid start</code>, not just <code>daemon.log</code>.</li>
 					</ul>
 					<p>
-						<code>stopProcess</code>/<code>restartProcess</code>/<code>startProcess</code>
+						<code>stopProcess</code>/<code>restartProcess</code>/<code>startProcess</code>/<code>shutdown</code>
 						are available to <em>every</em> plugin, not only ones that registered the
 						affected process themselves &mdash; a plugin can stop, restart, or start any
 						configured process. Same trust level as any other capability in your
@@ -105,7 +107,13 @@ export default helloPlugin;</code></pre>
 						didn't write yourself.
 					</p>
 					<p>
-						The control server itself is loopback-only (<code>127.0.0.1</code>) and
+						The control server itself is loopback-only (<code>127.0.0.1</code>). It
+						rejects a request whose <code>Host</code> isn't a loopback name (421), which
+						defeats DNS rebinding, and a non-GET request or upgrade whose
+						<code>Origin</code> doesn't match the page it was served from (403), which
+						stops another site, or another local port, from driving it. Only the
+						hostname is checked, so it still works through an SSH tunnel or a
+						devcontainer port forward. It also
 						requires a bearer token on every request (a per-run secret written to the
 						pidfile) &mdash; enforced automatically for every route, a plugin's own
 						handler doesn't need to check it. A plain browser navigation can't send a

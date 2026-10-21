@@ -121,7 +121,11 @@ async function forceStopFromPidfile(pidfilePath: string): Promise<void> {
 		: undefined;
 	await stopFromPidfile(pidfilePath);
 	if (!pidfile) return;
-	const pids = [pidfile.managerPid, ...pidfile.workers.map((w) => w.pid)];
+	// Never this test process itself - an in-process runManager records it as the manager.
+	const pids = [
+		pidfile.managerPid,
+		...pidfile.workers.map((w) => w.pid),
+	].filter((pid) => pid !== process.pid);
 	for (let delayMs = 25; delayMs <= 400; delayMs *= 2) {
 		if (pids.every((pid) => !isPidAlive(pid))) return;
 		await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -3406,7 +3410,8 @@ describe("runManager: signal option and pidfile write failures", () => {
 	});
 
 	afterEach(async () => {
-		if (existsSync(pidfilePath)) chmodSync(pidfilePath, 0o600);
+		if (existsSync(dirname(pidfilePath)))
+			chmodSync(dirname(pidfilePath), 0o700);
 		await forceStopFromPidfile(pidfilePath);
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
@@ -3494,22 +3499,23 @@ describe("runManager: signal option and pidfile write failures", () => {
 					String(line).includes("couldn't update the pidfile"),
 				).length;
 
-			// Owner read-only: rewriting it now fails with EACCES.
-			chmodSync(pidfilePath, 0o400);
+			// A read-only .braid: the temp file a rewrite goes through can't be created.
+			const braidDir = dirname(pidfilePath);
+			chmodSync(braidDir, 0o500);
 			expect((await restart()).status).toBe(200);
 			expect((await restart()).status).toBe(200);
 			expect(failureLines()).toBe(1);
 
 			// Writable again: the next rewrite succeeds and re-arms the one-shot log.
-			chmodSync(pidfilePath, 0o600);
+			chmodSync(braidDir, 0o700);
 			expect((await restart()).status).toBe(200);
-			chmodSync(pidfilePath, 0o400);
+			chmodSync(braidDir, 0o500);
 			expect((await restart()).status).toBe(200);
 			expect(failureLines()).toBe(2);
 
 			// One more successful rewrite, so the pidfile names the live worker again - in-process,
 			// stopFromPidfile can only stop what the pidfile points at.
-			chmodSync(pidfilePath, 0o600);
+			chmodSync(braidDir, 0o700);
 			expect((await restart()).status).toBe(200);
 			stderr.mockRestore();
 			await stopFromPidfile(pidfilePath);
@@ -3517,4 +3523,397 @@ describe("runManager: signal option and pidfile write failures", () => {
 		},
 		20000,
 	);
+});
+
+describe("stopFromPidfile", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+	const spawned: ReturnType<typeof spawn>[] = [];
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-stop-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		for (const child of spawned.splice(0)) {
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL");
+			}
+		}
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function track(child: ReturnType<typeof spawn>) {
+		spawned.push(child);
+		return child;
+	}
+
+	/** A plain keep-alive process braid didn't start, with its pid once it's running. */
+	async function startStray(): Promise<number> {
+		const child = track(
+			spawn(process.execPath, [join(FIXTURES, "keep-alive.js")]),
+		);
+		await new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+		return child.pid as number;
+	}
+
+	function startManagerProcess(configs: ProcessConfig[]) {
+		const manager = track(
+			spawn(
+				process.execPath,
+				[
+					...sourceExecArgv(import.meta.url),
+					join(FIXTURES, "run-manager.mjs"),
+					JSON.stringify(configs),
+					pidfilePath,
+				],
+				{ cwd: tmpDir, stdio: "ignore" },
+			),
+		);
+		const exited = new Promise<void>((resolve) =>
+			manager.once("exit", () => resolve()),
+		);
+		return { manager, exited };
+	}
+
+	function appPidFromLog(name: string): number | undefined {
+		const logPath = join(dirname(pidfilePath), "logs", `${name}.log`);
+		if (!existsSync(logPath)) return undefined;
+		const match = /started (\d+)/.exec(readFileSync(logPath, "utf8"));
+		return match ? Number(match[1]) : undefined;
+	}
+
+	const writePidfile = (pidfile: Partial<Pidfile>) =>
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				startedAt: new Date().toISOString(),
+				workers: [],
+				controlPort: 1,
+				controlToken: "t",
+				...pidfile,
+			}),
+		);
+
+	it("asks a manager in another process to stop, and returns only once its apps are gone", async () => {
+		const { manager, exited } = startManagerProcess([
+			{
+				name: "solo",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+			},
+		]);
+		await waitFor(() => appPidFromLog("solo") !== undefined, {
+			timeoutMs: 8000,
+		});
+		const appPid = appPidFromLog("solo") as number;
+
+		expect(await stopFromPidfile(pidfilePath)).toEqual(["solo"]);
+		// Already gone - not merely signalled - the moment stopFromPidfile resolves.
+		expect(isPidAlive(appPid)).toBe(false);
+		expect(isPidAlive(manager.pid as number)).toBe(false);
+		await exited;
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 20000);
+
+	it("lets an immediate start after a stop keep its own pidfile, even when the old stack was slow to stop", async () => {
+		const slow: ProcessConfig = {
+			name: "slow",
+			command: "node",
+			args: [join(FIXTURES, "ignore-sigterm.js")],
+			stopTimeoutMs: 1000,
+		};
+		startManagerProcess([slow]);
+		await waitFor(() => appPidFromLog("slow") !== undefined, {
+			timeoutMs: 8000,
+		});
+
+		await stopFromPidfile(pidfilePath);
+		const second = startManagerProcess([
+			{
+				name: "next",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+			},
+		]);
+		await waitFor(() => existsSync(pidfilePath), { timeoutMs: 8000 });
+		// Well past the old stack's own stop budget: had it still been tearing down, it would have
+		// deleted this pidfile by now.
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile;
+		expect(pidfile.managerPid).toBe(second.manager.pid);
+		expect(findRunningPidfile(pidfilePath)).toBeDefined();
+	}, 30000);
+
+	it("SIGKILLs a manager that refuses to shut down and ignores SIGTERM, once the pidfile's deadline passes", async () => {
+		const fake = track(
+			spawn(
+				process.execPath,
+				[join(FIXTURES, "fake-manager.mjs"), pidfilePath, "500"],
+				{
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			),
+		);
+		await new Promise<void>((resolve) =>
+			fake.stdout?.once("data", () => resolve()),
+		);
+
+		const startedAt = Date.now();
+		await stopFromPidfile(pidfilePath);
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
+		await waitFor(() => fake.exitCode !== null || fake.signalCode !== null);
+		expect(fake.signalCode).toBe("SIGKILL");
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 15000);
+
+	it("stops workers a dead manager left behind, from a pidfile written by an older braid", async () => {
+		const orphan = await startStray();
+		writePidfile({
+			managerPid: await deadPid(),
+			workers: [
+				{ name: "orphan", pid: orphan, startedAt: new Date().toISOString() },
+			],
+		});
+
+		expect(await stopFromPidfile(pidfilePath)).toEqual(["orphan"]);
+		expect(isPidAlive(orphan)).toBe(false);
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 15000);
+
+	it("never signals a pid that now belongs to a process started after the pidfile was written", async () => {
+		const unrelated = await startStray();
+		const anHourAgo = new Date(Date.now() - 3600_000).toISOString();
+		writePidfile({
+			managerPid: await deadPid(),
+			startedAt: anHourAgo,
+			workers: [{ name: "reused", pid: unrelated, startedAt: anHourAgo }],
+		});
+
+		expect(findRunningPidfile(pidfilePath)).toBeUndefined();
+		expect(statusFromPidfile(pidfilePath)).toEqual([
+			expect.objectContaining({ name: "reused", alive: false }),
+		]);
+		expect(await stopFromPidfile(pidfilePath)).toEqual([]);
+		expect(isPidAlive(unrelated)).toBe(true);
+		// The stale pidfile itself is still cleaned up.
+		expect(existsSync(pidfilePath)).toBe(false);
+	}, 15000);
+
+	it("stops workers directly when it can't reach its own in-process manager", async () => {
+		const worker = await startStray();
+		writePidfile({
+			managerPid: process.pid,
+			workers: [
+				{ name: "w", pid: worker, startedAt: new Date().toISOString() },
+			],
+		});
+
+		expect(await stopFromPidfile(pidfilePath)).toEqual(["w"]);
+		expect(isPidAlive(worker)).toBe(false);
+		expect(isPidAlive(process.pid)).toBe(true);
+	}, 15000);
+
+	it("SIGKILLs a dead manager's leftover worker that ignores SIGTERM, once the deadline passes", async () => {
+		const stubborn = track(
+			spawn(process.execPath, [join(FIXTURES, "ignore-sigterm.js")], {
+				stdio: ["ignore", "pipe", "ignore"],
+			}),
+		);
+		// Its "started" line means its SIGTERM handler is installed.
+		await new Promise<void>((resolve) =>
+			stubborn.stdout?.once("data", () => resolve()),
+		);
+		writePidfile({
+			managerPid: await deadPid(),
+			shutdownTimeoutMs: 300,
+			workers: [
+				{
+					name: "stubborn",
+					pid: stubborn.pid as number,
+					startedAt: new Date().toISOString(),
+				},
+			],
+		});
+
+		expect(await stopFromPidfile(pidfilePath)).toEqual(["stubborn"]);
+		await waitFor(() => stubborn.signalCode !== null);
+		expect(stubborn.signalCode).toBe("SIGKILL");
+	}, 15000);
+
+	it("lets a plugin shut the daemon down once it's up, but ignores a call made during register()", async () => {
+		const stderr = vi.spyOn(process.stderr, "write");
+		const configPath = join(tmpDir, "braid.config.ts");
+		const keepAlive: ProcessConfig[] = [
+			{
+				name: "solo",
+				command: "node",
+				args: [join(FIXTURES, "keep-alive.js")],
+			},
+		];
+		const plugin = join(FIXTURES, "plugins", "shutdown-plugin.js");
+
+		const early = runManager(keepAlive, pidfilePath, {
+			plugins: [[plugin, { when: "register" }]],
+			configPath,
+		});
+		await waitFor(() => existsSync(pidfilePath));
+		expect(
+			stderr.mock.calls.some(([line]) =>
+				String(line).includes(
+					"ignoring a plugin's shutdown() call during startup",
+				),
+			),
+		).toBe(true);
+		await stopFromPidfile(pidfilePath);
+		expect(await early).toBe(0);
+
+		expect(
+			await runManager(keepAlive, pidfilePath, {
+				plugins: [[plugin, { when: "ready" }]],
+				configPath,
+			}),
+		).toBe(0);
+		stderr.mockRestore();
+	}, 15000);
+
+	it("leaves a pidfile alone on shutdown once another run has replaced it", async () => {
+		const controller = new AbortController();
+		const managerPromise = runManager(
+			[
+				{
+					name: "solo",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+				},
+			],
+			pidfilePath,
+			{ signal: controller.signal },
+		);
+		await waitFor(() => existsSync(pidfilePath));
+		const replaced = {
+			...(JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile),
+			controlToken: "a-newer-run",
+		};
+		writeFileSync(pidfilePath, JSON.stringify(replaced));
+
+		controller.abort();
+		await managerPromise;
+		expect(JSON.parse(readFileSync(pidfilePath, "utf8"))).toEqual(replaced);
+		rmSync(pidfilePath);
+	}, 15000);
+});
+
+describe("runManager start lock", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+	const lockPath = () => join(dirname(pidfilePath), "start.lock");
+	const keepAlive: ProcessConfig[] = [
+		{ name: "solo", command: "node", args: [join(FIXTURES, "keep-alive.js")] },
+	];
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-start-lock-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("refuses a second manager for the same directory while the first is still starting up", async () => {
+		// No await in between: the second starts before the first has written any pidfile.
+		const first = runManager(keepAlive, pidfilePath);
+		const second = runManager(keepAlive, pidfilePath);
+		await expect(second).rejects.toThrow("braid already running or starting");
+
+		await waitFor(() => existsSync(pidfilePath));
+		await stopFromPidfile(pidfilePath);
+		expect(await first).toBe(0);
+		expect(existsSync(lockPath())).toBe(false);
+	}, 15000);
+
+	it("doesn't take the lock at all for a config that fails validation", async () => {
+		await expect(
+			runManager(
+				[
+					{ name: "dup", command: "node" },
+					{ name: "dup", command: "node" },
+				],
+				pidfilePath,
+			),
+		).rejects.toThrow();
+		expect(existsSync(lockPath())).toBe(false);
+	});
+});
+
+describe("restarting a process that hasn't had its first spawn yet", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-pending-restart-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("starts it once, through its own startAfter chain, rather than forking a second, untracked copy", async () => {
+		const spawns = join(tmpDir, "spawns.log");
+		const configs: ProcessConfig[] = [
+			{
+				name: "api",
+				command: "node",
+				args: [join(FIXTURES, "slow-start.js"), "1500"],
+				readyPattern: "ready-marker",
+			},
+			{
+				name: "web",
+				command: "node",
+				// Appends one line per start, so duplicate spawns are countable.
+				args: [
+					"-e",
+					`require("fs").appendFileSync(${JSON.stringify(spawns)}, "start\\n"); setInterval(() => {}, 1000)`,
+				],
+				startAfter: { processes: ["api"] },
+			},
+		];
+		const managerPromise = runManager(configs, pidfilePath);
+		await waitFor(() => existsSync(pidfilePath));
+		const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile;
+
+		// "web" is still waiting on "api"'s readyPattern.
+		const response = await fetch(
+			`http://127.0.0.1:${pidfile.controlPort}/api/processes/restart?name=web`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${pidfile.controlToken}` },
+			},
+		);
+		expect(response.status).toBe(200);
+
+		// Past the point "api" becomes ready - when ensureReady makes its own first spawn of "web" -
+		// plus time for a duplicate to have started.
+		const apiLog = join(dirname(pidfilePath), "logs", "api.log");
+		await waitFor(
+			() =>
+				existsSync(apiLog) &&
+				readFileSync(apiLog, "utf8").includes("ready-marker"),
+			{ timeoutMs: 8000 },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		expect(readFileSync(spawns, "utf8")).toBe("start\n");
+		const web = statusFromPidfile(pidfilePath).find((w) => w.name === "web");
+		expect(web?.alive).toBe(true);
+
+		await stopFromPidfile(pidfilePath);
+		expect(await managerPromise).toBe(0);
+	}, 20000);
 });

@@ -98,7 +98,20 @@ braid logs api --json         # newline-delimited JSON, ANSI stripped</code></pr
 
 				<section id="stop">
 					<h2><code>braid stop</code></h2>
-					<p>With no name: kills every process recorded in the pidfile (and their descendants), then removes it. Works even if the daemon itself has crashed, since it kills PIDs directly rather than asking the daemon to do it.</p>
+					<p>
+						With no name: asks the daemon to shut down, and waits until every process
+						has actually stopped before returning, so a <code>braid start</code> straight
+						afterwards never overlaps the old stack. If the daemon doesn't finish within
+						the stack's own stop budget (derived from each process's
+						<code>stopTimeoutMs</code>), whatever is left is SIGKILLed. If the daemon has
+						crashed, <code>stop</code> stops any processes it left behind directly.
+					</p>
+					<p>
+						Before signalling anything, <code>stop</code> checks that each pid in the
+						pidfile still belongs to the process braid recorded. A pid reused by an
+						unrelated process since (after a reboot or a container restart) is left
+						alone, and a pidfile naming only such pids is treated as nothing running.
+					</p>
 					<pre><code class="language-bash">braid stop</code></pre>
 					<p>
 						With a name: stops just that one process through the running daemon's control

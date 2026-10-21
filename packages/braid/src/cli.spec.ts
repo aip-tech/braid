@@ -727,6 +727,63 @@ describe("runCli", () => {
 		dummy.kill();
 	}, 10000);
 
+	it("ignores a stale pidfile whose pids now belong to unrelated processes, rather than stopping them", async () => {
+		// The pids were reused (a reboot, a container restart): the live process holding them
+		// started well after this pidfile was written, so it can't be what braid recorded.
+		const unrelated = spawn(process.execPath, [
+			"-e",
+			"setInterval(() => {}, 1000)",
+		]);
+		await new Promise<void>((resolve) =>
+			unrelated.once("spawn", () => resolve()),
+		);
+		const anHourAgo = new Date(Date.now() - 3600_000).toISOString();
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		mkdirSync(dirname(pidfilePath), { recursive: true });
+		writeFileSync(
+			pidfilePath,
+			JSON.stringify({
+				managerPid: unrelated.pid,
+				startedAt: anHourAgo,
+				workers: [{ name: "solo", pid: unrelated.pid, startedAt: anHourAgo }],
+				controlPort: 1,
+				controlToken: "wrong",
+			}),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["stop", "solo"], tmpDir)).toBe(0);
+		expect(logSpy).toHaveBeenCalledWith("Nothing running.");
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		expect(unrelated.exitCode).toBeNull();
+		expect(unrelated.signalCode).toBeNull();
+		logSpy.mockRestore();
+		unrelated.kill();
+	}, 10000);
+
+	it("refuses to start while another start is still booting (holding the start lock), without touching daemon.log", async () => {
+		const braidDir = join(tmpDir, ".braid");
+		mkdirSync(braidDir, { recursive: true });
+		writeFileSync(join(braidDir, "daemon.log"), "the booting daemon's log\n");
+		// A live holder: this very process, recorded as of now.
+		writeFileSync(
+			join(braidDir, "start.lock"),
+			JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
+		);
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		expect(await runCli(["start"], tmpDir)).toBe(1);
+		expect(errorSpy).toHaveBeenCalledWith(
+			expect.stringContaining(`braid is already starting (pid ${process.pid})`),
+		);
+		expect(readFileSync(join(braidDir, "daemon.log"), "utf8")).toBe(
+			"the booting daemon's log\n",
+		);
+		errorSpy.mockRestore();
+	});
+
 	it("refuses a second start while one is already running", async () => {
 		const errorSpy = vi
 			.spyOn(console, "error")

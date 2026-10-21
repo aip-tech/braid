@@ -41,6 +41,7 @@ function createFakeContext() {
 		stopProcess: vi.fn(async () => "ok" as const),
 		restartProcess: vi.fn(async () => "ok" as const),
 		startProcess: vi.fn(async () => "ok" as const),
+		shutdown: vi.fn(),
 		log: vi.fn(),
 	};
 	return {

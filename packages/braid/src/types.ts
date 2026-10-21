@@ -171,7 +171,13 @@ export type WorkerStatusMessage =
 			pid: number;
 	  };
 
-export type PidfileWorker = { name: string; pid: number; startedAt: string };
+export type PidfileWorker = {
+	name: string;
+	pid: number;
+	startedAt: string;
+	/** Exact process identity, recorded where cheaply available (Linux) - see process-identity.ts. */
+	startId?: string;
+};
 
 export type Pidfile = {
 	managerPid: number;
@@ -181,6 +187,11 @@ export type Pidfile = {
 	controlPort: number;
 	/** Per-run bearer token the control server requires on every request. */
 	controlToken: string;
+	/** The manager's own exact process identity (Linux), like `PidfileWorker.startId`. */
+	managerStartId?: string;
+	/** The longest an orderly shutdown of this stack can legitimately take - how long `braid stop`
+	 *  waits before resorting to SIGKILL. Absent in a pidfile written by braid <0.10. */
+	shutdownTimeoutMs?: number;
 };
 
 /** A `plugins` entry: a package name/path, or a [name, options] tuple. */
@@ -348,6 +359,12 @@ export type PluginContext = {
 	startProcess(name: string): Promise<ProcessActionResult>;
 	/** Writes a line to stderr, prefixed with this plugin's name. */
 	log(message: string): void;
+	/**
+	 * Stops every process and shuts the daemon down, the same orderly way `braid stop` does (it's
+	 * what `braid stop` itself calls, via `POST /api/shutdown`). Returns immediately; the shutdown
+	 * runs in the background. A no-op if called during `register()`, before the daemon is up.
+	 */
+	shutdown(): void;
 };
 
 /** The contract every plugin implements, core or external. */

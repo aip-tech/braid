@@ -61,5 +61,11 @@ export const processesPlugin: BraidPlugin = {
 			if (!name) return;
 			respond(res, await ctx.startProcess(name), "unknown process");
 		});
+		// What `braid stop` calls: answered before the shutdown starts (which closes this very
+		// server), so the caller learns it was accepted and then waits for the processes to go.
+		ctx.registerRoute("POST", "/api/shutdown", (_req, res) => {
+			res.writeHead(202, { "content-type": "text/plain" }).end("shutting down");
+			ctx.shutdown();
+		});
 	},
 };

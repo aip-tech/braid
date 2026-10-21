@@ -16,6 +16,7 @@ async function createHarness(actions?: {
 		actions?.restartProcess ?? vi.fn(async () => "ok" as const);
 	const startProcess =
 		actions?.startProcess ?? vi.fn(async () => "ok" as const);
+	const shutdown = vi.fn();
 	const contextFor = createPluginContextFactory({
 		controlServer,
 		getWorkers: () => [],
@@ -23,6 +24,7 @@ async function createHarness(actions?: {
 		stopProcess,
 		restartProcess,
 		startProcess,
+		shutdown,
 	});
 	await processesPlugin.register(contextFor("core:processes"));
 	const { port } = await controlServer.listen();
@@ -33,6 +35,7 @@ async function createHarness(actions?: {
 		stopProcess,
 		restartProcess,
 		startProcess,
+		shutdown,
 		async post(path: string): Promise<{ status: number; text: string }> {
 			const res = await fetch(`http://127.0.0.1:${port}${path}`, {
 				method: "POST",
@@ -149,6 +152,17 @@ describe("core:processes plugin", () => {
 			const { status, text } = await h.post("/api/processes/start?name=web");
 			expect(status).toBe(404);
 			expect(text).toBe("unknown process");
+			await h.cleanup();
+		});
+	});
+
+	describe("POST /api/shutdown", () => {
+		it("answers 202 and then asks the manager to shut down", async () => {
+			const h = await createHarness();
+			const res = await h.post("/api/shutdown");
+			expect(res.status).toBe(202);
+			expect(res.text).toBe("shutting down");
+			expect(h.shutdown).toHaveBeenCalledTimes(1);
 			await h.cleanup();
 		});
 	});

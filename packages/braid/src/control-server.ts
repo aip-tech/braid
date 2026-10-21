@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import {
 	createServer,
+	type IncomingHttpHeaders,
 	type IncomingMessage,
 	type Server,
 	type ServerResponse,
@@ -46,6 +47,57 @@ export function parseRequestUrl(raw: string | undefined): URL | undefined {
 		return new URL(raw ?? "/", "http://localhost");
 	} catch {
 		return undefined;
+	}
+}
+
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Lower-cased `host[:port]` of a Host header value, or undefined if it isn't a valid one. */
+function normalizeHost(host: string): string | undefined {
+	try {
+		return new URL(`http://${host}`).host;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether a request's Host header names this machine's loopback interface. The server only listens
+ * on 127.0.0.1, so any other name means DNS rebinding: a hostile page whose own domain has been
+ * re-pointed at 127.0.0.1. Only the hostname is checked, not the port - through an SSH tunnel or a
+ * devcontainer port forward, the browser legitimately sees (and sends) a different port.
+ */
+export function isLoopbackHost(host: string | undefined): boolean {
+	if (!host) return false;
+	const normalized = normalizeHost(host);
+	if (normalized === undefined) return false;
+	return LOOPBACK_HOSTNAMES.has(new URL(`http://${normalized}`).hostname);
+}
+
+/**
+ * Whether a request comes from the page this server itself served, rather than a cross-site one a
+ * browser sent on another page's behalf. Applied to every request that can change something (any
+ * non-GET/HEAD, and upgrades): browsers always send Origin on those when they're cross-origin -
+ * including from another port on 127.0.0.1, which counts as the same *site* (so SameSite cookies
+ * still go along) but never the same origin. A request with no Origin at all comes from a non-browser
+ * client (the CLI, curl) and is allowed. The Origin is compared with the request's own Host header
+ * rather than a fixed port, so it still matches through a port forward.
+ */
+export function isSameOriginRequest(headers: IncomingHttpHeaders): boolean {
+	const site = headers["sec-fetch-site"];
+	if (site !== undefined && site !== "same-origin" && site !== "none") {
+		return false;
+	}
+	const origin = headers.origin;
+	if (origin === undefined) return true;
+	try {
+		return (
+			headers.host !== undefined &&
+			new URL(origin).host === normalizeHost(headers.host)
+		);
+	} catch {
+		// Includes the literal "null" a sandboxed or opaque origin sends.
+		return false;
 	}
 }
 
@@ -161,6 +213,21 @@ export function createControlServer(): ControlServer {
 		// this fallback from a real request without bypassing the parser entirely.
 		// istanbul ignore next
 		const method = req.method ?? "GET";
+		// Both checked before auth, so a rejected request learns nothing about the token.
+		if (!isLoopbackHost(req.headers.host)) {
+			res
+				.writeHead(421, { "content-type": "text/plain" })
+				.end("Misdirected request");
+			return;
+		}
+		if (
+			method !== "GET" &&
+			method !== "HEAD" &&
+			!isSameOriginRequest(req.headers)
+		) {
+			res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden");
+			return;
+		}
 
 		const headerToken = req.headers.authorization?.startsWith("Bearer ")
 			? req.headers.authorization.slice("Bearer ".length)
@@ -243,7 +310,11 @@ export function createControlServer(): ControlServer {
 		// the connection (a closed tab) is an uncaught ECONNRESET that kills the daemon.
 		socket.on("error", () => socket.destroy());
 		const url = parseRequestUrl(req.url);
-		if (!url) {
+		if (
+			!url ||
+			!isLoopbackHost(req.headers.host) ||
+			!isSameOriginRequest(req.headers)
+		) {
 			socket.destroy();
 			return;
 		}

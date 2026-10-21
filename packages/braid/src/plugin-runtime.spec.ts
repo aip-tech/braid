@@ -22,6 +22,7 @@ function stubContext(): PluginContext {
 		stopProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		restartProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
 		startProcess: vi.fn(async (): Promise<ProcessActionResult> => "ok"),
+		shutdown: vi.fn(),
 		log: vi.fn(),
 	};
 }
@@ -182,6 +183,7 @@ describe("createPluginContextFactory", () => {
 			stopProcess,
 			restartProcess,
 			startProcess,
+			shutdown: vi.fn(),
 		};
 	}
 
@@ -212,6 +214,8 @@ describe("createPluginContextFactory", () => {
 		expect(opts.restartProcess).toHaveBeenCalledWith("web");
 		await expect(ctx.startProcess("web")).resolves.toBe("ok");
 		expect(opts.startProcess).toHaveBeenCalledWith("web");
+		ctx.shutdown();
+		expect(opts.shutdown).toHaveBeenCalledTimes(1);
 	});
 
 	describe("log", () => {
