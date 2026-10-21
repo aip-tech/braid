@@ -88,7 +88,7 @@ export default helloPlugin;</code></pre>
 					<ul>
 						<li><code>registerRoute(method, path, handler)</code> &mdash; a plain <code>node:http</code> handler on the shared control server. Throws if that method+path is already taken by another plugin.</li>
 						<li><code>registerStatic(prefix, dir)</code> &mdash; serves files under <code>dir</code> for any request path starting with <code>prefix</code>. Throws if the prefix is already taken.</li>
-						<li><code>registerUpgrade(path, handler)</code> &mdash; raw HTTP Upgrade dispatch (e.g. for a WebSocket) on an exact path match.</li>
+						<li><code>registerUpgrade(path, handler)</code> &mdash; raw HTTP Upgrade dispatch (e.g. for a WebSocket) on an exact path match. A handler that throws or rejects is logged and its socket destroyed; it never takes the daemon down.</li>
 						<li><code>on(type, handler)</code> &mdash; subscribes to a process lifecycle event, see below.</li>
 						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt?, cpu?, memory? }[]</code> for every <em>configured</em> process, the same data <code>status</code> renders &mdash; including one with <code>autoStart: false</code> that's never been started (<code>pid</code>/<code>startedAt</code> absent, <code>alive: false</code>). <code>cpu</code>/<code>memory</code> are likewise absent until the daemon's first sample, or while a process is stopped.</li>
 						<li><code>stopProcess(name)</code> &mdash; stops one named process. Resolves <code>"ok"</code>, <code>"unknown"</code> (not configured, or not currently running), or <code>"busy"</code> (a restart is already in progress for it).</li>
@@ -134,7 +134,10 @@ export default helloPlugin;</code></pre>
 					<p>
 						Every listener is isolated: a synchronous throw or a rejected promise from
 						one plugin's handler is logged, not left to crash the manager or block
-						other plugins' listeners for the same event.
+						other plugins' listeners for the same event. Route and upgrade handlers are
+						isolated the same way. As a last resort, any error nothing catches stops
+						every process cleanly and is logged to <code>.braid/daemon.log</code>,
+						instead of killing the daemon and leaving its processes orphaned.
 					</p>
 				</section>
 

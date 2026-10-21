@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { fork } from "node:child_process";
+import { type ChildProcess, fork } from "node:child_process";
 import {
 	closeSync,
 	existsSync,
@@ -11,9 +11,11 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { installFatalHandlers } from "./fatal-handlers.js";
 import {
 	findRunningPidfile,
 	runManager,
+	shutdownBudgetMs,
 	statusFromPidfile,
 	stopFromPidfile,
 } from "./manager.js";
@@ -27,8 +29,12 @@ import type {
 } from "./types.js";
 
 const DAEMON_PATH = siblingModulePath(import.meta.url, "daemon");
-// How long `start` waits for the daemon to confirm it's up before giving up.
+// How long `start` waits for the daemon to confirm it's up before giving up, unless the config's own
+// `startupTimeoutMs` overrides it.
 const DAEMON_READY_TIMEOUT_MS = 5000;
+// After giving up, how long `start` waits for the SIGTERMed daemon to actually exit - so an
+// immediate re-run of `start` doesn't trip over a daemon that's still tearing down.
+const DAEMON_STOP_WAIT_MS = 3000;
 
 export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
 export const DEFAULT_PIDFILE_PATH = join(".braid", "run.json");
@@ -190,8 +196,14 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	}
 
 	if (exported && typeof exported === "object") {
-		const { processes, plugins, logs, foreground, statsPollIntervalMs } =
-			exported as Partial<BraidConfig>;
+		const {
+			processes,
+			plugins,
+			logs,
+			foreground,
+			statsPollIntervalMs,
+			startupTimeoutMs,
+		} = exported as Partial<BraidConfig>;
 		if (!Array.isArray(processes) || processes.length === 0) {
 			throw new Error(CONFIG_SHAPE_ERROR(configPath));
 		}
@@ -207,6 +219,7 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 			logs,
 			foreground,
 			statsPollIntervalMs,
+			startupTimeoutMs,
 		};
 	}
 
@@ -289,14 +302,17 @@ export async function startDaemon(
 	});
 	closeSync(daemonLogFd);
 
+	const readyTimeoutMs = config.startupTimeoutMs ?? DAEMON_READY_TIMEOUT_MS;
+	let timedOut = false;
 	const outcome = await new Promise<DaemonStartOutcome>((settle) => {
 		const timeout = setTimeout(() => {
 			cleanup();
+			timedOut = true;
 			settle({
 				ok: false,
-				message: `daemon (pid ${child.pid}) did not confirm startup within ${DAEMON_READY_TIMEOUT_MS}ms; check ${daemonLogPath}`,
+				message: `daemon (pid ${child.pid}) did not confirm startup within ${readyTimeoutMs}ms; stopped it, check ${daemonLogPath}`,
 			});
-		}, DAEMON_READY_TIMEOUT_MS);
+		}, readyTimeoutMs);
 
 		function cleanup(): void {
 			clearTimeout(timeout);
@@ -344,6 +360,7 @@ export async function startDaemon(
 		child.once("error", onError);
 	});
 
+	if (timedOut) await stopUnconfirmedDaemon(child);
 	if (!outcome.ok) {
 		try {
 			const tail = readFileSync(daemonLogPath, "utf8")
@@ -366,6 +383,34 @@ export async function startDaemon(
 	child.disconnect();
 	child.unref();
 	return outcome;
+}
+
+/**
+ * Stops a daemon that never confirmed startup, rather than leaving it running unsupervised by
+ * anything the user knows about. SIGTERM is safe at any point in its boot: before any process has
+ * forked, nothing has installed a SIGTERM listener yet, so the default disposition just ends it;
+ * from the moment the first process forks, runManager's own signal handler is already installed
+ * (they're registered in the same synchronous run as the forks), so it shuts down in order. Waits
+ * (bounded) for the exit, so a `start` re-run straight after this doesn't race the teardown.
+ */
+async function stopUnconfirmedDaemon(child: ChildProcess): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	const exited = new Promise<void>((resolve) =>
+		child.once("exit", () => resolve()),
+	);
+	try {
+		child.kill("SIGTERM");
+	} catch {
+		// already gone
+	}
+	let timer: NodeJS.Timeout | undefined;
+	await Promise.race([
+		exited,
+		new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, DAEMON_STOP_WAIT_MS);
+		}),
+	]);
+	clearTimeout(timer);
 }
 
 /** Streams a running manager's combined process output straight to this terminal until it shuts down. */
@@ -520,6 +565,11 @@ async function runForeground(
 	cwd: string,
 ): Promise<number> {
 	let following: Promise<void> | undefined;
+	const controller = new AbortController();
+	const removeFatalHandlers = installFatalHandlers(
+		controller,
+		shutdownBudgetMs(config.processes) + 5000,
+	);
 	const exitCode = await runManager(config.processes, pidfilePath, {
 		plugins: config.plugins,
 		configPath,
@@ -536,7 +586,8 @@ async function runForeground(
 			// reachable case to simulate from a test without literally racing the filesystem.
 			if (running) following = followLogs(running);
 		},
-	});
+		signal: controller.signal,
+	}).finally(removeFatalHandlers);
 	await following;
 	return exitCode;
 }

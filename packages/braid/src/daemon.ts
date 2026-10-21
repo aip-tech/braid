@@ -1,4 +1,5 @@
-import { runManager } from "./manager.js";
+import { installFatalHandlers } from "./fatal-handlers.js";
+import { runManager, shutdownBudgetMs } from "./manager.js";
 import { braidTag } from "./prefix.js";
 import type {
 	DaemonHandshakeMessage,
@@ -29,7 +30,13 @@ export function loadInput(): DaemonInput {
 /** Sends one handshake message back to the CLI process that forked this daemon, if still connected
  *  (a no-op once the CLI has moved on - see `DaemonHandshakeMessage`'s own doc comment). */
 export function send(message: DaemonHandshakeMessage): void {
-	process.send?.(message);
+	// Checked first because the CLI disconnects once it has moved on (including after its own
+	// startup timeout, while this daemon may still be booting). The callback covers the remaining
+	// race - a disconnect landing between the check and the send: with a callback, Node hands
+	// ERR_IPC_CHANNEL_CLOSED to it, while without one it's emitted as an uncaught 'error' event
+	// that would kill this daemon outright.
+	if (!process.connected) return;
+	process.send?.(message, () => {});
 }
 
 /** Loads this fork's input, runs the manager to completion, and exits with its resulting code -
@@ -37,12 +44,15 @@ export function send(message: DaemonHandshakeMessage): void {
  *  before or during `runManager`, so the caller below can report it and choose the exit code. */
 export async function main(): Promise<void> {
 	const input = loadInput();
+	const controller = new AbortController();
+	installFatalHandlers(controller, shutdownBudgetMs(input.processes) + 5000);
 	const exitCode = await runManager(input.processes, input.pidfilePath, {
 		plugins: input.plugins,
 		configPath: input.configPath,
 		logs: input.logs,
 		statsPollIntervalMs: input.statsPollIntervalMs,
 		onReady: () => send({ type: "ready" }),
+		signal: controller.signal,
 	});
 	process.exit(exitCode);
 }

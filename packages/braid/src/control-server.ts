@@ -35,6 +35,46 @@ const MIME_TYPES: Record<string, string> = {
 
 type StaticEntry = { prefix: string; dir: string };
 
+/**
+ * Parses a raw request target, returning undefined (rather than throwing) for one `new URL` rejects
+ * - e.g. an absolute-form target like `http://[` - so a single malformed request gets a 400 instead
+ * of an uncaught TypeError taking the whole daemon down. Not `URL.parse()`: that needs Node 22.1+,
+ * and `engines` allows any 22.x.
+ */
+export function parseRequestUrl(raw: string | undefined): URL | undefined {
+	try {
+		return new URL(raw ?? "/", "http://localhost");
+	} catch {
+		return undefined;
+	}
+}
+
+/** `decodeURIComponent`, but undefined (not a thrown URIError) for malformed percent-encoding. */
+export function decodeStaticPath(encoded: string): string | undefined {
+	try {
+		return decodeURIComponent(encoded);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Ends a response whose handling threw: a generic 500 if nothing has been sent yet, otherwise
+ *  the connection is cut - once headers are out, appending "Internal error" would just corrupt a
+ *  200 body the client can't tell apart from a real one. */
+function failResponse(res: ServerResponse): void {
+	if (res.headersSent) {
+		res.destroy();
+	} else {
+		res.writeHead(500, { "content-type": "text/plain" }).end("Internal error");
+	}
+}
+
+function describeError(error: unknown): string {
+	return error instanceof Error
+		? (error.stack ?? error.message)
+		: String(error);
+}
+
 /** Reads `name`'s value out of a raw `Cookie` request header, if present. */
 function readCookie(req: IncomingMessage, name: string): string | undefined {
 	const header = req.headers.cookie;
@@ -74,7 +114,11 @@ export function createControlServer(): ControlServer {
 		res: ServerResponse,
 	): Promise<void> {
 		// Decode before resolving so an encoded traversal payload (%2e%2e%2f) is caught too.
-		const relative = decodeURIComponent(pathname.slice(entry.prefix.length));
+		const relative = decodeStaticPath(pathname.slice(entry.prefix.length));
+		if (relative === undefined) {
+			res.writeHead(400, { "content-type": "text/plain" }).end("Bad request");
+			return;
+		}
 		const root = resolvePath(entry.dir);
 		const filePath = resolvePath(join(root, relative || "index.html"));
 		if (filePath !== root && !filePath.startsWith(root + sep)) {
@@ -95,18 +139,26 @@ export function createControlServer(): ControlServer {
 			headers["referrer-policy"] = "no-referrer";
 		}
 		res.writeHead(200, headers);
-		createReadStream(filePath).pipe(res);
+		// The 200 is already on the wire by the time an open/read error (a file removed or made
+		// unreadable after the stat above) can surface, so cutting the connection is the only honest
+		// signal left - and without a listener the error would be uncaught, killing the daemon.
+		createReadStream(filePath)
+			.on("error", () => res.destroy())
+			.pipe(res);
 	}
 
 	async function handleRequest(
 		req: IncomingMessage,
 		res: ServerResponse,
 	): Promise<void> {
-		// `?? "/"`/`?? "GET"` satisfy IncomingMessage's own optional typing - in practice, Node's
-		// HTTP parser never emits a 'request' event without both already set, so there's no way to
-		// exercise this fallback from a real request without bypassing the parser entirely.
-		// istanbul ignore next
-		const url = new URL(req.url ?? "/", "http://localhost");
+		const url = parseRequestUrl(req.url);
+		if (!url) {
+			res.writeHead(400, { "content-type": "text/plain" }).end("Bad request");
+			return;
+		}
+		// `?? "GET"` satisfies IncomingMessage's own optional typing - in practice, Node's HTTP
+		// parser never emits a 'request' event without it already set, so there's no way to exercise
+		// this fallback from a real request without bypassing the parser entirely.
 		// istanbul ignore next
 		const method = req.method ?? "GET";
 
@@ -154,16 +206,9 @@ export function createControlServer(): ControlServer {
 				// stale world-readable pidfile from before that was fixed), so route handler internals
 				// (file paths, module names) shouldn't ride along in the response body too.
 				process.stderr.write(
-					`${braidTag()} route handler for ${method} ${url.pathname} threw: ${
-						error instanceof Error
-							? (error.stack ?? error.message)
-							: String(error)
-					}\n`,
+					`${braidTag()} route handler for ${method} ${url.pathname} threw: ${describeError(error)}\n`,
 				);
-				if (!res.headersSent) {
-					res.writeHead(500, { "content-type": "text/plain" });
-				}
-				res.end("Internal error");
+				failResponse(res);
 			}
 			return;
 		}
@@ -183,14 +228,25 @@ export function createControlServer(): ControlServer {
 	}
 
 	const server: Server = createServer((req, res) => {
-		void handleRequest(req, res);
+		// Backstop for anything handleRequest itself didn't anticipate - an unhandled rejection
+		// here would otherwise take the whole daemon (and every process it supervises) down.
+		handleRequest(req, res).catch((error: unknown) => {
+			process.stderr.write(
+				`${braidTag()} request ${req.method} ${req.url} failed: ${describeError(error)}\n`,
+			);
+			failResponse(res);
+		});
 	});
 
 	server.on("upgrade", (req, socket, head) => {
-		// Same reasoning as handleRequest's own `req.url ?? "/"` above - unreachable via a real upgrade
-		// request.
-		// istanbul ignore next
-		const url = new URL(req.url ?? "/", "http://localhost");
+		// An upgrade socket has no 'error' listener of its own - without one, a client resetting
+		// the connection (a closed tab) is an uncaught ECONNRESET that kills the daemon.
+		socket.on("error", () => socket.destroy());
+		const url = parseRequestUrl(req.url);
+		if (!url) {
+			socket.destroy();
+			return;
+		}
 		// The cookie a prior GET's ?token= redirect already established authenticates an upgrade
 		// too, not just the raw query token - without this, a page that's otherwise never had to
 		// keep the secret in reach of its own JS would have no way to open a WebSocket without
@@ -203,7 +259,20 @@ export function createControlServer(): ControlServer {
 			socket.destroy();
 			return;
 		}
-		handler(req, socket, head);
+		const fail = (error: unknown): void => {
+			process.stderr.write(
+				`${braidTag()} upgrade handler for ${url.pathname} threw: ${describeError(error)}\n`,
+			);
+			socket.destroy();
+		};
+		try {
+			// UpgradeHandler is typed `=> void`, but an async function is still assignable to it -
+			// catch its rejection too, not just a synchronous throw.
+			const result: unknown = handler(req, socket, head);
+			if (result instanceof Promise) result.catch(fail);
+		} catch (error) {
+			fail(error);
+		}
 	});
 
 	return {

@@ -59,8 +59,9 @@ export function createPluginContextFactory(
 			// sent before it disconnects the IPC channel (right after "ready"/"error"), which is
 			// exactly the window a controlServerReady handler runs in. `process.connected` guards
 			// against throwing on an already-disconnected/non-forked (foreground, tests) process.
+			// The no-op callback absorbs a disconnect that races the check (see daemon.ts's `send`).
 			if (process.connected && process.send) {
-				process.send({ type: "log", message: line });
+				process.send({ type: "log", message: line }, () => {});
 			}
 		},
 	});

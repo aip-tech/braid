@@ -81,6 +81,9 @@ export type RunManagerOptions = {
 	onReady?: (workers: WorkerSnapshot[]) => void;
 	/** How often to sample CPU/memory via `pidusage`. See `BraidConfig.statsPollIntervalMs`. @default 2000 */
 	statsPollIntervalMs?: number;
+	/** Aborting this shuts the manager down with exit code 1, the same orderly way a crash does -
+	 *  how a process owner's last-resort error handler (see fatal-handlers.ts) stops everything. */
+	signal?: AbortSignal;
 };
 
 function readPidfile(pidfilePath: string): Pidfile | undefined {
@@ -165,6 +168,19 @@ export async function stopChild(
 		await killPid(child.pid, "SIGKILL");
 		await exited;
 	}
+}
+
+/**
+ * The longest a clean `shutdown()` can legitimately take for `configs`: the daemonShutdown event
+ * window, plus the slowest single stop (they run in parallel - each worker's own outer budget, or
+ * the default a hook child gets), plus a margin. Used to size the fatal-error watchdog.
+ */
+export function shutdownBudgetMs(configs: ProcessConfig[]): number {
+	const slowestStop = Math.max(
+		DEFAULT_STOP_TIMEOUT_MS,
+		...configs.map((config) => workerStopTimeoutMs(config)),
+	);
+	return SHUTDOWN_EVENT_TIMEOUT_MS + slowestStop + 2000;
 }
 
 /** `stopChild`'s own outer timeout when `child` is a worker fork (as opposed to a single-process
@@ -282,6 +298,14 @@ export async function runManager(
 	const logsDir = options.logs?.dir ?? join(dirname(pidfilePath), "logs");
 
 	const children = new Map<string, ChildProcess>();
+	// Worker forks the manager itself is currently stopping (or has stopped) on purpose - see
+	// stopWorker. A crash report or a non-zero exit from one of these is the expected fallout of
+	// that stop, not a crash of its own.
+	const stoppingChildren = new WeakSet<ChildProcess>();
+	// Each worker's current app pid (from its "app" message) - also that app's process group id,
+	// since workers spawn their apps detached. Used to clean up an app whose worker died without
+	// stopping it first (SIGKILLed, OOM-killed), which would otherwise be left orphaned.
+	const appPids = new WeakMap<ChildProcess, number>();
 	// One-off `dependsOn.run` hook processes currently in flight, so shutdown can kill them too.
 	const hookChildren = new Set<ChildProcess>();
 	const pidfileWorkers: PidfileWorker[] = [];
@@ -503,7 +527,29 @@ export async function runManager(
 		else pidfileWorkers[index] = record;
 	}
 
+	// Logs a failed pidfile rewrite once (not on every restart) until a write succeeds again.
+	let pidfileWriteFailureLogged = false;
+
+	/**
+	 * Rewrites the pidfile after a (re)spawn. Unlike the initial write (see writePidfile), a failure
+	 * here - `.braid` deleted, a full disk - is logged rather than thrown: it's called from
+	 * fire-and-forget restart chains, where a throw becomes an unhandled rejection, and a stale
+	 * pidfile is far less harmful than taking every process down over it.
+	 */
 	function rewritePidfile(): void {
+		try {
+			writePidfile();
+			pidfileWriteFailureLogged = false;
+		} catch (error) {
+			if (pidfileWriteFailureLogged) return;
+			pidfileWriteFailureLogged = true;
+			process.stderr.write(
+				`${braidTag()} couldn't update the pidfile at ${pidfilePath} (will retry on the next change): ${String(error)}\n`,
+			);
+		}
+	}
+
+	function writePidfile(): void {
 		const pidfile: Pidfile = {
 			managerPid: process.pid,
 			startedAt: managerStartedAt,
@@ -585,12 +631,7 @@ export async function runManager(
 		clearTimeout(shutdownEventTimer);
 
 		await Promise.all([
-			...[...children].map(([name, child]) =>
-				stopChild(child, {
-					timeoutMs: workerStopTimeoutMs(configsByName.get(name)),
-					label: name,
-				}),
-			),
+			...[...children].map(([name, child]) => stopWorker(name, child)),
 			...[...hookChildren].map((child) =>
 				stopChild(child, { label: "hook process" }),
 			),
@@ -675,6 +716,15 @@ export async function runManager(
 		return false;
 	}
 
+	/** Stops one worker fork on purpose (marking it so its exit isn't mistaken for a crash). */
+	function stopWorker(name: string, child: ChildProcess): Promise<void> {
+		stoppingChildren.add(child);
+		return stopChild(child, {
+			timeoutMs: workerStopTimeoutMs(configsByName.get(name)),
+			label: name,
+		});
+	}
+
 	/** Writes `message` into `config`'s own log only, prefixed the same way its output already is. */
 	function logToProcess(config: ProcessConfig, message: string): void {
 		const prefixer = linePrefixer(
@@ -701,6 +751,40 @@ export async function runManager(
 	function emitDiagnostic(config: ProcessConfig, message: string): void {
 		process.stderr.write(`${braidTag()} "${config.name}": ${message}\n`);
 		logToProcess(config, message);
+	}
+
+	/** Stops the whole stack over `config`'s crash - a no-op once a shutdown is already under way. */
+	function handleCrash(
+		config: ProcessConfig,
+		code: number | null,
+		detail?: string,
+	): void {
+		if (shuttingDown) return;
+		if (detail) {
+			process.stderr.write(`${braidTag()} "${config.name}" ${detail}\n`);
+		}
+		process.stderr.write(
+			`${braidTag()} "${config.name}" crashed, stopping all processes\n`,
+		);
+		void safeEmit(emitter, "processCrash", {
+			type: "processCrash",
+			name: config.name,
+			code,
+		});
+		void shutdown(1, config.name);
+	}
+
+	/** SIGKILLs the app process group of a worker that died without stopping it. */
+	function killOrphanedApp(child: ChildProcess): void {
+		const appPid = appPids.get(child);
+		if (appPid === undefined) return;
+		try {
+			process.kill(-appPid, "SIGKILL");
+		} catch {
+			// The group is already gone - the worker did get to stop it after all.
+		}
+		// Anything that moved itself out of the group (setsid) is still in the pid tree.
+		void killPid(appPid, "SIGKILL");
 	}
 
 	function spawnWorker(config: ProcessConfig): void {
@@ -761,6 +845,10 @@ export async function runManager(
 			// shape other than the three handled below; this guards purely against some future or
 			// stray message, not anything a legitimate config/process interaction can produce.
 			if (!isWorkerStatusMessage(message)) return;
+			if (message.type === "app") {
+				appPids.set(child, message.pid);
+				return;
+			}
 			if (message.type === "restart") {
 				void safeEmit(emitter, "processRestart", {
 					type: "processRestart",
@@ -783,16 +871,10 @@ export async function runManager(
 				}
 				return;
 			}
-			if (message.type === "crash" && !shuttingDown) {
-				process.stderr.write(
-					`${braidTag()} "${config.name}" crashed, stopping all processes\n`,
-				);
-				void safeEmit(emitter, "processCrash", {
-					type: "processCrash",
-					name: config.name,
-					code: message.code,
-				});
-				void shutdown(1, config.name);
+			// A crash report from a worker the manager is stopping is that stop racing the app's
+			// own exit, not a crash.
+			if (message.type === "crash" && !stoppingChildren.has(child)) {
+				handleCrash(config, message.code);
 			}
 		});
 		// istanbul ignore next -- forking this same already-running Node executable essentially never
@@ -818,7 +900,37 @@ export async function runManager(
 				code,
 				signal,
 			});
-			shutdownIfEveryWorkerIsDone();
+			// A worker exiting with code 0 has either finished (a one-shot app) or stopped its app
+			// itself first (it handles SIGTERM/SIGINT that way). Dying *from* SIGTERM/SIGINT means
+			// the signal landed before those handlers were installed - which happens in the same
+			// synchronous step as spawning the app, so there's no app yet and nothing to clean up
+			// (`braid stop` landing right after a start does this). Anything else the manager didn't
+			// ask for - killed by another signal (SIGKILL, the OOM killer), or exiting non-zero
+			// without having reported a crash (an error inside the worker itself) - means it may not
+			// have stopped its app, and the process is down either way: clean up and treat it as a
+			// crash.
+			const planned =
+				(code === 0 && signal === null) ||
+				signal === "SIGTERM" ||
+				signal === "SIGINT" ||
+				shuttingDown ||
+				stoppingChildren.has(child);
+			if (planned) {
+				shutdownIfEveryWorkerIsDone();
+				return;
+			}
+			// Decided on 'close', not here: 'close' only fires once the IPC channel has drained too,
+			// so a crash report sent just before the exit has definitely been seen by then.
+			// A worker that reported its own crash first has already started the shutdown by now,
+			// which handleCrash treats as nothing more to do.
+			child.once("close", () => {
+				killOrphanedApp(child);
+				handleCrash(
+					config,
+					code,
+					`worker exited unexpectedly (${signal ? `signal ${signal}` : `code ${code}`})`,
+				);
+			});
 		});
 	}
 
@@ -900,10 +1012,7 @@ export async function runManager(
 			// nothing ever removes it), dead or alive.
 			if (current) {
 				logToProcess(config, "stopping (dependency restarted)");
-				await stopChild(current, {
-					timeoutMs: workerStopTimeoutMs(config),
-					label: config.name,
-				});
+				await stopWorker(config.name, current);
 			}
 			// istanbul ignore if -- reachable only if a real shutdown lands in the narrow gap between
 			// stopChild() above resolving and this line - a genuine but sub-test-granularity race
@@ -1063,10 +1172,7 @@ export async function runManager(
 		}
 		manuallyStopped.add(name);
 		logToProcess(config, "stopping (manual stop)");
-		await stopChild(current, {
-			timeoutMs: workerStopTimeoutMs(config),
-			label: config.name,
-		});
+		await stopWorker(config.name, current);
 		return "ok";
 	}
 
@@ -1095,10 +1201,7 @@ export async function runManager(
 			const current = children.get(name);
 			if (current && current.exitCode === null && current.signalCode === null) {
 				logToProcess(config, "stopping (manual restart)");
-				await stopChild(current, {
-					timeoutMs: workerStopTimeoutMs(config),
-					label: config.name,
-				});
+				await stopWorker(config.name, current);
 			}
 			// istanbul ignore if -- same reasoning as this function's own entry guard above, now for
 			// the gap between stopChild() resolving and this line.
@@ -1190,11 +1293,18 @@ export async function runManager(
 		void ensureReady(config.name);
 	}
 
-	rewritePidfile();
+	// Deliberately the throwing variant: if the first write fails, the CLI must hear "failed", not
+	// "ready" - a daemon with no pidfile can never be found, stopped, or reached again.
+	writePidfile();
 	options.onReady?.(getWorkers());
 
 	process.on("SIGINT", onSignal);
 	process.on("SIGTERM", onSignal);
+	if (options.signal) {
+		const onAbort = (): void => void shutdown(1);
+		if (options.signal.aborted) onAbort();
+		else options.signal.addEventListener("abort", onAbort, { once: true });
+	}
 
 	return exitPromise;
 }

@@ -525,6 +525,85 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 10000);
 
+	it("stops a daemon that doesn't confirm startup within startupTimeoutMs, instead of leaving it running", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		const pluginFixture = join(
+			FIXTURES,
+			"plugins",
+			"slow-register-plugin.js",
+		).replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default { startupTimeoutMs: 1000, processes: [{ name: "solo", command: "node", args: ["${fixture}"] }], plugins: ["${pluginFixture}"] };\n`,
+		);
+		const errorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+
+		expect(await runCli(["start"], tmpDir)).toBe(1);
+		const message = errorSpy.mock.calls
+			.map((call) => String(call[0]))
+			.find((line) => line.includes("did not confirm startup within 1000ms"));
+		expect(message).toContain("stopped it");
+		const daemonPid = Number(/pid (\d+)/.exec(message ?? "")?.[1]);
+		const isAlive = (pid: number) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		expect(isAlive(daemonPid)).toBe(false);
+		// Past the point the slow register() would have finished: had the daemon been left running,
+		// it would now fork the process and write a pidfile.
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		expect(existsSync(pidfilePath)).toBe(false);
+		errorSpy.mockRestore();
+	}, 10000);
+
+	it("stops every process (rather than orphaning them) when the daemon hits an unhandled rejection", async () => {
+		const fixture = join(FIXTURES, "keep-alive.js").replace(/\\/g, "\\\\");
+		const pluginFixture = join(
+			FIXTURES,
+			"plugins",
+			"rejecting-plugin.js",
+		).replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default { processes: [{ name: "solo", command: "node", args: ["${fixture}"] }], plugins: ["${pluginFixture}"] };\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const pidfilePath = join(tmpDir, DEFAULT_PIDFILE_PATH);
+		const braidDir = dirname(pidfilePath);
+
+		expect(await runCli(["start"], tmpDir)).toBe(0);
+		const appLog = join(braidDir, "logs", "solo.log");
+		await waitFor(
+			() =>
+				existsSync(appLog) && /started \d+/.test(readFileSync(appLog, "utf8")),
+		);
+		const appPid = Number(
+			/started (\d+)/.exec(readFileSync(appLog, "utf8"))?.[1],
+		);
+
+		await waitFor(() => !existsSync(pidfilePath), { timeoutMs: 8000 });
+		const isAlive = (pid: number) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		await waitFor(() => !isAlive(appPid));
+		expect(readFileSync(join(braidDir, "daemon.log"), "utf8")).toContain(
+			"internal error, stopping all processes: Error: boom from a plugin",
+		);
+		logSpy.mockRestore();
+	}, 15000);
+
 	it("status --json prints one JSON array of the same objects the daemon reports, not the human-readable text", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
