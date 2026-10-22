@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Config options · braid</title>
+		<meta name="description" content="Every braid config option, with its type and default." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="reference">
+		<header id="topnav"></header>
+		<div class="docs-shell">
+			<nav id="sidebar"></nav>
+			<main class="docs-main">
+				<article class="content">
+					<p class="eyebrow">Reference</p>
+					<h1>Config options</h1>
+					<p class="lede">
+						Every option, with its type and default. For how they fit together, see the
+						<a href="./config.html">configuration guide</a>.
+					</p>
+
+					<h2 id="top-level">Top-level options</h2>
+					<p>Set on the object <code>braid.config.ts</code> default-exports.</p>
+					<section class="option">
+						<h3 id="processes"><code>processes</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>ProcessConfig[]</code></dd></div></dl>
+						<p>Required. The processes to run, described below. A config can also default-export this array on its own.</p>
+					</section>
+					<section class="option">
+						<h3 id="plugins"><code>plugins</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>Array&lt;string | [string, object]&gt;</code></dd></div><div><dt>Default</dt><dd><code>[]</code></dd></div></dl>
+						<p>Plugins to load, by package name or path, each optionally with an options object. Resolved from the config file's directory. Options must be plain data. See <a href="./plugins.html">Plugins</a>.</p>
+					</section>
+					<section class="option">
+						<h3 id="logs-dir"><code>logs.dir</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div><div><dt>Default</dt><dd><code>".braid/logs"</code></dd></div></dl>
+						<p>Where per-process log files go, relative to the directory braid runs in.</p>
+					</section>
+					<section class="option">
+						<h3 id="logs-maxsizebytes"><code>logs.maxSizeBytes</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>5242880</code> (5 MB)</dd></div></dl>
+						<p>Size at which a process's log rotates. One backup is kept.</p>
+					</section>
+					<section class="option">
+						<h3 id="logs-timestamps"><code>logs.timestamps</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>boolean</code></dd></div><div><dt>Default</dt><dd><code>false</code></dd></div></dl>
+						<p>Prefix every output line with <code>HH:MM:SS.mmm</code>, in log files, the terminal and the dashboard alike.</p>
+					</section>
+					<section class="option">
+						<h3 id="foreground"><code>foreground</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>boolean</code></dd></div><div><dt>Default</dt><dd><code>false</code></dd></div></dl>
+						<p>Run <code>braid start</code> attached to the terminal instead of as a background daemon. Overridden by <code>--foreground</code> and <code>--daemon</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="statspollintervalms"><code>statsPollIntervalMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>2000</code></dd></div></dl>
+						<p>How often each process's CPU and memory are sampled.</p>
+					</section>
+					<section class="option">
+						<h3 id="startuptimeoutms"><code>startupTimeoutMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>5000</code></dd></div></dl>
+						<p>How long <code>braid start</code> waits for the daemon to come up before giving up and stopping it. Raise it for a slow plugin or a cold TypeScript compile.</p>
+					</section>
+
+					<h2 id="process-options">Process options</h2>
+					<p>Set on each entry in <code>processes</code>.</p>
+					<section class="option">
+						<h3 id="name"><code>name</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>Required and unique. Used in log prefixes, as the log file name and by every command that targets a process. Can't contain <code>/</code>, <code>\</code> or control characters, and can't be <code>.</code>, <code>..</code> or <code>*</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="command"><code>command</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>Required. The executable to run, such as <code>pnpm</code> or <code>node</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="args"><code>args</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string[]</code></dd></div><div><dt>Default</dt><dd><code>[]</code></dd></div></dl>
+						<p>Arguments passed to <code>command</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="cwd"><code>cwd</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div><div><dt>Default</dt><dd>the directory braid runs in</dd></div></dl>
+						<p>Working directory, relative to the directory braid runs in.</p>
+					</section>
+					<section class="option">
+						<h3 id="env"><code>env</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>Record&lt;string, string&gt;</code></dd></div></dl>
+						<p>Extra environment variables for this process only, merged over braid's own environment.</p>
+					</section>
+					<section class="option">
+						<h3 id="color"><code>color</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>Color of the process's <code>[name]</code> prefix: <code>black</code>, <code>red</code>, <code>green</code>, <code>yellow</code>, <code>blue</code>, <code>magenta</code>, <code>cyan</code>, <code>white</code> or <code>gray</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="url"><code>url</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>An address to show in the startup summary and <code>braid status</code>. Informational only.</p>
+					</section>
+					<section class="option">
+						<h3 id="watch"><code>watch</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string[]</code></dd></div></dl>
+						<p>Paths to watch. A matching change restarts the process. See <a href="./config.html#restarting-on-changes">Restarting on file changes</a>.</p>
+					</section>
+					<section class="option">
+						<h3 id="ext"><code>ext</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div><div><dt>Default</dt><dd><code>"ts,js,json"</code></dd></div></dl>
+						<p>Comma-separated extensions that count as a change. Only used with <code>watch</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="exclude"><code>exclude</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string[]</code></dd></div></dl>
+						<p>Paths (or globs) to leave out of <code>watch</code>, each with everything under it.</p>
+					</section>
+					<section class="option">
+						<h3 id="readypattern"><code>readyPattern</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>A regex. The process counts as ready once a line of its output matches, tested against the line exactly as the app printed it. Gates <code>startAfter</code>, <code>onRestart</code> and <code>dependsOn</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="readytimeoutms"><code>readyTimeoutMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>10000</code></dd></div></dl>
+						<p>How long to wait for <code>readyPattern</code> before carrying on anyway.</p>
+					</section>
+					<section class="option">
+						<h3 id="startafter"><code>startAfter</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>{ processes: string[] }</code></dd></div></dl>
+						<p>Hold this process's first start until every named process is ready. Later restarts aren't affected.</p>
+					</section>
+					<section class="option">
+						<h3 id="dependson"><code>dependsOn</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>{ processes: string[]; run?: RestartHook }</code></dd></div></dl>
+						<p>Restart this process whenever one of the named processes restarts, once that process is ready. <code>run</code> executes after this process stops and before it starts again.</p>
+					</section>
+					<section class="option">
+						<h3 id="onrestart"><code>onRestart</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>RestartHook</code></dd></div></dl>
+						<p>A command to run after this process restarts and is ready. Dependents restart only once it succeeds.</p>
+					</section>
+					<section class="option">
+						<h3 id="beforerestart"><code>beforeRestart</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>RestartHook</code></dd></div></dl>
+						<p>A command to run after a watch-triggered stop and before the fresh start, such as regenerating code the new process needs. Requires <code>watch</code>. If it keeps failing, the process stays stopped until the next change.</p>
+					</section>
+					<section class="option">
+						<h3 id="autostart"><code>autoStart</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>boolean</code></dd></div><div><dt>Default</dt><dd><code>true</code></dd></div></dl>
+						<p>Set <code>false</code> to leave the process out of <code>braid start</code>; start it with <code>braid start &lt;name&gt;</code>. Can't be combined with <code>dependsOn</code>, or be another process's <code>startAfter</code> target.</p>
+					</section>
+					<section class="option">
+						<h3 id="autorestart"><code>autoRestart</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>boolean</code></dd></div><div><dt>Default</dt><dd><code>false</code></dd></div></dl>
+						<p>Restart the process when it crashes, instead of stopping the whole stack.</p>
+					</section>
+					<section class="option">
+						<h3 id="maxrestarts"><code>maxRestarts</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>10</code></dd></div></dl>
+						<p>Crashes in a row before <code>autoRestart</code> gives up and stops the stack.</p>
+					</section>
+					<section class="option">
+						<h3 id="restartdelayms"><code>restartDelayMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>1000</code></dd></div></dl>
+						<p>First <code>autoRestart</code> delay, doubling on each crash in a row, up to 10 seconds.</p>
+					</section>
+					<section class="option">
+						<h3 id="minuptimems"><code>minUptimeMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>1000</code></dd></div></dl>
+						<p>How long a restarted process must stay up for its crash count to reset.</p>
+					</section>
+					<section class="option">
+						<h3 id="stoptimeoutms"><code>stopTimeoutMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>5000</code></dd></div></dl>
+						<p>How long to wait after <code>SIGTERM</code> before sending <code>SIGKILL</code>.</p>
+					</section>
+
+					<h2 id="restart-hook">RestartHook</h2>
+					<p>The shape of <code>dependsOn.run</code>, <code>onRestart</code> and <code>beforeRestart</code>. A hook that exits non-zero is retried.</p>
+					<section class="option">
+						<h3 id="hook-command"><code>command</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>Required. The executable to run.</p>
+					</section>
+					<section class="option">
+						<h3 id="hook-args"><code>args</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string[]</code></dd></div><div><dt>Default</dt><dd><code>[]</code></dd></div></dl>
+						<p>Arguments passed to <code>command</code>.</p>
+					</section>
+					<section class="option">
+						<h3 id="hook-cwd"><code>cwd</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>string</code></dd></div></dl>
+						<p>Working directory. For <code>beforeRestart</code> it's relative to the process's own <code>cwd</code>; for the other hooks, to the directory braid runs in.</p>
+					</section>
+					<section class="option">
+						<h3 id="hook-retries"><code>retries</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>5</code></dd></div></dl>
+						<p>Extra attempts after a non-zero exit.</p>
+					</section>
+					<section class="option">
+						<h3 id="hook-retrydelayms"><code>retryDelayMs</code></h3>
+						<dl class="option-meta"><div><dt>Type</dt><dd><code>number</code></dd></div><div><dt>Default</dt><dd><code>1000</code></dd></div></dl>
+						<p>Delay between attempts.</p>
+					</section>
+				</article>
+				<nav id="pager"></nav>
+			</main>
+			<aside id="toc"></aside>
+		</div>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

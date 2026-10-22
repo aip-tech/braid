@@ -3,156 +3,123 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>CLI &middot; braid</title>
+		<title>CLI · braid</title>
+		<meta name="description" content="Every braid command and flag." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
 	<body data-page="cli">
-		<div id="topnav"></div>
-
+		<header id="topnav"></header>
 		<div class="docs-shell">
-			<aside id="sidebar"></aside>
-
+			<nav id="sidebar"></nav>
 			<main class="docs-main">
-				<h1>CLI</h1>
-				<p class="lede">
-					<code>start</code> reads <code>braid.config.ts</code> from the current
-					directory by default &mdash; pass <code>--config &lt;path&gt;</code> to point
-					elsewhere. Every other command just talks to the pidfile of whatever's already
-					running, so it doesn't need the config again.
-				</p>
+				<article class="content">
+					<p class="eyebrow">Reference</p>
+					<h1>CLI</h1>
+					<p class="lede">
+						Run braid from your project's root. Commands other than
+						<code>start</code> talk to the stack already running there.
+					</p>
 
-				<section id="start">
-					<h2><code>braid start</code></h2>
-					<p>
-						Forks every configured process, writes <code>.braid/run.json</code> (the
-						pidfile), and detaches as a background daemon &mdash; the CLI process exits
-						once every process has started; the daemon keeps running after.
-					</p>
-					<pre><code class="language-bash">braid start
-braid start --config ./other.config.ts</code></pre>
-					<p>Refuses to start if a pidfile from a still-running daemon already exists.</p>
-					<p>
-						Pass <code>--foreground</code> to run attached to this terminal instead
-						&mdash; <code>start</code> then blocks, streaming every process's combined
-						output here, until Ctrl-C (or a <code>braid stop</code> from another
-						terminal) stops everything. A config's own <code>foreground: true</code>
-						makes this the default; <code>--daemon</code> forces the background daemon
-						regardless of what the config says.
-					</p>
-					<pre><code class="language-bash">braid start --foreground
-braid start --daemon</code></pre>
-					<p>
-						Pass <code>--no-watch</code> to ignore every process's <code>watch</code>
-						(and <code>beforeRestart</code>, which requires it) for this one run,
-						without touching the config file &mdash; e.g. running a dev config
-						unmodified where auto-restart isn't wanted. Manual
-						<code>restart &lt;name&gt;</code>, <code>dependsOn</code> cascades, and
-						<code>onRestart</code> hooks are unaffected; only the watch-triggered
-						restart path is disabled.
-					</p>
-					<pre><code class="language-bash">braid start --no-watch</code></pre>
-					<p>
-						With a name: starts just that one configured process inside an
-						already-running daemon, leaving everything else alone &mdash; the way to
-						bring up a process configured with <code>autoStart: false</code> (see
-						<a href="./config.html#starting-on-demand">Starting on demand</a>). Like
-						<code>restart &lt;name&gt;</code>, this needs the daemon to actually be
-						reachable, and is a safe no-op if the process is already running.
-					</p>
-					<pre><code class="language-bash">braid start cron</code></pre>
-					<p>
-						Once every process has forked, prints a one-time summary: a header
-						counting how many are actually alive, and one line per process with its
-						alive marker, <a href="./config.html#startup-summary"><code>url</code></a>
-						(if set), and pid. See <a href="./config.html#startup-summary">Startup
-						summary and <code>url</code></a>.
-					</p>
-				</section>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr><th>Command</th><th>What it does</th></tr>
+							</thead>
+							<tbody>
+								<tr><td><a href="#start"><code>braid start [name]</code></a></td><td>Start the stack, or one process in it.</td></tr>
+								<tr><td><a href="#status"><code>braid status</code></a></td><td>List every process with its state and resource use.</td></tr>
+								<tr><td><a href="#logs"><code>braid logs [name]</code></a></td><td>Print or follow process output.</td></tr>
+								<tr><td><a href="#restart"><code>braid restart &lt;name&gt;</code></a></td><td>Restart one process.</td></tr>
+								<tr><td><a href="#stop"><code>braid stop [name]</code></a></td><td>Stop the stack, or one process in it.</td></tr>
+							</tbody>
+						</table>
+					</div>
 
-				<section id="status">
-					<h2><code>braid status</code></h2>
+					<h2 id="start">braid start</h2>
+					<pre><code class="language-bash">braid start                        # start the whole stack in the background
+braid start --foreground           # stay attached, streaming output
+braid start --config ./dev.config.ts
+braid start report                 # start one process in the running stack</code></pre>
 					<p>
-						Lists each configured process's name, PID, and state: running, stopped
-						(ran before, has since exited), or not started (an <code>autoStart:
-						false</code> process nobody's started yet in this daemon's lifetime) &mdash;
-						along with its restart count and uptime once it's sampled either. See
-						<a href="./config.html#stats">Process stats, restart count, and uptime</a>.
+						Starts every process (except those with <code>autoStart: false</code>),
+						then prints a summary and returns. With a name, starts that one process
+						inside the stack that's already running, and does nothing if it's
+						already up.
 					</p>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+							<tbody>
+								<tr><td><code>--config &lt;path&gt;</code></td><td>Use this config file instead of <code>./braid.config.ts</code>.</td></tr>
+								<tr><td><code>--foreground</code></td><td>Stay attached to the terminal until <kbd>Ctrl</kbd>+<kbd>C</kbd>.</td></tr>
+								<tr><td><code>--daemon</code></td><td>Run in the background even if the config sets <code>foreground: true</code>.</td></tr>
+								<tr><td><code>--no-watch</code></td><td>Ignore every <code>watch</code> (and <code>beforeRestart</code>) for this run.</td></tr>
+							</tbody>
+						</table>
+					</div>
+					<p>
+						Fails if a stack is already running or starting in the same directory,
+						and stops a daemon that doesn't come up within
+						<a href="./reference.html#startuptimeoutms"><code>startupTimeoutMs</code></a>.
+					</p>
+
+					<h2 id="status">braid status</h2>
 					<pre><code class="language-bash">braid status
-braid status --json    # one JSON array of the same status objects, for scripting/CI</code></pre>
-				</section>
+braid status --json</code></pre>
+					<pre><code class="nohighlight">● api  pid 40214  running  cpu 1.8%  mem 182.4 MB  restarts 2  up 14m 3s
+● web  pid 40215  running  cpu 0.4%  mem 96.1 MB  restarts 0  up 14m 3s
+○ report  not started</code></pre>
+					<p>
+						Shows each process as running, stopped, or not started.
+						<code>--json</code> prints the same data as a JSON array, for scripts and
+						CI.
+					</p>
 
-				<section id="logs">
-					<h2><code>braid logs</code></h2>
-					<p>Prints a process's persisted, rotated log &mdash; or every process, interleaved, if no name is given.</p>
-					<pre><code class="language-bash">braid logs                    # every process, interleaved
-braid logs api                # just "api"
-braid logs api --follow       # keep streaming new output
-braid logs api --lines 50     # only the last 50 lines
-braid logs api --json         # newline-delimited JSON, ANSI stripped</code></pre>
-					<p>
-						See <a href="./config.html#json-output">Machine-readable output</a> for
-						the exact shape <code>--json</code> streams.
-					</p>
-				</section>
+					<h2 id="logs">braid logs</h2>
+					<pre><code class="language-bash">braid logs                 # every process, interleaved
+braid logs api --follow    # stream new output
+braid logs api --lines 50  # the last 50 lines
+braid logs --json          # one JSON object per line</code></pre>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+							<tbody>
+								<tr><td><code>--follow</code></td><td>Keep streaming new output until <kbd>Ctrl</kbd>+<kbd>C</kbd>.</td></tr>
+								<tr><td><code>--lines &lt;n&gt;</code></td><td>Only the last <code>n</code> lines.</td></tr>
+								<tr><td><code>--json</code></td><td>One <code>{"name", "text"}</code> object per line, colors stripped.</td></tr>
+							</tbody>
+						</table>
+					</div>
 
-				<section id="stop">
-					<h2><code>braid stop</code></h2>
-					<p>
-						With no name: asks the daemon to shut down, and waits until every process
-						has actually stopped before returning, so a <code>braid start</code> straight
-						afterwards never overlaps the old stack. If the daemon doesn't finish within
-						the stack's own stop budget (derived from each process's
-						<code>stopTimeoutMs</code>), whatever is left is SIGKILLed. If the daemon has
-						crashed, <code>stop</code> stops any processes it left behind directly.
-					</p>
-					<p>
-						Before signalling anything, <code>stop</code> checks that each pid in the
-						pidfile still belongs to the process braid recorded. A pid reused by an
-						unrelated process since (after a reboot or a container restart) is left
-						alone, and a pidfile naming only such pids is treated as nothing running.
-					</p>
-					<pre><code class="language-bash">braid stop</code></pre>
-					<p>
-						With a name: stops just that one process through the running daemon's control
-						server, leaving everything else (and the daemon itself) running. Unlike the
-						bare form, this needs the daemon to actually be reachable &mdash; there's no
-						direct-PID fallback for a single process, since the daemon's own in-process
-						state (dependents, in-flight guards) has to be involved.
-					</p>
-					<pre><code class="language-bash">braid stop api</code></pre>
-				</section>
-
-				<section id="restart">
-					<h2><code>braid restart &lt;name&gt;</code></h2>
-					<p>
-						Stops and respawns one named process, then runs its own <code>onRestart</code>
-						hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a
-						watch-triggered restart would. A name is required &mdash; there's no bare
-						whole-stack <code>braid restart</code>.
-					</p>
+					<h2 id="restart">braid restart</h2>
 					<pre><code class="language-bash">braid restart api</code></pre>
 					<p>
-						Can take a moment to return if <code>onRestart</code> keeps retrying. Prints an
-						error and exits non-zero if the daemon isn't reachable.
+						Stops and starts one process, then runs its <code>onRestart</code> hook and
+						restarts anything that <code>dependsOn</code> it, exactly as a file change
+						would.
 					</p>
-				</section>
 
-				<section id="flags">
-					<h2>Flags</h2>
-					<ul>
-						<li><code>--config &lt;path&gt;</code> &mdash; <code>start</code> only; use a config file other than <code>./braid.config.ts</code>.</li>
-						<li><code>--foreground</code> &mdash; <code>start</code> only; run attached to this terminal instead of forking a background daemon.</li>
-						<li><code>--daemon</code> &mdash; <code>start</code> only; force the background daemon, overriding a config's <code>foreground: true</code>.</li>
-						<li><code>--no-watch</code> &mdash; <code>start</code> only; ignore every process's <code>watch</code>/<code>beforeRestart</code> for this run.</li>
-						<li><code>--follow</code> &mdash; <code>logs</code> only; keep the connection open and stream new output as it arrives.</li>
-						<li><code>--lines &lt;n&gt;</code> &mdash; <code>logs</code> only; only print the last <code>n</code> lines.</li>
-						<li><code>--json</code> &mdash; <code>status</code>/<code>logs</code> only; machine-readable output instead of the default human-readable text.</li>
-					</ul>
-				</section>
+					<h2 id="stop">braid stop</h2>
+					<pre><code class="language-bash">braid stop        # the whole stack
+braid stop api    # one process; the rest keep running</code></pre>
+					<p>
+						Without a name, waits until every process has actually exited, so a
+						<code>braid start</code> straight after never overlaps the old stack. A
+						process still running after its <code>stopTimeoutMs</code> is killed.
+					</p>
+					<div class="callout callout-note">
+						<p>
+							Before signalling anything, <code>stop</code> checks that each recorded
+							process is still the one braid started. After a reboot, an unrelated
+							process that happens to reuse an old pid is left alone.
+						</p>
+					</div>
+				</article>
+				<nav id="pager"></nav>
 			</main>
+			<aside id="toc"></aside>
 		</div>
-
 		<script type="module" src="/src/main.ts"></script>
 	</body>
 </html>
