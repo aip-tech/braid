@@ -12,6 +12,7 @@ import {
 import { dirname, join } from "node:path";
 import pidusage from "pidusage";
 import treeKill from "tree-kill";
+import { childEnv } from "./child-env.js";
 import { createControlServer } from "./control-server.js";
 import { CORE_PLUGINS } from "./core-plugins/index.js";
 import {
@@ -849,7 +850,7 @@ export async function runManager(
 
 			const hookChild = spawn(hook.command, hook.args ?? [], {
 				cwd: hook.cwd ? join(baseCwd, hook.cwd) : baseCwd,
-				env: process.env,
+				env: childEnv(process.env),
 			});
 			hookChildren.add(hookChild);
 			hookChild.stdout?.on("data", (chunk: Buffer) =>
@@ -968,8 +969,7 @@ export async function runManager(
 		const child = fork(WORKER_PATH, [], {
 			cwd: config.cwd ? join(baseCwd, config.cwd) : baseCwd,
 			env: {
-				...process.env,
-				...config.env,
+				...childEnv(process.env, config.env),
 				BRAID_CONFIG: JSON.stringify(config),
 				// A separate env var rather than folding into BRAID_CONFIG - it's a global logs
 				// setting, not part of this one process's own ProcessConfig shape.
@@ -1045,16 +1045,15 @@ export async function runManager(
 				}
 				return;
 			}
-			if (message.type === "crash") {
-				// A crash report from a worker the manager is stopping is that stop racing the app's
-				// own exit, not a crash. Defence in depth: stopWorker signals only the worker, which
-				// marks itself as stopping before it touches its app, so this needs an app to crash on
-				// its own in the instant between stopWorker's call and the worker's signal handler
-				// running - real, but not something a test can line up on cue.
-				// istanbul ignore if
-				if (stoppingChildren.has(child)) return;
-				handleCrash(config, message.code);
-			}
+			// Every other message type has returned above, so this is a crash report.
+			// A crash report from a worker the manager is stopping is that stop racing the app's
+			// own exit, not a crash. Defence in depth: stopWorker signals only the worker, which
+			// marks itself as stopping before it touches its app, so this needs an app to crash on
+			// its own in the instant between stopWorker's call and the worker's signal handler
+			// running - real, but not something a test can line up on cue.
+			// istanbul ignore if
+			if (stoppingChildren.has(child)) return;
+			handleCrash(config, message.code);
 		});
 		// istanbul ignore next -- forking this same already-running Node executable essentially never
 		// emits its own 'error' event (unlike spawn()ing an arbitrary user command); see spawnWorker's

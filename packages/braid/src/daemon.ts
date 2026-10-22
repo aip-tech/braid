@@ -3,28 +3,56 @@ import { runManager, shutdownBudgetMs } from "./manager.js";
 import { braidTag } from "./prefix.js";
 import type {
 	DaemonHandshakeMessage,
-	PluginConfigEntry,
-	ProcessConfig,
+	DaemonInput,
+	DaemonInputMessage,
 } from "./types.js";
 
-type DaemonInput = {
-	processes: ProcessConfig[];
-	plugins?: PluginConfigEntry[];
-	configPath?: string;
-	logs?: { dir?: string; maxSizeBytes?: number };
-	pidfilePath: string;
-	statsPollIntervalMs?: number;
+// How long a freshly forked daemon waits for its input from the CLI. The CLI sends it right after
+// forking, and IPC buffers it until this side listens, so this only trips if the CLI died first.
+export const INPUT_TIMEOUT_MS = 5000;
+
+/** The part of `process` receiveInput needs - injectable, since in tests the real IPC channel
+ *  belongs to the test runner. */
+export type InputChannel = {
+	on(event: "message", listener: (message: unknown) => void): unknown;
+	off(event: "message", listener: (message: unknown) => void): unknown;
 };
 
-/** Reads and parses this fork's `BRAID_DAEMON_INPUT` env var - the daemon's whole config, passed
- *  by `cli.ts`'s `startDaemon` rather than re-read from disk (config files can be arbitrary JS/TS,
- *  not just data, so re-importing one from a different process/cwd isn't a safe substitute). */
-export function loadInput(): DaemonInput {
-	const raw = process.env.BRAID_DAEMON_INPUT;
-	if (!raw) {
-		throw new Error("braid daemon started without BRAID_DAEMON_INPUT");
-	}
-	return JSON.parse(raw) as DaemonInput;
+function isInputMessage(message: unknown): message is DaemonInputMessage {
+	return (
+		typeof message === "object" &&
+		message !== null &&
+		(message as { type?: unknown }).type === "braid-daemon-input"
+	);
+}
+
+/**
+ * Waits for the daemon's input - the CLI's loaded config - to arrive over IPC from the `braid start`
+ * that forked it (see `DaemonInputMessage`). Passed rather than re-read from disk because a config
+ * file can be arbitrary JS/TS, not just data, so re-importing it from another process isn't a safe
+ * substitute. Any other message on the channel is ignored.
+ */
+export function receiveInput(
+	channel: InputChannel = process,
+	timeoutMs = INPUT_TIMEOUT_MS,
+): Promise<DaemonInput> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			channel.off("message", onMessage);
+			reject(
+				new Error(
+					`braid daemon didn't receive its config from the CLI within ${timeoutMs}ms`,
+				),
+			);
+		}, timeoutMs);
+		function onMessage(message: unknown): void {
+			if (!isInputMessage(message)) return;
+			clearTimeout(timer);
+			channel.off("message", onMessage);
+			resolve(message.input);
+		}
+		channel.on("message", onMessage);
+	});
 }
 
 /** Sends one handshake message back to the CLI process that forked this daemon, if still connected
@@ -39,11 +67,11 @@ export function send(message: DaemonHandshakeMessage): void {
 	process.send?.(message, () => {});
 }
 
-/** Loads this fork's input, runs the manager to completion, and exits with its resulting code -
+/** Receives this fork's input, runs the manager to completion, and exits with its resulting code -
  *  the whole lifetime of the daemon process. Rejects (rather than exiting itself) on any failure
  *  before or during `runManager`, so the caller below can report it and choose the exit code. */
-export async function main(): Promise<void> {
-	const input = loadInput();
+export async function main(channel: InputChannel = process): Promise<void> {
+	const input = await receiveInput(channel);
 	const controller = new AbortController();
 	installFatalHandlers(controller, shutdownBudgetMs(input.processes) + 5000);
 	const exitCode = await runManager(input.processes, input.pidfilePath, {
@@ -57,7 +85,7 @@ export async function main(): Promise<void> {
 	process.exit(exitCode);
 }
 
-/** Reports a fatal startup failure (a bad `BRAID_DAEMON_INPUT`, or anything `runManager` itself
+/** Reports a fatal startup failure (no input from the CLI, or anything `runManager` itself
  *  threw before ever forking a worker) both to `daemon.log` (this process's own stderr, redirected
  *  there by `cli.ts`'s `startDaemon`) and back to the CLI via the handshake protocol, so it can
  *  print a clear message instead of just "the daemon didn't confirm startup in time". */
@@ -70,7 +98,10 @@ export function reportStartupFailure(error: unknown): void {
 // Thin process entrypoint - exercised end-to-end via cli.spec.ts through a real forked process;
 // the pieces above are unit-tested directly in daemon.spec.ts instead of re-testing this glue.
 /* istanbul ignore next */
-if (process.env.BRAID_DAEMON_INPUT) {
+if (process.env.BRAID_DAEMON === "1") {
+	// Only a marker that this module is the daemon entrypoint - removed straight away so nothing
+	// the daemon spawns inherits it (child-env.ts strips it too).
+	delete process.env.BRAID_DAEMON;
 	main().catch((error: unknown) => {
 		reportStartupFailure(error);
 		process.exit(1);

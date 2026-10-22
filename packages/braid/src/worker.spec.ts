@@ -196,6 +196,34 @@ describe("runWorker", () => {
 			expect(watchFiles).not.toHaveBeenCalled();
 		});
 
+		it("doesn't pass braid's own internal variables on to the app or its hooks", async () => {
+			process.env.BRAID_CONFIG = '{"name":"web"}';
+			process.env.BRAID_LOG_TIMESTAMPS = "";
+			try {
+				runWorker({
+					name: "web",
+					command: "node",
+					watch: ["/project/src"],
+					beforeRestart: { command: "make" },
+				});
+				watcher.emit("all", "change", "/project/src/index.ts");
+				await vi.advanceTimersByTimeAsync(RESTART_DEBOUNCE_MS);
+				spawnCalls[0]?.child.emit("exit", null);
+				await vi.advanceTimersByTimeAsync(0);
+				expect(spawnCalls.map((call) => call.command)).toEqual([
+					"node",
+					"make",
+				]);
+				for (const call of spawnCalls) {
+					expect(call.options.env).not.toHaveProperty("BRAID_CONFIG");
+					expect(call.options.env).not.toHaveProperty("BRAID_LOG_TIMESTAMPS");
+				}
+			} finally {
+				delete process.env.BRAID_CONFIG;
+				delete process.env.BRAID_LOG_TIMESTAMPS;
+			}
+		});
+
 		it("prefixes and forwards the child's stdout/stderr to this process's own streams", () => {
 			runWorker({ name: "web", command: "node" });
 			const child = lastChild();

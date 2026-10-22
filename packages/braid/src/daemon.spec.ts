@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { braidTag } from "./prefix.js";
 import type { ProcessConfig } from "./types.js";
@@ -16,18 +17,26 @@ vi.mock("./fatal-handlers.js", () => ({
 		installFatalHandlersMock(...(args as [])),
 }));
 
-// daemon.ts runs `main()` for real, at module load, if BRAID_DAEMON_INPUT happens to already be
-// set when it's imported (see its own bottom-of-file guard) - unset it first so importing the
-// module here (to unit-test its exported pieces directly) can't accidentally trigger that.
-delete process.env.BRAID_DAEMON_INPUT;
-const { loadInput, main, reportStartupFailure, send } = await import(
-	"./daemon.js"
-);
+// daemon.ts runs `main()` for real, at module load, if BRAID_DAEMON=1 happens to already be set
+// when it's imported (see its own bottom-of-file guard) - unset it first so importing the module
+// here (to unit-test its exported pieces directly) can't accidentally trigger that.
+delete process.env.BRAID_DAEMON;
+const { INPUT_TIMEOUT_MS, main, receiveInput, reportStartupFailure, send } =
+	await import("./daemon.js");
+
+/** Stands in for the daemon's IPC channel - in a test, the real one belongs to the test runner. */
+function fakeChannel() {
+	const channel = new EventEmitter();
+	return Object.assign(channel, {
+		deliver(input: unknown) {
+			channel.emit("message", { type: "braid-daemon-input", input });
+		},
+	});
+}
 
 const PROCESSES: ProcessConfig[] = [{ name: "web", command: "node" }];
 
 describe("daemon.ts", () => {
-	const originalInput = process.env.BRAID_DAEMON_INPUT;
 	const originalSend = process.send;
 
 	const originalConnected = process.connected;
@@ -41,43 +50,55 @@ describe("daemon.ts", () => {
 	});
 
 	afterEach(() => {
-		if (originalInput === undefined) {
-			process.env.BRAID_DAEMON_INPUT = undefined;
-			delete process.env.BRAID_DAEMON_INPUT;
-		} else {
-			process.env.BRAID_DAEMON_INPUT = originalInput;
-		}
 		process.send = originalSend;
 		process.connected = originalConnected;
 		vi.restoreAllMocks();
 	});
 
-	describe("loadInput", () => {
-		it("throws a clear error when BRAID_DAEMON_INPUT is unset", () => {
-			delete process.env.BRAID_DAEMON_INPUT;
-			expect(() => loadInput()).toThrow(
-				"braid daemon started without BRAID_DAEMON_INPUT",
-			);
+	describe("receiveInput", () => {
+		it("resolves with the input from the CLI's input message, ignoring anything else on the channel", async () => {
+			const channel = fakeChannel();
+			const received = receiveInput(channel);
+			const input = { processes: PROCESSES, pidfilePath: "/x/run.json" };
+			// Other traffic first - e.g. the test runner's own RPC over a shared channel.
+			channel.emit("message", { type: "something-else", input: "not this" });
+			channel.emit("message", "a bare string");
+			channel.emit("message", null);
+			channel.deliver(input);
+			await expect(received).resolves.toEqual(input);
+			expect(channel.listenerCount("message")).toBe(0);
 		});
 
-		it("throws the same error for an empty string, not just a missing var", () => {
-			process.env.BRAID_DAEMON_INPUT = "";
-			expect(() => loadInput()).toThrow(
-				"braid daemon started without BRAID_DAEMON_INPUT",
-			);
+		it("gives up with a clear error if no input arrives in time", async () => {
+			vi.useFakeTimers();
+			try {
+				const channel = fakeChannel();
+				const received = receiveInput(channel, 1000);
+				const assertion = expect(received).rejects.toThrow(
+					"braid daemon didn't receive its config from the CLI within 1000ms",
+				);
+				await vi.advanceTimersByTimeAsync(1000);
+				await assertion;
+				expect(channel.listenerCount("message")).toBe(0);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
-		it("parses the JSON payload into the daemon's input shape", () => {
-			const input = {
-				processes: PROCESSES,
-				plugins: [["@aip-tech/braid-plugin-ui", { path: "/ui" }]],
-				configPath: "/project/braid.config.ts",
-				logs: { dir: "/project/.braid/logs", maxSizeBytes: 1024 },
-				pidfilePath: "/project/.braid/run.json",
-				statsPollIntervalMs: 500,
-			};
-			process.env.BRAID_DAEMON_INPUT = JSON.stringify(input);
-			expect(loadInput()).toEqual(input);
+		it("listens on the real process channel by default, with the default timeout", async () => {
+			vi.useFakeTimers();
+			try {
+				const on = vi.spyOn(process, "on");
+				const received = receiveInput();
+				expect(on).toHaveBeenCalledWith("message", expect.any(Function));
+				const assertion = expect(received).rejects.toThrow(
+					`within ${INPUT_TIMEOUT_MS}ms`,
+				);
+				await vi.advanceTimersByTimeAsync(INPUT_TIMEOUT_MS);
+				await assertion;
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 
@@ -130,7 +151,7 @@ describe("daemon.ts", () => {
 				pidfilePath: "/project/.braid/run.json",
 				statsPollIntervalMs: 500,
 			};
-			process.env.BRAID_DAEMON_INPUT = JSON.stringify(input);
+			const channel = fakeChannel();
 			runManagerMock.mockResolvedValue(7);
 			const exitSpy = vi
 				.spyOn(process, "exit")
@@ -138,7 +159,9 @@ describe("daemon.ts", () => {
 			const sendSpy = vi.fn(() => true);
 			process.send = sendSpy as unknown as typeof process.send;
 
-			await main();
+			const running = main(channel);
+			channel.deliver(input);
+			await running;
 
 			expect(runManagerMock).toHaveBeenCalledTimes(1);
 			const [processes, pidfilePath, options] = runManagerMock.mock.calls[0];
@@ -176,11 +199,13 @@ describe("daemon.ts", () => {
 
 		it("passes undefined for every optional field a minimal input omits", async () => {
 			const input = { processes: PROCESSES, pidfilePath: "/x/run.json" };
-			process.env.BRAID_DAEMON_INPUT = JSON.stringify(input);
+			const channel = fakeChannel();
 			runManagerMock.mockResolvedValue(0);
 			vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
 
-			await main();
+			const running = main(channel);
+			channel.deliver(input);
+			await running;
 
 			const [, , options] = runManagerMock.mock.calls[0];
 			expect(options.plugins).toBeUndefined();
@@ -189,23 +214,45 @@ describe("daemon.ts", () => {
 			expect(options.statsPollIntervalMs).toBeUndefined();
 		});
 
-		it("rejects without calling runManager when the input itself is missing", async () => {
-			delete process.env.BRAID_DAEMON_INPUT;
-			await expect(main()).rejects.toThrow("BRAID_DAEMON_INPUT");
-			expect(runManagerMock).not.toHaveBeenCalled();
+		it("rejects without calling runManager when the input never arrives", async () => {
+			vi.useFakeTimers();
+			try {
+				const running = main(fakeChannel());
+				const assertion = expect(running).rejects.toThrow(
+					"didn't receive its config",
+				);
+				await vi.advanceTimersByTimeAsync(INPUT_TIMEOUT_MS);
+				await assertion;
+				expect(runManagerMock).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("waits on the real process channel by default", async () => {
+			vi.useFakeTimers();
+			try {
+				const on = vi.spyOn(process, "on");
+				const running = main();
+				expect(on).toHaveBeenCalledWith("message", expect.any(Function));
+				const assertion = expect(running).rejects.toThrow();
+				await vi.advanceTimersByTimeAsync(INPUT_TIMEOUT_MS);
+				await assertion;
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("propagates a runManager rejection instead of exiting", async () => {
-			process.env.BRAID_DAEMON_INPUT = JSON.stringify({
-				processes: PROCESSES,
-				pidfilePath: "/x/run.json",
-			});
 			runManagerMock.mockRejectedValueOnce(new Error("already running"));
 			const exitSpy = vi
 				.spyOn(process, "exit")
 				.mockImplementation(() => undefined as never);
+			const channel = fakeChannel();
 
-			await expect(main()).rejects.toThrow("already running");
+			const running = main(channel);
+			channel.deliver({ processes: PROCESSES, pidfilePath: "/x/run.json" });
+			await expect(running).rejects.toThrow("already running");
 			expect(exitSpy).not.toHaveBeenCalled();
 		});
 	});

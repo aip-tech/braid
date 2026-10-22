@@ -29,6 +29,7 @@ type FakeChild = EventEmitter & {
 	disconnect: () => void;
 	unref: () => void;
 	kill: (signal?: NodeJS.Signals) => boolean;
+	send: (message: unknown) => boolean;
 };
 
 function makeFakeChild(pid: number): FakeChild {
@@ -39,6 +40,7 @@ function makeFakeChild(pid: number): FakeChild {
 		disconnect: vi.fn(),
 		unref: vi.fn(),
 		kill: vi.fn(() => true),
+		send: vi.fn(() => true),
 	});
 }
 
@@ -126,6 +128,59 @@ describe("startDaemon", () => {
 		expect(!outcome.ok && outcome.message).toBe(
 			"failed to start daemon: EMFILE",
 		);
+	});
+
+	it("passes the daemon its config over IPC, never in its environment", async () => {
+		const promise = startDaemon(
+			{ ...CONFIG, statsPollIntervalMs: 500 },
+			configPath,
+			pidfilePath,
+			tmpDir,
+		);
+		const options = vi.mocked(fork).mock.calls[0]?.[2] as {
+			env: NodeJS.ProcessEnv;
+			serialization?: string;
+		};
+		expect(options.env.BRAID_DAEMON).toBe("1");
+		expect(options.env.BRAID_DAEMON_INPUT).toBeUndefined();
+		expect(JSON.stringify(options.env)).not.toContain('"processes"');
+		expect(options.serialization).toBe("advanced");
+		expect(child.send).toHaveBeenCalledWith({
+			type: "braid-daemon-input",
+			input: {
+				processes: CONFIG.processes,
+				plugins: undefined,
+				configPath,
+				logs: undefined,
+				statsPollIntervalMs: 500,
+				pidfilePath,
+			},
+		});
+		send({ type: "ready" });
+		await expect(promise).resolves.toMatchObject({ ok: true });
+	});
+
+	it("fails clearly, and stops the daemon, when the config can't be passed to it (e.g. a function in plugin options)", async () => {
+		child.send = vi.fn(() => {
+			throw new Error("() => 1 could not be cloned.");
+		});
+		const promise = startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
+		await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith("SIGTERM"));
+		child.emit("exit", null, "SIGTERM");
+		const outcome = await promise;
+		expect(outcome.ok).toBe(false);
+		expect(!outcome.ok && outcome.message).toContain(
+			"must be plain data (no functions): () => 1 could not be cloned.",
+		);
+	});
+
+	it("reports a non-Error send failure as text", async () => {
+		child.send = vi.fn(() => {
+			throw "unclonable";
+		});
+		child.exitCode = 1;
+		const outcome = await startDaemon(CONFIG, configPath, pidfilePath, tmpDir);
+		expect(!outcome.ok && outcome.message).toContain("unclonable");
 	});
 
 	it("times out with a clear message if the daemon never confirms startup, and stops it", async () => {
