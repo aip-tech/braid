@@ -604,6 +604,35 @@ describe("runCli", () => {
 		logSpy.mockRestore();
 	}, 15000);
 
+	it("keeps the config out of every supervised process's environment, so no process can read another's env", async () => {
+		const fixture = join(FIXTURES, "report-env.js").replace(/\\/g, "\\\\");
+		writeFileSync(
+			configPath,
+			`export default [
+				{ name: "a", command: "node", args: ["${fixture}", "B_SECRET"], env: { A_SECRET: "a-secret", BRAID_USER_SETTING: "kept" } },
+				{ name: "b", command: "node", args: ["${fixture}", "A_SECRET"], env: { B_SECRET: "b-secret" } },
+			];\n`,
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(await runCli(["start"], tmpDir)).toBe(0);
+		const report = (name: string) => {
+			const logPath = join(tmpDir, ".braid", "logs", `${name}.log`);
+			if (!existsSync(logPath)) return undefined;
+			const match = /env-report (.+)/.exec(readFileSync(logPath, "utf8"));
+			return match ? JSON.parse(match[1] as string) : undefined;
+		};
+		await waitFor(() => report("a") !== undefined && report("b") !== undefined);
+
+		// braid's own variables are gone; a user's own BRAID_* variable is passed through.
+		expect(report("a")).toEqual({
+			braid: ["BRAID_USER_SETTING"],
+			sawOther: null,
+		});
+		expect(report("b")).toEqual({ braid: [], sawOther: null });
+		expect(await runCli(["stop"], tmpDir)).toBe(0);
+		logSpy.mockRestore();
+	}, 15000);
+
 	it("status --json prints one JSON array of the same objects the daemon reports, not the human-readable text", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 

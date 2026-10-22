@@ -25,6 +25,8 @@ import { findLiveStartLock } from "./start-lock.js";
 import type {
 	BraidConfig,
 	DaemonHandshakeMessage,
+	DaemonInput,
+	DaemonInputMessage,
 	Pidfile,
 	ProcessConfig,
 } from "./types.js";
@@ -285,7 +287,7 @@ export async function startDaemon(
 	}
 	const daemonLogFd = openSync(daemonLogPath, "a", 0o600);
 
-	const daemonInput = {
+	const daemonInput: DaemonInput = {
 		processes: config.processes,
 		plugins: config.plugins,
 		configPath,
@@ -298,10 +300,32 @@ export async function startDaemon(
 		cwd,
 		detached: true,
 		stdio: ["ignore", daemonLogFd, daemonLogFd, "ipc"],
-		env: { ...process.env, BRAID_DAEMON_INPUT: JSON.stringify(daemonInput) },
+		env: { ...process.env, BRAID_DAEMON: "1" },
 		execArgv: sourceExecArgv(import.meta.url),
+		// Structured clone rather than JSON: RegExp, Date, Map and Set values in plugin options arrive
+		// intact instead of being silently mangled, matching what a --foreground run sees.
+		serialization: "advanced",
 	});
 	closeSync(daemonLogFd);
+
+	// Over IPC, never in the daemon's environment - see DaemonInputMessage.
+	const inputMessage: DaemonInputMessage = {
+		type: "braid-daemon-input",
+		input: daemonInput,
+	};
+	try {
+		child.send(inputMessage);
+	} catch (error) {
+		// Structured clone refuses functions (and class instances it can't copy), which used to be
+		// dropped without a word on the way to the daemon.
+		await stopUnconfirmedDaemon(child);
+		return {
+			ok: false,
+			message: `braid couldn't pass the config to the daemon - plugin options and process settings must be plain data (no functions): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 
 	const readyTimeoutMs = config.startupTimeoutMs ?? DAEMON_READY_TIMEOUT_MS;
 	let timedOut = false;

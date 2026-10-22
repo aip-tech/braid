@@ -276,6 +276,26 @@ export type PluginLifecycleEvent =
  * in progress for that name. */
 export type ProcessActionResult = "ok" | "unknown" | "busy";
 
+/** Everything the daemon needs from the CLI's loaded config to run the stack. */
+export type DaemonInput = Pick<
+	BraidConfig,
+	"processes" | "plugins" | "logs" | "statsPollIntervalMs"
+> & {
+	configPath?: string;
+	pidfilePath: string;
+};
+
+/**
+ * The CLI's first message to a freshly forked daemon: its input, sent over IPC rather than in an
+ * environment variable, which every process the daemon spawns would inherit (and which `ps eww`
+ * shows) - it carries every process's own `env`, secrets included. The distinctive `type` keeps
+ * it apart from anything else that might share the channel.
+ */
+export type DaemonInputMessage = {
+	type: "braid-daemon-input";
+	input: DaemonInput;
+};
+
 /** Sent from the daemon entrypoint back to the CLI over IPC once startup succeeds or fails. */
 export type DaemonHandshakeMessage =
 	| { type: "ready" }

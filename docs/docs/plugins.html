@@ -30,7 +30,7 @@
 
 				<section id="using-plugins">
 					<h2>Using plugins</h2>
-					<p>List a plugin by package name/path in <code>plugins</code> &mdash; optionally as a <code>[name, options]</code> tuple:</p>
+					<p>List a plugin by package name/path in <code>plugins</code> &mdash; optionally as a <code>[name, options]</code> tuple. Options must be plain data (strings, numbers, booleans, arrays, plain objects, and also <code>RegExp</code>, <code>Date</code>, <code>Map</code> and <code>Set</code>), since a background daemon receives them as a structured-clone copy. A function in options makes <code>braid start</code> fail with a clear error:</p>
 					<pre><code class="language-typescript">export default defineConfig({
 	processes: [ /* ... */ ],
 	plugins: [

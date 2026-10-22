@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { type FSWatcher, watch as watchFiles } from "chokidar";
 import treeKill from "tree-kill";
+import { childEnv } from "./child-env.js";
 import { type LinePrefixer, linePrefixer } from "./prefix.js";
 import type {
 	ProcessConfig,
@@ -118,7 +119,7 @@ function runHookOnce(
 	return new Promise((resolveHook) => {
 		const hookChild = spawn(hook.command, hook.args ?? [], {
 			cwd: hook.cwd ? join(process.cwd(), hook.cwd) : process.cwd(),
-			env: process.env,
+			env: childEnv(process.env),
 		});
 		onSpawn(hookChild);
 		hookChild.stdout?.on("data", (chunk: Buffer) =>
@@ -268,7 +269,7 @@ export function runWorker(config: ProcessConfig): WorkerHandle {
 	function spawnApp(): void {
 		lastSpawnAt = Date.now();
 		const spawned = spawn(config.command, config.args ?? [], {
-			env: { ...process.env, ...config.env },
+			env: childEnv(process.env, config.env),
 			// Its own process group: a terminal Ctrl-C (sent to the whole foreground group) then
 			// reaches only braid's processes, which stop the app in order, rather than racing them to
 			// it. It also gives the app a group id (its own pid) that can be killed in one call, with

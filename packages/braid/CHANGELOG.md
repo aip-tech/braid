@@ -45,6 +45,12 @@ version bump.
   `startAfter`, or `autoStart: false`) now starts it the way
   `startProcess` does, without counting it as a restart or cascading to
   `dependsOn` dependents.
+- `braid start` now passes the daemon its config over IPC using
+  structured clone, instead of as JSON in an environment variable.
+  RegExp, Date, Map and Set values in plugin options now reach a
+  daemonized run intact, as they already did with `--foreground`. A
+  function in options, which used to be dropped silently, now fails
+  `start` with a clear error.
 - The control server rejects a request whose `Host` isn't a loopback
   name (421), and a non-GET request or an upgrade whose `Origin` doesn't
   match the Host it was sent to (403). Only hostnames are compared, so
@@ -52,6 +58,14 @@ version bump.
 
 ### Fixed
 
+- Every supervised process, and every hook, inherited the daemon's whole
+  config in `BRAID_DAEMON_INPUT`, including every other process's own
+  `env`. Any process could read another's secrets, which also showed in
+  `ps eww`. The config now goes over IPC, and braid strips its internal
+  variables (`BRAID_DAEMON`, `BRAID_CONFIG`, `BRAID_LOG_TIMESTAMPS`, and
+  the old `BRAID_DAEMON_INPUT`) from everything it starts. Your own
+  `BRAID_*` variables still pass through. This also lifts Linux's 128KB
+  limit on a single environment string, which a large config could hit.
 - `braid stop && braid start` could lose the new daemon: the old one
   deleted the pidfile when it finished stopping, by then the new one's,
   leaving a running stack that `status` and `stop` couldn't see. A
