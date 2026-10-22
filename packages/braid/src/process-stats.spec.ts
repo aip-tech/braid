@@ -310,7 +310,12 @@ describe("defaultStatsIo", () => {
 		expect(defaultStatsIo.getconf("PATH")).toBeUndefined();
 	});
 
-	it("rejects when ps fails, and resolves footprint to empty output when it can't run", async () => {
+	it("resolves ps's output when it succeeds, rejects when it fails, and resolves footprint to empty output when it can't run", async () => {
+		// Called directly on every platform: on Linux the sampler itself reads /proc instead, so
+		// nothing else would ever run a successful ps there.
+		expect(
+			await defaultStatsIo.ps(["-o", "pid=", "-p", String(process.pid)]),
+		).toContain(String(process.pid));
 		await expect(
 			defaultStatsIo.ps(["--definitely-not-a-flag"]),
 		).rejects.toThrow();
