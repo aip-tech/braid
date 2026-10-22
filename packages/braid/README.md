@@ -1,216 +1,79 @@
 # braid
 
-Runs multiple long-lived processes as one unit, as a background daemon by default (or attached to your terminal with `--foreground`): PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs.
+Run every process your project needs as one stack. Describe your API, web app and workers in one
+config file; braid starts them in the right order, restarts them when files change, handles
+crashes, and keeps their logs.
 
-Published on npm as `@aip-tech/braid`. See [CHANGELOG.md](./CHANGELOG.md) for release notes.
+**[Documentation](https://aip-tech.github.io/braid/)** ·
+[Changelog](./CHANGELOG.md) ·
+[GitHub](https://github.com/aip-tech/braid)
+
+Requires Node 22.18 or later, on macOS or Linux.
 
 ## Install
 
 ```bash
-npm install @aip-tech/braid
+npm install --save-dev @aip-tech/braid
 ```
 
-## Config
+## Configure
 
-`braid.config.ts`:
+Create `braid.config.ts` next to your `package.json`:
 
 ```ts
 import { defineConfig } from "@aip-tech/braid";
 
 export default defineConfig({
 	processes: [
-		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-		{ name: "client", command: "pnpm", args: ["--filter", "./client", "run", "dev"] },
+		{
+			name: "api",
+			command: "pnpm",
+			args: ["--filter", "./api", "dev"],
+			watch: ["api/src"],
+			readyPattern: "^Server listening",
+		},
+		{
+			name: "web",
+			command: "pnpm",
+			args: ["--filter", "./web", "dev"],
+			startAfter: { processes: ["api"] },
+		},
 	],
 });
 ```
 
-- `watch`: restart this process when these paths change. Omit it for a command that manages its own reload.
-- `exclude`: paths to leave out of `watch`, resolved the same way — e.g. `exclude: ["api/src/__generated__"]` so a regenerated file there doesn't trigger its own restart.
-- `dependsOn`: `{ processes, run? }` — restart this process whenever any of `processes` restarts, optionally running a command first (e.g. codegen) and waiting for it to finish. See [Dependent restarts](#dependent-restarts).
-- `onRestart`: run a command after this process itself restarts, e.g. rebuilding a shared workspace package. See [Post-restart hooks](#post-restart-hooks).
-- `beforeRestart`: run a command after this process's own watched files change and it's stopped, but before it restarts, e.g. regenerating something the fresh process needs on disk. Requires `watch`. See [Pre-restart hooks](#pre-restart-hooks).
-- `readyPattern`: hold off `onRestart`/`dependsOn` until this regex matches the process's own output after a restart. See [Waiting for readiness](#waiting-for-readiness).
-- `startAfter`: `{ processes }` — don't fork this process for the first time until `processes` are themselves ready. See [Waiting to start](#waiting-to-start).
-- `autoStart`: set `false` to keep this process from forking when `start` boots the whole stack — start it later on demand instead. See [Starting on demand](#starting-on-demand). @default `true`
-- `autoRestart`: restart just this process on a crash instead of stopping the whole stack. See [Restarting on crash](#restarting-on-crash). @default `false`
-- `url`: purely informational — shown in the startup summary and `status` output as this process's own address (e.g. `http://localhost:4000`). Braid never verifies anything is actually listening there.
-- `plugins`: external plugins to load, by package name/path (or a `[name, options]` tuple).
-- `logs`: `{ dir, maxSizeBytes, timestamps }` — see [Logs](#logs).
-- `foreground`: run `start` attached to the terminal instead of forking a background daemon. Overridable per invocation with `--foreground`/`--daemon`. @default `false`
+In a project whose `package.json` isn't `"type": "module"` (`npm init` sets `"commonjs"`), name the
+file `braid.config.mts` instead; braid finds either.
 
-Full field list and defaults: [`src/types.ts`](./src/types.ts) (`ProcessConfig`, `BraidConfig`).
+Here `api` restarts when a file under `api/src` changes, and `web` waits for `api` to print its
+ready line before starting. See the [configuration guide](https://aip-tech.github.io/braid/docs/config.html)
+and the [full list of options](https://aip-tech.github.io/braid/docs/reference.html).
 
-## CLI
+## Run
 
 ```bash
-npx @aip-tech/braid start                    # start every configured process as a background daemon
-npx @aip-tech/braid start --foreground       # ...or attached to this terminal (Ctrl-C stops everything)
-npx @aip-tech/braid start --daemon           # force the background daemon, overriding a config's foreground: true
-npx @aip-tech/braid status                   # list each process's name/pid/alive/restart-count/uptime
-npx @aip-tech/braid status --json            # same data, as a single JSON array (for scripting/CI)
-npx @aip-tech/braid logs [name]              # print a process's log (every process, interleaved, if no name)
-npx @aip-tech/braid logs [name] --follow     # keep streaming new output
-npx @aip-tech/braid logs [name] --lines 50   # only the last 50 lines
-npx @aip-tech/braid logs [name] --json       # newline-delimited JSON ({name, text}), ANSI stripped
-npx @aip-tech/braid stop                     # kill everything
-npx @aip-tech/braid start --config ./other.config.ts
-npx @aip-tech/braid start <name>             # start one configured process in an already-running daemon
-npx @aip-tech/braid restart <name>           # stop and re-fork one process, leaving the rest alone
-npx @aip-tech/braid stop <name>              # stop one process, leaving the rest (and the daemon) running
-npx @aip-tech/braid start --no-watch         # ignore every process's watch/beforeRestart for this run
+npx braid start            # start the stack in the background
+npx braid status           # state, CPU and memory for each process
+npx braid logs --follow    # every process's output, live
+npx braid restart api      # restart one process
+npx braid stop             # stop everything
 ```
 
-`start` prints a one-time summary once every process has forked — a header ("N processes running (pid M)") and one line per process with its alive marker, `url` (if set), and pid:
+Add `--foreground` to `start` to stay attached to the terminal instead. Every command and flag is in
+the [CLI reference](https://aip-tech.github.io/braid/docs/cli.html).
 
-```
-[braid] 3 processes running (pid 40213)
-  ● api      http://localhost:4000    pid 40214
-  ● web      http://localhost:5173    pid 40215
-  ● worker                            pid 40216
-```
+## Features
 
-In `--foreground` mode, `start` blocks until every process stops (Ctrl-C, or `braid stop` from another terminal), streaming their combined output straight here instead of only to the log files.
+- **Restarts on file changes**, with extension filters and excludes.
+- **Dependencies between processes:** wait for readiness on first start, restart dependents when a
+  process restarts, and run commands such as codegen in between.
+- **Crash handling:** a crash stops the whole stack by default, or restarts just that process with
+  backoff.
+- **Persistent logs:** a rotated log file per process, readable with `braid logs`.
+- **Real resource usage:** CPU and memory for each app's whole process tree.
+- **Plugins:** add routes, pages and event listeners to the stack's local control server. The
+  [web dashboard](https://www.npmjs.com/package/@aip-tech/braid-plugin-ui) is one.
 
-`--no-watch` overrides `watch` (and `beforeRestart`, which requires it) on every process for that one invocation, without touching the config file — e.g. running a dev config unmodified in an environment where auto-restart isn't wanted. Manual restarts (`braid restart <name>`), `dependsOn` cascades, and `onRestart` hooks are unaffected; only the watch-triggered restart path is disabled.
+## License
 
-## Dependent restarts
-
-A process can restart whenever another one does — e.g. a client that needs to regenerate its GraphQL SDK once the API it talks to restarts:
-
-```ts
-{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-{
-	name: "client",
-	command: "pnpm",
-	args: ["--filter", "./client", "run", "dev"],
-	dependsOn: {
-		processes: ["api"],
-		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
-	},
-},
-```
-
-When `api` restarts: `client` stops once `api` has actually re-spawned (not the instant it decides to restart), `run` executes (retried on failure — `retries`/`retryDelayMs`, default 5× / 1s apart, since `api` may still be starting back up), then `client` restarts. Left stopped with a logged reason if `run` never succeeds. A `dependsOn` chain that loops back on its own trigger is rejected at startup.
-
-## Post-restart hooks
-
-For a shared workspace package other processes just read from (no process of its own to restart), run a command directly after the process that changed it restarts:
-
-```ts
-{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	watch: ["api/src"],
-	onRestart: { command: "pnpm", args: ["--filter", "./types", "run", "generate"] },
-},
-```
-
-Same shape and retry behavior as `dependsOn.run`, but scoped to `api` restarting itself — no dependent process is stopped or restarted. If `api` also has dependents (via `dependsOn`), they're notified only once this hook succeeds, and not at all if it never does.
-
-## Pre-restart hooks
-
-For a process that needs to regenerate its own on-disk dependencies (e.g. a GraphQL SDK generated from a schema it also watches) before it restarts on that same change, `beforeRestart` runs after the process is stopped and before a fresh one starts:
-
-```ts
-{
-	name: "client",
-	command: "pnpm",
-	args: ["vike", "dev"],
-	watch: ["server", "lib/sdk"],
-	beforeRestart: { command: "pnpm", args: ["--filter", "lib/sdk", "run", "generate"] },
-},
-```
-
-`client` is fully stopped, `generate` runs to completion (retried like `onRestart`/`dependsOn.run`), and only then does `client` restart — the fresh process never boots against stale or half-regenerated code. Requires `watch`; rejected at startup otherwise. If the hook keeps failing past its retries, `client` is left stopped, but the watcher stays active — the next matching file change retries the whole cycle, rather than requiring a manual restart.
-
-## Waiting for readiness
-
-Re-spawning a process isn't the same as it being ready — an API might take a moment after restarting before it's actually serving. `readyPattern` holds off `onRestart` and any `dependsOn` cascades until a regex matches that process's own stdout/stderr:
-
-```ts
-{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	watch: ["api/src"],
-	readyPattern: "Server listening",
-	readyTimeoutMs: 15000, // @default 10000
-},
-```
-
-Without `readyPattern`, dependents are held off only until `api` has re-spawned (not exited/killed while restarting, but not necessarily done starting up either) — a `run`/`onRestart` hook's own retry is what bridges the rest of that gap. If `readyPattern` never matches within `readyTimeoutMs`, braid logs why and proceeds anyway rather than holding dependents off forever on a misconfigured pattern.
-
-## Waiting to start
-
-`readyPattern`/`dependsOn` both govern *restarts* — braid still forks every configured process at once on `start`, regardless of what any of them need to talk to. `startAfter` delays a process's very first fork until the processes it names are ready:
-
-```ts
-{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	readyPattern: "Server listening",
-},
-{
-	name: "client",
-	command: "pnpm",
-	args: ["--filter", "./client", "run", "dev"],
-	startAfter: { processes: ["api"] },
-},
-```
-
-`client` isn't forked until `api`'s own `readyPattern` matches (or its `readyTimeoutMs` elapses — same best-effort semantics as above); if `api` sets no `readyPattern`, `client` forks as soon as `api` has been forked. This only affects each process's first spawn — once everything is up, later watch-triggered/`dependsOn`/manual restarts are entirely unaffected, and `start` itself doesn't wait around for a slow `startAfter` chain to finish before returning. A `startAfter` chain that loops back on itself is rejected at startup, same as a circular `dependsOn`.
-
-## Starting on demand
-
-Set `autoStart: false` to keep a process from forking at all when `start` boots the whole stack — useful for a cron-style job you only want to run when you ask for it. It's still fully configured (listed by `status`/the dashboard as "not started"), just never spawned automatically:
-
-```ts
-{
-	name: "cron",
-	command: "pnpm",
-	args: ["--filter", "./jobs", "run", "nightly-report"],
-	autoStart: false, // @default true
-},
-```
-
-Start it later with `braid start cron`, the dashboard's Start button, or `PluginContext.startProcess()` from a plugin. Calling start on an already-running process is a safe no-op — it doesn't kill and respawn it the way `restart` would. A process can combine `autoStart: false` with its own `startAfter` — its later manual start still waits on those dependencies first — but not with `dependsOn` (a dependency's restart would force-start it early, defeating the point), and it can't be named as someone else's `startAfter` target (that dependent would never see it become ready on its own). Both are rejected at startup.
-
-## Restarting on crash
-
-By default, any process exiting with a non-zero code stops the whole stack (mirrors `concurrently --kill-others-on-fail`). Set `autoRestart: true` to restart just that process instead, with exponential backoff:
-
-```ts
-{
-	name: "worker",
-	command: "pnpm",
-	args: ["--filter", "./worker", "run", "start"],
-	autoRestart: true,       // @default false
-	maxRestarts: 10,         // @default 10 - give up (and stop the whole stack) after this many in a row
-	restartDelayMs: 1000,    // @default 1000 - base delay, doubling each attempt, capped at 10s
-	minUptimeMs: 1000,       // @default 1000 - a run this long or longer resets the consecutive-crash count
-},
-```
-
-A crash-triggered restart runs exactly like any other restart: `onRestart` fires and any `dependsOn` dependents cascade, once per attempt — including during a crash loop, so a heavy `onRestart` hook will re-run more than once if the process keeps failing fast.
-
-## Logs
-
-Each process gets a rotated log file at `.braid/logs/<name>.log`. Rotated (one backup kept) on every `start`, on a watch-triggered restart, and past `logs.maxSizeBytes` (default 5MB). Braid's own diagnostics (plugin failures, crash notices) go to `.braid/daemon.log`; a `dependsOn`/`onRestart`/`beforeRestart` hook that keeps failing, or a `readyPattern` that never matches, is also logged into the relevant process's own log. A process also gets a `braid: stopping` line right before braid stops it for a `dependsOn` cascade or a watch-triggered restart (not yet for a plain `braid stop`).
-
-Set `logs.timestamps: true` to prepend a dimmed `HH:MM:SS.mmm` to every line, before the `[name]` tag. It's the same bytes wherever that line shows up — the log file, `braid logs`, the web UI, and the terminal during `braid start` all get it together. @default `false`
-
-## Plugins
-
-`start` runs a loopback-only, token-guarded control server that plugins register routes on. List a plugin by package name/path in `plugins` to load it — see `PluginContext` in [`src/types.ts`](./src/types.ts). No external plugins ship yet.
-
-## Scripts
-
-```bash
-pnpm build        # tsc -> dist/
-pnpm typecheck    # tsc --noEmit
-pnpm test         # vitest run
-pnpm coverage     # vitest run --coverage
-```
+MIT

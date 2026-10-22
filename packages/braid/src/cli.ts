@@ -40,6 +40,20 @@ const DAEMON_READY_TIMEOUT_MS = 5000;
 const DAEMON_STOP_WAIT_MS = 3000;
 
 export const DEFAULT_CONFIG_FILENAME = "braid.config.ts";
+// Tried when there's no braid.config.ts: an .mts file is always an ES module, whatever the nearest
+// package.json's "type" says, so it's the name that works in a CommonJS project.
+export const FALLBACK_CONFIG_FILENAME = "braid.config.mts";
+
+/** The config braid uses when no `--config` is given: `braid.config.ts`, or `braid.config.mts` if
+ *  only that exists. With neither, the `.ts` path, so the "not found" error names the usual one. */
+export function defaultConfigPath(
+	cwd: string,
+	exists: (path: string) => boolean = existsSync,
+): string {
+	const primary = resolve(cwd, DEFAULT_CONFIG_FILENAME);
+	const fallback = resolve(cwd, FALLBACK_CONFIG_FILENAME);
+	return !exists(primary) && exists(fallback) ? fallback : primary;
+}
 export const DEFAULT_PIDFILE_PATH = join(".braid", "run.json");
 
 export type ParsedArgs = {
@@ -59,7 +73,7 @@ export type ParsedArgs = {
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	const [command, ...rest] = argv;
-	let configPath = DEFAULT_CONFIG_FILENAME;
+	let configPath: string | undefined;
 	let processName: string | undefined;
 	let follow = false;
 	let lines: number | undefined;
@@ -99,7 +113,10 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 	}
 	return {
 		command,
-		configPath: resolve(cwd, configPath),
+		configPath:
+			configPath === undefined
+				? defaultConfigPath(cwd)
+				: resolve(cwd, configPath),
 		processName,
 		follow,
 		lines,
@@ -173,16 +190,27 @@ function validateProcessConfigShapes(
 }
 
 /**
- * A pointer for the one config-load failure that isn't the config's own fault: a `.ts` config
- * on a Node that can't run TypeScript natively (type stripping is on by default only from 22.18).
+ * A pointer for the config-load failures that aren't the config's own fault: a `.ts` config on a
+ * Node that can't run TypeScript natively (type stripping is on by default only from 22.18), and a
+ * `.ts` config in a CommonJS project, which Node then loads as CommonJS, so its `import` fails.
  */
 export function configLoadHint(
 	error: unknown,
+	configPath = "",
 	nodeVersion: string = process.version,
 ): string {
 	const code = (error as { code?: unknown } | null)?.code;
-	if (code !== "ERR_UNKNOWN_FILE_EXTENSION") return "";
-	return ` (a TypeScript config needs Node 22.18 or later, which runs it natively - this is ${nodeVersion}. Upgrade Node, or use a braid.config.js/.mjs)`;
+	if (code === "ERR_UNKNOWN_FILE_EXTENSION") {
+		return ` (a TypeScript config needs Node 22.18 or later, which runs it natively - this is ${nodeVersion}. Upgrade Node, or use a braid.config.js/.mjs)`;
+	}
+	if (
+		error instanceof SyntaxError &&
+		error.message.includes("Cannot use import statement outside a module") &&
+		configPath.endsWith(".ts")
+	) {
+		return ` (Node loaded it as CommonJS, because the nearest package.json doesn't set "type": "module". Rename it to braid.config.mts, which braid finds on its own, or add "type": "module")`;
+	}
+	return "";
 }
 
 export async function loadConfig(configPath: string): Promise<BraidConfig> {
@@ -198,7 +226,7 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 		throw new Error(
 			`braid: failed to load config at ${configPath}: ${
 				error instanceof Error ? error.message : String(error)
-			}${configLoadHint(error)}`,
+			}${configLoadHint(error, configPath)}`,
 		);
 	}
 	const exported = mod.default;

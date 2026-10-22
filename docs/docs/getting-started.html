@@ -53,6 +53,13 @@ export default defineConfig({
 	],
 });</code></pre>
 							</div>
+							<div class="callout callout-note" data-title="CommonJS projects">
+								<p>
+									If your <code>package.json</code> doesn't set <code>"type": "module"</code>
+									(<code>npm init</code> sets <code>"commonjs"</code>), name the file
+									<code>braid.config.mts</code> instead. braid finds either.
+								</p>
+							</div>
 							<p>
 								<code>defineConfig</code> gives you autocomplete and type checking. Here
 								<code>api</code> restarts whenever a file under <code>api/src</code>

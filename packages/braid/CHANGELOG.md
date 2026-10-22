@@ -5,10 +5,44 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project is pre-1.0, so backwards-incompatible changes can land in a minor
 version bump.
 
-## [Unreleased]
+## [0.10.0] - 2026-10-22
+
+A hardening release, from a full code review. braid no longer dies or
+leaves processes running unsupervised when something goes wrong, `stop`
+and `start` are safe to run back to back, one process can no longer read
+another's environment, and `braid status` reports what each app really
+uses. Several behaviour changes come with it, so read the upgrade notes
+first.
+
+### Upgrading from 0.9
+
+- **Node 22.18 or later** is required.
+- **Upgrade `@aip-tech/braid-plugin-ui` to 0.7.0 at the same time.**
+  0.6.x authenticates with the cookie this release removes, so it can't
+  talk to a 0.10 daemon.
+- **Plugins that serve a browser page** must send the token as an
+  `Authorization: Bearer` header; see the control-server entry under
+  Changed. Plugins that only add routes or listen to events are
+  unaffected.
+- **Plugin cleanup** that ran on `daemonShutdown` "just before the
+  control server closes" belongs on the new `daemonStopped` event.
+- **Plugin options** must be plain data. A function in them now fails
+  `braid start` instead of being dropped silently.
+- **`readyPattern`** matches one line at a time, as the app printed it.
+  Patterns spanning two lines no longer match; anchored ones now do.
+- **Process names** can't contain `/`, `\` or control characters, or be
+  `.`, `..` or `*`.
+- **Imports** are limited to the package's main entry and
+  `./package.json`.
+- **A per-process wrapper killed from outside braid** (a `kill -9`, the
+  OOM killer) now stops the stack, the same as a crash.
 
 ### Added
 
+- Without `--config`, braid now also finds `braid.config.mts` when there's
+  no `braid.config.ts`. An `.mts` file is always an ES module, so it works
+  in a project whose `package.json` is CommonJS, which is what
+  `npm init` creates.
 - A `daemonStopped` plugin lifecycle event, fired once every process has
   stopped and its last output has been delivered, just before the
   control server closes.
@@ -34,6 +68,11 @@ version bump.
 - Requires Node 22.18 or later (`engines`), the first release that runs
   a `braid.config.ts` natively. On an older Node, a TypeScript config's
   load error now says so, rather than only "Unknown file extension".
+- A `braid.config.ts` in a CommonJS project fails to load, since Node
+  treats it as CommonJS and its `import` line is a syntax error. The
+  error now explains that and suggests renaming it to
+  `braid.config.mts`, rather than only "Cannot use import statement
+  outside a module".
 - Process names are validated at startup. A name can't contain `/`,
   `\` or control characters, and can't be `.`, `..` or `*`: a name
   becomes its log file's name, so a separator or `..` wrote that log

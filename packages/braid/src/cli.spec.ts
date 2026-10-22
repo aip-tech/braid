@@ -17,6 +17,7 @@ import {
 	applyNoWatch,
 	configLoadHint,
 	DEFAULT_PIDFILE_PATH,
+	defaultConfigPath,
 	followLogs,
 	formatUptime,
 	isMainModule,
@@ -351,16 +352,64 @@ describe("configLoadHint", () => {
 		const error = Object.assign(new Error('Unknown file extension ".ts"'), {
 			code: "ERR_UNKNOWN_FILE_EXTENSION",
 		});
-		expect(configLoadHint(error, "v22.12.0")).toBe(
+		expect(configLoadHint(error, "/p/braid.config.ts", "v22.12.0")).toBe(
 			" (a TypeScript config needs Node 22.18 or later, which runs it natively - this is v22.12.0. Upgrade Node, or use a braid.config.js/.mjs)",
 		);
 		expect(configLoadHint(error)).toContain(process.version);
 	});
 
+	it("explains a .ts config that Node loaded as CommonJS, and how to fix it", () => {
+		const error = new SyntaxError(
+			"Cannot use import statement outside a module",
+		);
+		expect(configLoadHint(error, "/p/braid.config.ts")).toContain(
+			"Rename it to braid.config.mts",
+		);
+		// Only for a .ts config - an .mts or .js one has a different cause.
+		expect(configLoadHint(error, "/p/braid.config.mts")).toBe("");
+		expect(configLoadHint(error)).toBe("");
+	});
+
 	it("adds nothing for any other failure", () => {
 		expect(configLoadHint(new Error("syntax error"))).toBe("");
+		expect(
+			configLoadHint(new SyntaxError("Unexpected token"), "/p/braid.config.ts"),
+		).toBe("");
 		expect(configLoadHint("not even an error")).toBe("");
 		expect(configLoadHint(null)).toBe("");
+	});
+});
+
+describe("defaultConfigPath", () => {
+	it("prefers braid.config.ts, falls back to braid.config.mts, and names .ts when neither exists", () => {
+		const has =
+			(...names: string[]) =>
+			(path: string) =>
+				names.some((name) => path.endsWith(`/${name}`));
+		expect(
+			defaultConfigPath("/p", has("braid.config.ts", "braid.config.mts")),
+		).toBe("/p/braid.config.ts");
+		expect(defaultConfigPath("/p", has("braid.config.mts"))).toBe(
+			"/p/braid.config.mts",
+		);
+		expect(defaultConfigPath("/p", has())).toBe("/p/braid.config.ts");
+	});
+
+	it("checks the real filesystem by default", () => {
+		const dir = mkdtempSync(join(tmpdir(), "braid-default-config-"));
+		try {
+			writeFileSync(join(dir, "braid.config.mts"), "export default [];\n");
+			expect(defaultConfigPath(dir)).toBe(join(dir, "braid.config.mts"));
+			expect(parseArgs(["start"], dir).configPath).toBe(
+				join(dir, "braid.config.mts"),
+			);
+			// An explicit --config is always used as given.
+			expect(parseArgs(["start", "--config", "other.ts"], dir).configPath).toBe(
+				join(dir, "other.ts"),
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
