@@ -5,9 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
-## [Unreleased]
+## [0.7.0] - 2026-10-22
 
-Requires `@aip-tech/braid` 0.10.0 or later.
+Requires `@aip-tech/braid` 0.10.0 or later, and must be upgraded together
+with it: braid 0.10 removes the cookie that 0.6.x authenticates with.
 
 ### Changed
 

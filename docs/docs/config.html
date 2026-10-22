@@ -23,8 +23,10 @@
 
 					<h2 id="the-config-file">The config file</h2>
 					<p>
-						braid reads <code>braid.config.ts</code> from the directory you run it in
-						(or the file given to <code>--config</code>). It default-exports an object
+						braid reads <code>braid.config.ts</code> from the directory you run it in,
+						or <code>braid.config.mts</code> if that's what's there (use it in a project
+						whose <code>package.json</code> isn't <code>"type": "module"</code>), or the
+						file given to <code>--config</code>. It default-exports an object
 						whose <code>processes</code> lists everything to run:
 					</p>
 					<div class="code-block">

@@ -1,7 +1,7 @@
 {
 	"name": "@aip-tech/braid",
-	"version": "0.9.5",
-	"description": "Runs multiple long-lived processes as one unit, as a background daemon or attached to your terminal — PID tracking, watch-triggered restarts, kill-everything-on-crash, and persistent rotated per-process logs.",
+	"version": "0.10.0",
+	"description": "Run every process your project needs as one stack: restarts on file changes, dependencies between processes, crash handling, persistent logs and real per-app CPU and memory, from one config file.",
 	"license": "MIT",
 	"homepage": "https://aip-tech.github.io/braid",
 	"type": "module",

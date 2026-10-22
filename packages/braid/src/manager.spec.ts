@@ -31,6 +31,8 @@ import type { Pidfile, ProcessConfig } from "./types.js";
 const statsControl = vi.hoisted(() => ({
 	delayMs: 0,
 	dropPids: new Set<number>(),
+	// How many samples have actually had a pid dropped, so a test can wait for one.
+	dropsApplied: 0,
 	forceRejectWith: undefined as unknown,
 }));
 vi.mock("./process-stats.js", async (importOriginal) => {
@@ -50,7 +52,9 @@ vi.mock("./process-stats.js", async (importOriginal) => {
 					throw rejection;
 				}
 				const result = await sample(rootPids);
-				for (const pid of statsControl.dropPids) result.delete(pid);
+				for (const pid of statsControl.dropPids) {
+					if (result.delete(pid)) statsControl.dropsApplied++;
+				}
 				await pause();
 				return result;
 			};
@@ -256,6 +260,29 @@ function pidfileWorker(
 async function triggerWatchedRestart(watchFilePath: string): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 800));
 	writeFileSync(watchFilePath, String(Date.now()));
+}
+
+/**
+ * triggerWatchedRestart, but for a slow machine where the watcher may still not be attached after
+ * the settle delay: writes again until `logPath` shows the restart actually began.
+ */
+async function triggerWatchedRestartUntilSeen(
+	watchFilePath: string,
+	logPath: string,
+): Promise<void> {
+	const restarted = () =>
+		existsSync(logPath) &&
+		readFileSync(logPath, "utf8").includes("braid: stopping (restarting)");
+	await triggerWatchedRestart(watchFilePath);
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			await waitFor(restarted, { timeoutMs: 1500 });
+			return;
+		} catch {
+			writeFileSync(watchFilePath, String(Date.now()));
+		}
+	}
+	throw new Error(`no watch-triggered restart was logged to ${logPath}`);
 }
 
 /** Mirrors chatty.js's own line-generation exactly, so the expected byte count is computed, not guessed. */
@@ -895,9 +922,13 @@ describe("runManager plugin support", () => {
 				body.some((w) => w.name === "one" && typeof w.appPid === "number"),
 			)
 		).find((w) => w.name === "one")?.appPid as number;
+		statsControl.dropsApplied = 0;
 		statsControl.dropPids.add(oneAppPid);
 
 		try {
+			// "two" may already have stats from a poll before the drop, so wait for a poll that
+			// really left "one" out before checking.
+			await waitFor(() => statsControl.dropsApplied > 0);
 			// "two" still gets sampled normally even though "one"'s app never shows up in the sample
 			// (the shape an app that exited between being listed and being sampled produces).
 			const withStats = await waitForStatus(pidfile, (body) => {
@@ -2336,7 +2367,10 @@ describe("runManager readyPattern", () => {
 		});
 		const clientBefore = pidfileWorker(pidfilePath, "client");
 
-		await triggerWatchedRestart(watchFile);
+		await triggerWatchedRestartUntilSeen(
+			watchFile,
+			join(tmpDir, "logs", "api.log"),
+		);
 
 		await waitFor(
 			() => {
@@ -2867,10 +2901,12 @@ describe("runManager autoStart", () => {
 		// Give a wrongly-cascaded restart every chance to have happened by now.
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(pidfileWorker(pidfilePath, "dependent")?.pid).toBe(dependentBefore);
-		const dependentLog = readFileSync(
-			join(tmpDir, "logs", "dependent.log"),
-			"utf8",
-		);
+		// The log file only appears with the process's first output, which a slow machine may not
+		// have produced yet - and no file means no cascade was logged either.
+		const dependentLogPath = join(tmpDir, "logs", "dependent.log");
+		const dependentLog = existsSync(dependentLogPath)
+			? readFileSync(dependentLogPath, "utf8")
+			: "";
 		expect(dependentLog).not.toContain("stopping (dependency restarted)");
 
 		await stopFromPidfile(pidfilePath);
