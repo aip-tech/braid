@@ -3,6 +3,9 @@ import { authFetch } from "./auth.js";
 export type ProcessStatus = {
 	name: string;
 	pid: number | undefined;
+	/** The app's own pid, as opposed to braid's wrapper's (`pid`). Absent while it isn't running,
+	 *  and when talking to a braid daemon older than 0.10. */
+	appPid?: number;
 	alive: boolean;
 	/** Absent for a configured process that has never been started (`autoStart: false`). */
 	startedAt?: string;
@@ -15,6 +18,12 @@ export type ProcessStatus = {
 	 *  doesn't send this field at all. */
 	restartCount?: number;
 };
+
+/** The pid worth showing: the app's own, falling back to braid's wrapper's for an older daemon. */
+export function displayPid(process: ProcessStatus): string {
+	const pid = process.appPid ?? process.pid;
+	return pid !== undefined ? String(pid) : "-";
+}
 
 export function formatCpu(cpu: number): string {
 	return `${cpu.toFixed(1)}%`;

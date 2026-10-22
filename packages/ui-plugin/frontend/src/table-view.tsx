@@ -1,4 +1,5 @@
 import {
+	displayPid,
 	formatCpu,
 	formatMemory,
 	formatStarted,
@@ -55,9 +56,7 @@ export function TableView({
 								{rowError && <div class="row-error">{rowError}</div>}
 							</td>
 							<td>
-								<span class="badge badge-pid">
-									{process.pid !== undefined ? String(process.pid) : "-"}
-								</span>
+								<span class="badge badge-pid">{displayPid(process)}</span>
 							</td>
 							<td>
 								<span

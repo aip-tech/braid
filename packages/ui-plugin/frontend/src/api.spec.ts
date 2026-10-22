@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	displayPid,
 	fetchBraidVersion,
 	formatCpu,
 	formatMemory,
@@ -84,6 +85,15 @@ describe("formatUptime", () => {
 	it("never reports a negative uptime for a startedAt that's (implausibly) in the future", () => {
 		const future = new Date(Date.now() + 5000).toISOString();
 		expect(formatUptime(future)).toBe("0s");
+	});
+});
+
+describe("displayPid", () => {
+	it("prefers the app's own pid, falls back to the wrapper's, then to a dash", () => {
+		const base = { name: "api", alive: true };
+		expect(displayPid({ ...base, pid: 10, appPid: 11 })).toBe("11");
+		expect(displayPid({ ...base, pid: 10 })).toBe("10");
+		expect(displayPid({ ...base, pid: undefined })).toBe("-");
 	});
 });
 

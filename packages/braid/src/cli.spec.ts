@@ -664,7 +664,7 @@ describe("runCli", () => {
 		const startPromise = runCli(["start"], tmpDir);
 		await waitFor(() => existsSync(pidfilePath));
 
-		// The first pidusage sample after a fresh start can lag a poll tick behind - retry status
+		// The first stats sample after a fresh start can lag a poll tick behind - retry status
 		// until it shows up rather than asserting on the very first call. `waitFor` itself only
 		// supports a sync predicate, so this polls by hand instead of misusing it with an async one.
 		const deadline = Date.now() + 4000;

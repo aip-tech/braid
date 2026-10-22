@@ -81,6 +81,15 @@ export default defineConfig({
 			},
 		},
 		{
+			// A child process that climbs to 300 MB and about a quarter of a core, then drops back -
+			// watch "load" in the dashboard. The figures are the whole tree's (this process and its
+			// child), so they should track the child's "holding N MB" lines.
+			name: "load",
+			color: "yellow",
+			command: "tsx",
+			args: ["src/load.ts"],
+		},
+		{
 			// `autoStart: false` - a cron-style one-shot that never runs on `braid start`. Start it
 			// on demand with `braid start cron` or the dashboard's Start button.
 			name: "cron",

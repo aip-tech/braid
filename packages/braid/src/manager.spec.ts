@@ -23,45 +23,37 @@ import {
 import { sourceExecArgv } from "./module-path.js";
 import type { Pidfile, ProcessConfig } from "./types.js";
 
-// Lets one test simulate a delayed pidusage() *resolution* landing after a restart, to land the
-// race deterministically - real timing can't reliably reproduce it on demand. The underlying call
-// still runs immediately (a real sample of the still-alive old pid, exactly as it would in
-// production - a slow `ps` still captures accurate process-table data, it just reports back late),
-// only delivering the already-computed result to the caller is delayed; delaying the call itself
-// would let the pid die first and change what's being tested (pidusage's own handling of a dead
-// pid, not this race). Delay is 0 (a no-op passthrough) for every other test.
-const pidusageControl = vi.hoisted(() => ({
+// Wraps the real process-tree sampler so a test can delay its result (a slow `ps`, to land the
+// restart-during-a-poll race deterministically - the sample itself still runs immediately, against
+// the still-alive old pid, as it would in production), drop chosen app pids from it (an app that
+// vanished between being listed and being sampled), or force a failure with a chosen rejection.
+// All three are no-ops for every other test.
+const statsControl = vi.hoisted(() => ({
 	delayMs: 0,
-	// Pids to strip from a resolved result before it's handed back, simulating pidusage's own
-	// documented "a dead pid is just missing from a batched result" shape without needing the pid
-	// to actually be dead.
 	dropPids: new Set<number>(),
-	// When set, the call rejects with this value instead of running the real pidusage call at all -
-	// lets a test force the failure path with a chosen (including non-Error) rejection value.
 	forceRejectWith: undefined as unknown,
 }));
-vi.mock("pidusage", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("pidusage")>();
+vi.mock("./process-stats.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./process-stats.js")>();
 	return {
-		default: (pids: number | number[]) => {
-			if (pidusageControl.forceRejectWith !== undefined) {
-				const rejection = pidusageControl.forceRejectWith;
-				return new Promise((_, reject) => {
-					setTimeout(() => reject(rejection), pidusageControl.delayMs);
-				});
-			}
-			const result = actual.default(pids as number[]) as Promise<
-				Record<number, unknown>
-			>;
-			return new Promise((resolve, reject) => {
-				result.then(
-					(value) => {
-						for (const pid of pidusageControl.dropPids) delete value[pid];
-						setTimeout(() => resolve(value), pidusageControl.delayMs);
-					},
-					(error) => setTimeout(() => reject(error), pidusageControl.delayMs),
-				);
-			});
+		...actual,
+		createTreeSampler: (
+			...args: Parameters<typeof actual.createTreeSampler>
+		) => {
+			const sample = actual.createTreeSampler(...args);
+			return async (rootPids: number[]) => {
+				const pause = () =>
+					new Promise((resolve) => setTimeout(resolve, statsControl.delayMs));
+				if (statsControl.forceRejectWith !== undefined) {
+					const rejection = statsControl.forceRejectWith;
+					await pause();
+					throw rejection;
+				}
+				const result = await sample(rootPids);
+				for (const pid of statsControl.dropPids) result.delete(pid);
+				await pause();
+				return result;
+			};
 		},
 	};
 });
@@ -775,6 +767,7 @@ describe("runManager plugin support", () => {
 	type StatusEntry = {
 		name: string;
 		pid: number;
+		appPid?: number;
 		alive: boolean;
 		cpu?: number;
 		memory?: number;
@@ -830,7 +823,7 @@ describe("runManager plugin support", () => {
 		await managerPromise;
 	}, 10000);
 
-	it("polls cpu/memory via pidusage and surfaces them on /api/status, clearing them once stopped", async () => {
+	it("polls cpu/memory and surfaces them on /api/status, clearing them once stopped", async () => {
 		const configs = [keepAliveConfig("solo")];
 		const managerPromise = runManager(configs, pidfilePath, {
 			statsPollIntervalMs: 50,
@@ -885,7 +878,7 @@ describe("runManager plugin support", () => {
 		await managerPromise;
 	}, 10000);
 
-	it("skips a worker whose pid is missing from pidusage's own batched result, without breaking the others", async () => {
+	it("skips an app missing from a sample, without breaking the others", async () => {
 		const configs = [keepAliveConfig("one"), keepAliveConfig("two")];
 		const managerPromise = runManager(configs, pidfilePath, {
 			statsPollIntervalMs: 50,
@@ -896,13 +889,17 @@ describe("runManager plugin support", () => {
 		await waitFor(() =>
 			pidfile.workers.every((w: { pid: number }) => isPidAlive(w.pid)),
 		);
-		const onePid = pidfileWorker(pidfilePath, "one")?.pid as number;
-		pidusageControl.dropPids.add(onePid);
+		// Its app's pid - that's what's sampled now, not braid's wrapper.
+		const oneAppPid = (
+			await waitForStatus(pidfile, (body) =>
+				body.some((w) => w.name === "one" && typeof w.appPid === "number"),
+			)
+		).find((w) => w.name === "one")?.appPid as number;
+		statsControl.dropPids.add(oneAppPid);
 
 		try {
-			// "two" still gets sampled normally even though "one"'s own pid never shows up in the
-			// batch pidusage resolves with (the exact shape a dead-between-check-and-sample pid, or
-			// a platform quirk, would produce).
+			// "two" still gets sampled normally even though "one"'s app never shows up in the sample
+			// (the shape an app that exited between being listed and being sampled produces).
 			const withStats = await waitForStatus(pidfile, (body) => {
 				const two = body.find((w) => w.name === "two");
 				return two !== undefined && typeof two.cpu === "number";
@@ -910,14 +907,14 @@ describe("runManager plugin support", () => {
 			const one = withStats.find((w) => w.name === "one");
 			expect(one?.cpu).toBeUndefined();
 		} finally {
-			pidusageControl.dropPids.clear();
+			statsControl.dropPids.clear();
 		}
 
 		await stopFromPidfile(pidfilePath);
 		await managerPromise;
 	}, 10000);
 
-	it("logs a pidusage polling failure only once, using String() for a non-Error rejection, until it succeeds again", async () => {
+	it("logs a stats polling failure only once, using String() for a non-Error rejection, until it succeeds again", async () => {
 		const writeSpy = vi
 			.spyOn(process.stderr, "write")
 			.mockImplementation(() => true);
@@ -930,7 +927,7 @@ describe("runManager plugin support", () => {
 			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
 		);
 
-		pidusageControl.forceRejectWith = "a plain string rejection";
+		statsControl.forceRejectWith = "a plain string rejection";
 		try {
 			await waitFor(() =>
 				writeSpy.mock.calls.some((call) =>
@@ -947,7 +944,7 @@ describe("runManager plugin support", () => {
 			await new Promise((resolve) => setTimeout(resolve, 150));
 			expect(failureLogCount()).toBe(1);
 		} finally {
-			pidusageControl.forceRejectWith = undefined;
+			statsControl.forceRejectWith = undefined;
 			writeSpy.mockRestore();
 		}
 
@@ -955,7 +952,7 @@ describe("runManager plugin support", () => {
 		await managerPromise;
 	}, 10000);
 
-	it("logs a real Error's own message on a pidusage polling failure", async () => {
+	it("logs a real Error's own message on a stats polling failure", async () => {
 		const writeSpy = vi
 			.spyOn(process.stderr, "write")
 			.mockImplementation(() => true);
@@ -968,20 +965,19 @@ describe("runManager plugin support", () => {
 			isPidAlive(pidfileWorker(pidfilePath, "solo")?.pid as number),
 		);
 
-		// Forced deterministically - the natural version of this (a poll racing a pid dying between
-		// its own alive-check and the batched pidusage() call) is a genuine but non-reproducible-on-
-		// demand timing race, not something a test can reliably trigger by waiting.
-		pidusageControl.forceRejectWith = new Error("boom from pidusage");
+		// Forced deterministically - the natural version (`ps` itself failing) can't be triggered
+		// on demand.
+		statsControl.forceRejectWith = new Error("boom from ps");
 		try {
 			await waitFor(() =>
 				writeSpy.mock.calls.some((call) =>
 					String(call[0]).includes(
-						"process stats polling failed (will keep retrying): boom from pidusage",
+						"process stats polling failed (will keep retrying): boom from ps",
 					),
 				),
 			);
 		} finally {
-			pidusageControl.forceRejectWith = undefined;
+			statsControl.forceRejectWith = undefined;
 			writeSpy.mockRestore();
 		}
 
@@ -1172,7 +1168,7 @@ describe("runManager plugin support", () => {
 		await managerPromise;
 	}, 10000);
 
-	it("doesn't leak a restarted process's old cpu/memory when a poll's pidusage() call is still in flight at the moment of the restart", async () => {
+	it("doesn't leak a restarted process's old cpu/memory when a poll's sample is still in flight at the moment of the restart", async () => {
 		const configs = [keepAliveConfig("solo")];
 		const managerPromise = runManager(configs, pidfilePath, {
 			statsPollIntervalMs: 50,
@@ -1191,10 +1187,10 @@ describe("runManager plugin support", () => {
 				return solo !== undefined && typeof solo.cpu === "number";
 			});
 
-			// Slow every subsequent pidusage() call down (simulating a slow `ps`, real on macOS)
+			// Slow every subsequent sample down (simulating a slow `ps`)
 			// - long enough that a restart can land, and this test observe the moment, while a
 			// poll tick sampling the *old* pid is still in flight.
-			pidusageControl.delayMs = 500;
+			statsControl.delayMs = 500;
 			await new Promise((resolve) => setTimeout(resolve, 70));
 			const oldPid = pidfileWorker(pidfilePath, "solo")?.pid;
 
@@ -1209,11 +1205,11 @@ describe("runManager plugin support", () => {
 			const newPid = pidfileWorker(pidfilePath, "solo")?.pid;
 			expect(newPid).not.toBe(oldPid);
 
-			// Wait past the in-flight poll's artificial delay, so its (stale, old-pid) pidusage()
-			// call resolves now - the fix under test: it must not write its result back onto
+			// Wait past the in-flight poll's artificial delay, so its (stale, old-pid) sample
+			// resolves now - the fix under test: it must not write its result back onto
 			// "solo" once the current pid no longer matches the one it actually sampled.
 			await new Promise((resolve) => setTimeout(resolve, 500));
-			pidusageControl.delayMs = 0;
+			statsControl.delayMs = 0;
 
 			const afterStalePoll = await fetchWithToken(pidfile, "/api/status");
 			const soloAfterStalePoll = (
@@ -1233,7 +1229,7 @@ describe("runManager plugin support", () => {
 				);
 			});
 		} finally {
-			pidusageControl.delayMs = 0;
+			statsControl.delayMs = 0;
 			await stopFromPidfile(pidfilePath);
 			await managerPromise;
 		}
@@ -3916,4 +3912,81 @@ describe("restarting a process that hasn't had its first spawn yet", () => {
 		await stopFromPidfile(pidfilePath);
 		expect(await managerPromise).toBe(0);
 	}, 20000);
+});
+
+describe("process stats", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-stats-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"reports the app's whole process tree - a child holding 150 MB and half a core - not braid's wrapper",
+		async () => {
+			const managerPromise = runManager(
+				[
+					{
+						name: "load",
+						command: "node",
+						args: [join(FIXTURES, "load.js"), "parent", "150"],
+					},
+				],
+				pidfilePath,
+				{ statsPollIntervalMs: 250 },
+			);
+			await waitFor(() => existsSync(pidfilePath));
+			const pidfile = JSON.parse(readFileSync(pidfilePath, "utf8")) as Pidfile;
+			const logPath = join(dirname(pidfilePath), "logs", "load.log");
+			// The child logs once it holds all its memory.
+			await waitFor(
+				() =>
+					existsSync(logPath) &&
+					readFileSync(logPath, "utf8").includes("holding"),
+				{ timeoutMs: 10_000 },
+			);
+			const appPid = Number(
+				/started (\d+)/.exec(readFileSync(logPath, "utf8"))?.[1],
+			);
+
+			type Row = {
+				name: string;
+				pid: number;
+				appPid?: number;
+				cpu?: number;
+				memory?: number;
+			};
+			let load: Row | undefined;
+			const deadline = Date.now() + 10_000;
+			while (Date.now() < deadline) {
+				const response = await fetch(
+					`http://127.0.0.1:${pidfile.controlPort}/api/status`,
+					{ headers: { Authorization: `Bearer ${pidfile.controlToken}` } },
+				);
+				load = ((await response.json()) as Row[]).find(
+					(row) => row.name === "load",
+				);
+				// Memory must cover the child's 150 MB; braid's wrapper alone is ~30-50 MB.
+				if ((load?.memory ?? 0) > 140 * 1024 * 1024 && (load?.cpu ?? 0) > 20)
+					break;
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+			expect(load?.appPid).toBe(appPid);
+			expect(load?.appPid).not.toBe(load?.pid);
+			expect(load?.memory).toBeGreaterThan(140 * 1024 * 1024);
+			// The child burns ~50% of a core; leave room for a loaded CI machine.
+			expect(load?.cpu).toBeGreaterThan(20);
+
+			await stopFromPidfile(pidfilePath);
+			expect(await managerPromise).toBe(0);
+		},
+		30_000,
+	);
 });

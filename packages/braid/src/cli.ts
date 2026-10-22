@@ -469,6 +469,8 @@ export async function followLogs(pidfile: Pidfile): Promise<void> {
 type LiveProcessStatus = {
 	name: string;
 	pid: number | undefined;
+	/** The app's own pid (not braid's wrapper) - only a live daemon knows it. */
+	appPid?: number;
 	alive: boolean;
 	/** Absent for a configured process that has never been started (`autoStart: false`). */
 	startedAt?: string;
@@ -502,6 +504,7 @@ export function formatUptime(startedAt: string): string {
 type StartupSummaryRow = {
 	name: string;
 	pid: number | undefined;
+	appPid?: number;
 	alive: boolean;
 	url?: string;
 };
@@ -521,7 +524,10 @@ function printStartupSummary(
 	for (const row of [...rows].sort((a, b) => a.name.localeCompare(b.name))) {
 		const parts = [`  ${row.alive ? "●" : "○"} ${row.name}`];
 		if (row.url) parts.push(row.url);
-		if (row.pid !== undefined) parts.push(`pid ${row.pid}`);
+		// The app's own pid when the daemon knows it - the one worth attaching a debugger to or
+		// looking up in a process monitor - otherwise braid's wrapper's.
+		const pid = row.appPid ?? row.pid;
+		if (pid !== undefined) parts.push(`pid ${pid}`);
 		console.log(parts.join("  "));
 	}
 }
@@ -852,10 +858,11 @@ async function runStatusCommand(
 			console.log(`○ ${status.name}  not started`);
 			continue;
 		}
-		const stats =
-			status.cpu !== undefined && status.memory !== undefined
-				? `  cpu ${status.cpu.toFixed(1)}%  mem ${formatBytes(status.memory)}`
-				: "";
+		// CPU needs two samples, memory one, so memory can show up a poll before CPU does.
+		const cpu =
+			status.cpu !== undefined ? `  cpu ${status.cpu.toFixed(1)}%` : "";
+		const memory =
+			status.memory !== undefined ? `  mem ${formatBytes(status.memory)}` : "";
 		const restarts =
 			status.restartCount !== undefined
 				? `  restarts ${status.restartCount}`
@@ -865,7 +872,7 @@ async function runStatusCommand(
 				? `  up ${formatUptime(status.startedAt)}`
 				: "";
 		console.log(
-			`${status.alive ? "●" : "○"} ${status.name}  pid ${status.pid}  ${status.alive ? "running" : "stopped"}${stats}${restarts}${uptime}`,
+			`${status.alive ? "●" : "○"} ${status.name}  pid ${status.appPid ?? status.pid}  ${status.alive ? "running" : "stopped"}${cpu}${memory}${restarts}${uptime}`,
 		);
 	}
 	return 0;
