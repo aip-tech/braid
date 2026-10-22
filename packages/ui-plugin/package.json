@@ -7,6 +7,13 @@
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
 	"files": [
 		"dist",
 		"CHANGELOG.md"
@@ -26,7 +33,7 @@
 		"dashboard"
 	],
 	"engines": {
-		"node": ">=22"
+		"node": ">=22.18"
 	},
 	"scripts": {
 		"build": "rm -rf dist && vite build --config frontend/vite.config.ts && tsc -p tsconfig.build.json",

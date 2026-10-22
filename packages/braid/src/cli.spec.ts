@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	applyNoWatch,
+	configLoadHint,
 	DEFAULT_PIDFILE_PATH,
 	followLogs,
 	formatUptime,
@@ -342,6 +343,24 @@ describe("loadConfig", () => {
 		await expect(loadConfig(configPath)).rejects.toThrow(
 			/must default-export a non-empty array or a \{ processes \} object/,
 		);
+	});
+});
+
+describe("configLoadHint", () => {
+	it("points a .ts config on too old a Node at the version it needs", () => {
+		const error = Object.assign(new Error('Unknown file extension ".ts"'), {
+			code: "ERR_UNKNOWN_FILE_EXTENSION",
+		});
+		expect(configLoadHint(error, "v22.12.0")).toBe(
+			" (a TypeScript config needs Node 22.18 or later, which runs it natively - this is v22.12.0. Upgrade Node, or use a braid.config.js/.mjs)",
+		);
+		expect(configLoadHint(error)).toContain(process.version);
+	});
+
+	it("adds nothing for any other failure", () => {
+		expect(configLoadHint(new Error("syntax error"))).toBe("");
+		expect(configLoadHint("not even an error")).toBe("");
+		expect(configLoadHint(null)).toBe("");
 	});
 });
 

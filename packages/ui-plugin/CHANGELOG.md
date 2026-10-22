@@ -11,6 +11,9 @@ Requires `@aip-tech/braid` 0.10.0 or later.
 
 ### Changed
 
+- Requires Node 22.18 or later, matching `@aip-tech/braid`.
+- An `exports` map in `package.json`: only the main entry point and
+  `./package.json` are importable.
 - The dashboard link braid prints now carries its token in the URL
   fragment (`/#token=...`) rather than the query string. The page moves
   the token into the tab's `sessionStorage`, strips it from the address

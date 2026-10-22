@@ -59,6 +59,36 @@ export function findStartAfterCycle(
 	return findCycle(configs, (config) => config.startAfter?.processes ?? []);
 }
 
+/** Why `name` can't be used as a process name, or undefined if it's fine. */
+export function invalidNameReason(name: string): string | undefined {
+	if (name === "." || name === "..") return "is a path segment";
+	if (/[/\\]/.test(name)) return "contains a path separator";
+	if (name === "*") return 'is reserved ("*" means every process)';
+	// Control characters - newlines included - would corrupt log lines and status output.
+	const isControl = (char: string) => {
+		const code = char.charCodeAt(0);
+		return code < 0x20 || code === 0x7f;
+	};
+	if ([...name].some(isControl)) return "contains a control character";
+	return undefined;
+}
+
+/**
+ * Throws for a process name that can't safely be used. A name becomes a file name
+ * (`<logs dir>/<name>.log`), so a path separator or `..` would put that log somewhere else
+ * entirely, and `*` already means "every process" in the log routes.
+ */
+export function validateProcessNames(configs: ProcessConfig[]): void {
+	for (const config of configs) {
+		const reason = invalidNameReason(config.name);
+		if (reason) {
+			throw new Error(
+				`braid: process name ${JSON.stringify(config.name)} ${reason} - names can't contain "/", "\\" or control characters, and can't be ".", ".." or "*"`,
+			);
+		}
+	}
+}
+
 /**
  * Throws if two configs share the same `name` - every by-name operation (stop/restart, the
  * pidfile worker list, a process's own log file) resolves to only one of them, silently

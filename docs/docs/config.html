@@ -58,7 +58,7 @@ export default defineConfig({
 	],
 });</code></pre>
 					<ul>
-						<li><code>name</code> &mdash; unique; used for log prefixes, the pidfile, and status output.</li>
+						<li><code>name</code> &mdash; unique; used for log prefixes, the pidfile, status output and the process's log file name. It can't contain <code>/</code>, <code>\</code> or control characters, and can't be <code>.</code>, <code>..</code> or <code>*</code>.</li>
 						<li><code>command</code>/<code>args</code> &mdash; the process to run.</li>
 						<li><code>cwd</code> &mdash; resolved relative to wherever the CLI was invoked; defaults to that same directory.</li>
 						<li><code>env</code> &mdash; extra environment variables merged over <code>process.env</code>, for this process only. No other process can see them: braid passes its config to the daemon over IPC, never through an environment variable, and strips its own internal <code>BRAID_*</code> variables from everything it starts. (Your own <code>BRAID_*</code> variables pass through untouched.)</li>
@@ -197,8 +197,12 @@ export default defineConfig({
 						Re-spawning a process isn't the same as it being ready &mdash; an API might
 						take a moment after restarting before it's actually serving.
 						<code>readyPattern</code> holds off <code>onRestart</code> and any
-						<code>dependsOn</code> cascades until a regex matches that process's own
-						stdout/stderr:
+						<code>dependsOn</code> cascades until a regex matches a line of that
+						process's own stdout/stderr. It's tested against each whole line exactly as
+						the app printed it, so braid's own <code>[name]</code> prefix, timestamps and
+						colors aren't part of it, and an anchored pattern like
+						<code>^Server listening</code> works. braid's own <code>braid: ...</code>
+						notices are never matched:
 					</p>
 					<pre><code class="language-typescript">{
 	name: "api",

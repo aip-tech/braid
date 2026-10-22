@@ -12,6 +12,9 @@ export default defineConfig({
 		],
 		coverage: {
 			provider: "istanbul",
+			// Every statement, branch, function and line - anything deliberately left untested is
+			// marked with a justified `istanbul ignore` instead, so a gap can't slip in unnoticed.
+			thresholds: { 100: true },
 			reporter: ["text", "html"],
 			include: ["src/**/*.ts", "frontend/src/**/*.ts", "frontend/src/**/*.tsx"],
 		},

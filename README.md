@@ -12,7 +12,7 @@ See [packages/braid/README.md](packages/braid/README.md) for install, config, an
 
 ## Setup
 
-Requires Node 22+ and pnpm (`packageManager` is pinned in the root `package.json`).
+Requires Node 22.18+ (which runs the TypeScript config natively) and pnpm (`packageManager` is pinned in the root `package.json`).
 
 ```bash
 pnpm install        # also builds packages/braid, so its bin exists

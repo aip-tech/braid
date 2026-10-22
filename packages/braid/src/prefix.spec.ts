@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { braidTag, colorize, linePrefixer, pluginTag } from "./prefix.js";
+import {
+	appLineText,
+	braidTag,
+	colorize,
+	linePrefixer,
+	pluginTag,
+} from "./prefix.js";
 
 function collectingSink(): { lines: string[]; sink: (line: string) => void } {
 	const lines: string[] = [];
@@ -32,7 +38,53 @@ describe("pluginTag", () => {
 	});
 });
 
+describe("appLineText", () => {
+	it("recovers exactly what the app printed from a prefixed, colored, timestamped line", () => {
+		const prefixed = `${colorize("12:34:56.789", "gray")} ${colorize("[api]", "blue")} \x1b[32mready\x1b[0m on :4000`;
+		expect(appLineText(prefixed, "api")).toBe("ready on :4000");
+		expect(appLineText("[api] plain", "api")).toBe("plain");
+	});
+
+	it("leaves a line without braid's prefix as it is", () => {
+		expect(appLineText("no prefix here", "api")).toBe("no prefix here");
+		expect(appLineText("[other] not this process's tag", "api")).toBe(
+			"[other] not this process's tag",
+		);
+	});
+
+	it("is undefined for braid's own notices in the process's stream", () => {
+		expect(
+			appLineText(
+				`${colorize("[api]", "blue")} braid: stopping (restarting)`,
+				"api",
+			),
+		).toBeUndefined();
+	});
+});
+
 describe("linePrefixer", () => {
+	it("keeps a multi-byte character intact when it's split across two chunks", () => {
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api");
+		const bytes = Buffer.from("héllo 日本\n");
+		// Split inside "é" (2 bytes) and inside "日" (3 bytes).
+		const firstCut = Buffer.from("h").length + 1;
+		const secondCut = Buffer.from("héllo ").length + 2;
+		prefixer.write(bytes.subarray(0, firstCut));
+		prefixer.write(bytes.subarray(firstCut, secondCut));
+		prefixer.write(bytes.subarray(secondCut));
+		expect(lines).toEqual(["[api] héllo 日本\n"]);
+	});
+
+	it("flushes a character left incomplete at the very end as a replacement character", () => {
+		const { lines, sink } = collectingSink();
+		const prefixer = linePrefixer(sink, "api");
+		prefixer.write(Buffer.from("cut ").toString());
+		prefixer.write(Buffer.from("日").subarray(0, 2));
+		prefixer.flush();
+		expect(lines).toEqual(["[api] cut \uFFFD\n"]);
+	});
+
 	it("prefixes each complete line and holds back a trailing partial line", () => {
 		const { lines, sink } = collectingSink();
 		const prefixer = linePrefixer(sink, "api", "blue");
