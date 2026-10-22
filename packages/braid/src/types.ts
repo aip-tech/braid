@@ -221,7 +221,7 @@ export type BraidConfig = {
 	 */
 	foreground?: boolean;
 	/**
-	 * How often to sample every running process's CPU/memory (via `pidusage`), surfaced through
+	 * How often to sample every running app's CPU/memory (its whole process tree), surfaced through
 	 * `PluginContext.getProcesses()`/`GET /api/status`/`braid status`. Lower values react faster
 	 * but poll more often; a persistently CPU-heavy `ps`/`/proc` read isn't likely at typical
 	 * process counts, but this is here to tune if it ever matters. @default 2000
@@ -339,13 +339,19 @@ export type PluginContext = {
 	): void;
 	getProcesses(): Array<{
 		name: string;
+		/** braid's own wrapper process for this entry - the pid `braid stop` and the pidfile track. */
 		pid: number | undefined;
+		/** The app itself (the configured `command`), while it's running. Absent until its first
+		 *  spawn is reported, while it's stopped, and when talking to braid <0.10. */
+		appPid?: number;
 		alive: boolean;
 		/** Absent for a configured process that has never been forked yet (`autoStart: false`, not yet started). */
 		startedAt?: string;
-		/** Percent of one CPU core, sampled every `statsPollIntervalMs`. Absent until the first sample. */
+		/** Percent of one CPU core used by the app and every process it started, sampled every
+		 *  `statsPollIntervalMs`. Absent until two samples have been taken, and while stopped. */
 		cpu?: number;
-		/** RSS in bytes, sampled every `statsPollIntervalMs`. Absent until the first sample. */
+		/** Memory in bytes for the app and every process it started: physical footprint on macOS,
+		 *  RSS elsewhere. Absent until the first sample, while stopped, and on Windows. */
 		memory?: number;
 		/** Total completed restarts (watch-triggered, `autoRestart`, manual, or `dependsOn`-cascaded)
 		 *  since this daemon started - 0, not absent, for a process that hasn't restarted. */

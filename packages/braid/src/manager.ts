@@ -10,7 +10,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import pidusage from "pidusage";
 import treeKill from "tree-kill";
 import { childEnv } from "./child-env.js";
 import { createControlServer } from "./control-server.js";
@@ -36,6 +35,7 @@ import {
 	liveRecordedPids,
 	type ProcessRecord,
 } from "./process-identity.js";
+import { createTreeSampler, type TreeStats } from "./process-stats.js";
 import { acquireStartLock } from "./start-lock.js";
 import type {
 	BraidConfig,
@@ -87,7 +87,7 @@ export type RunManagerOptions = {
 	/** Called once every process has forked and the pidfile is written, before awaiting exit, with
 	 *  the same snapshot `GET /api/status` would return at that moment. */
 	onReady?: (workers: WorkerSnapshot[]) => void;
-	/** How often to sample CPU/memory via `pidusage`. See `BraidConfig.statsPollIntervalMs`. @default 2000 */
+	/** How often to sample each app's CPU/memory. See `BraidConfig.statsPollIntervalMs`. @default 2000 */
 	statsPollIntervalMs?: number;
 	/** Aborting this shuts the manager down with exit code 1, the same orderly way a crash does -
 	 *  how a process owner's last-resort error handler (see fatal-handlers.ts) stops everything. */
@@ -500,17 +500,18 @@ export async function runManager(
 
 	const emitter = new EventEmitter();
 	const controlServer = createControlServer();
-	// Latest cpu/memory sample per process name, refreshed by pollStats() below - kept separate
-	// from pidfileWorkers since it's sampled on its own cadence, not tied to a worker (re)starting.
-	const statsByName = new Map<string, { cpu: number; memory: number }>();
+	// Latest cpu/memory sample per process name - for its app's whole process tree, not braid's
+	// wrapper (see process-stats.ts) - refreshed by pollStats() below on its own cadence.
+	const statsByName = new Map<string, TreeStats>();
+	const sampleTrees = createTreeSampler();
 	// Total completed restarts per process name, for the whole life of this daemon - unlike
 	// statsByName, never cleared on respawn (it's cumulative, not tied to a particular pid).
 	// Incremented once per restart in handleFreshStart, the one function every restart trigger
 	// (watch, autoRestart, a manual restart, a dependsOn cascade) already funnels through.
 	const restartCountByName = new Map<string, number>();
-	// Guards against two pollStats() ticks overlapping if a `ps`/`/proc` read is ever slow -
-	// pidusage keeps an unlocked, module-level history keyed by pid, so overlapping calls against
-	// the same pid could corrupt a delta calculation.
+	// Guards against two pollStats() ticks overlapping if a `ps`/`/proc` read is ever slow - the
+	// sampler's CPU% is a delta against its own previous sample, which two overlapping ticks would
+	// each try to advance.
 	let statsPollInFlight = false;
 	// Logs a pollStats() failure once (not every tick) until it succeeds again, so a structurally
 	// broken setup (missing `ps`, unsupported platform) doesn't stay silent forever.
@@ -535,13 +536,16 @@ export async function runManager(
 			}
 			const alive = isAlive(worker.pid);
 			const stats = alive ? statsByName.get(worker.name) : undefined;
+			const appPid = alive ? liveAppPid(worker.name) : undefined;
 			return {
 				name: worker.name,
 				pid: worker.pid,
+				...(appPid !== undefined ? { appPid } : {}),
 				alive,
 				startedAt: worker.startedAt,
 				restartCount,
-				...(stats ? { cpu: stats.cpu, memory: stats.memory } : {}),
+				...(stats?.cpu !== undefined ? { cpu: stats.cpu } : {}),
+				...(stats ? { memory: stats.memory } : {}),
 				...(config.url ? { url: config.url } : {}),
 			};
 		});
@@ -606,48 +610,40 @@ export async function runManager(
 	});
 	const managerStartedAt = new Date().toISOString();
 
+	/** The pid of `name`'s app right now - its worker's latest "app" report - if it's running. */
+	function liveAppPid(name: string): number | undefined {
+		const child = children.get(name);
+		if (!child || child.exitCode !== null || child.signalCode !== null) {
+			return undefined;
+		}
+		const appPid = appPids.get(child);
+		return appPid !== undefined && isAlive(appPid) ? appPid : undefined;
+	}
+
 	/**
-	 * Refreshes `statsByName` for every currently-alive worker via one batched `pidusage()` call.
-	 * Always deletes a no-longer-alive name's cached stats regardless of whether the call below
-	 * succeeds - that's what makes a stopped process's cpu/memory disappear. `pidusage`'s own CPU%
-	 * is delta-based (its module-level history is keyed by pid): a pid's first-ever sample is a
-	 * lifetime average since start, every subsequent sample against the same pid is an accurate
-	 * since-last-call delta - exactly right for this function's own repeated-polling use, wrong if
-	 * called just once. There is no per-pid `pidusage.clear()` (confirmed by reading its source) -
-	 * only a global one wiping every pid's history at once - so this never calls it; a dead pid's
-	 * history entry simply expires on its own after pidusage's default 60s `maxage`.
+	 * Refreshes `statsByName` with one sample of every running app's process tree. A process with
+	 * no running app (stopped, idle after a clean exit while watched, or never started) loses its
+	 * stats, which is what makes a stopped process's cpu/memory disappear.
 	 */
 	async function pollStats(): Promise<void> {
 		if (statsPollInFlight) return;
-		const aliveWorkers: PidfileWorker[] = [];
-		for (const worker of pidfileWorkers) {
-			// istanbul ignore else -- pure cache hygiene: getWorkers() already suppresses cpu/memory
-			// for a non-alive worker regardless of whether the else branch ran, via its own `alive ?`
-			// check, so there's no way to observe a difference in behavior through any public API -
-			// only a stopped-and-never-restarted name's entry lingering in memory a little longer
-			// than it needs to. (A *restarted* name's stale entry is a real, observable bug, but
-			// that's a separate deletion, in spawnWorker, covered by its own test.)
-			if (isAlive(worker.pid)) aliveWorkers.push(worker);
-			else statsByName.delete(worker.name);
+		const nameByAppPid = new Map<number, string>();
+		for (const config of configs) {
+			const appPid = liveAppPid(config.name);
+			if (appPid === undefined) statsByName.delete(config.name);
+			else nameByAppPid.set(appPid, config.name);
 		}
-		if (aliveWorkers.length === 0) return;
+		if (nameByAppPid.size === 0) return;
 		statsPollInFlight = true;
 		try {
-			const stats = await pidusage(aliveWorkers.map((worker) => worker.pid));
-			for (const worker of aliveWorkers) {
-				const stat = stats[worker.pid];
-				if (!stat) continue;
-				// A restart can race this same await: spawnWorker assigns a fresh pid and clears
-				// statsByName for this name while pidusage() above is still in flight. Re-check the
-				// *current* pid for this name against the one actually sampled before writing, so a
-				// stale sample from the old pid can't land back in after spawnWorker already cleared
-				// it - without this, the new process's row would show its predecessor's cpu/memory.
-				const current = pidfileWorkers.find((w) => w.name === worker.name);
-				if (current?.pid !== worker.pid) continue;
-				statsByName.set(worker.name, {
-					cpu: Math.round(stat.cpu * 10) / 10,
-					memory: stat.memory,
-				});
+			const samples = await sampleTrees([...nameByAppPid.keys()]);
+			for (const [appPid, name] of nameByAppPid) {
+				// The app may have restarted (a new pid) while the sample was being taken - its
+				// predecessor's figures mustn't land on the new one's row.
+				if (liveAppPid(name) !== appPid) continue;
+				const sample = samples.get(appPid);
+				if (sample) statsByName.set(name, sample);
+				else statsByName.delete(name);
 			}
 			statsFailureLogged = false;
 		} catch (error) {
@@ -1021,6 +1017,9 @@ export async function runManager(
 			if (!isWorkerStatusMessage(message)) return;
 			if (message.type === "app") {
 				appPids.set(child, message.pid);
+				// A baseline sample of the new app straight away: CPU % needs two samples, so this
+				// is what makes it appear one poll after a (re)start rather than two.
+				void pollStats();
 				return;
 			}
 			if (message.type === "restart") {

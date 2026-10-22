@@ -1,4 +1,5 @@
 import {
+	displayPid,
 	formatCpu,
 	formatMemory,
 	formatStarted,
@@ -63,7 +64,7 @@ export function DetailView({
 					<span>
 						PID{" "}
 						<span class="badge badge-pid">
-							{process?.pid !== undefined ? String(process.pid) : "-"}
+							{process ? displayPid(process) : "-"}
 						</span>
 					</span>
 					<span>

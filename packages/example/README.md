@@ -1,6 +1,6 @@
 # braid-example
 
-A live test bed for [`braid`](../braid): six toy processes, started via braid's actual
+A live test bed for [`braid`](../braid): seven toy processes, started via braid's actual
 compiled `bin`, each demonstrating a different config feature.
 
 - `web` (`src/web.ts`) — HTTP server on port 4001. Plain `watch`, no hooks: edit and save to
@@ -17,6 +17,9 @@ compiled `bin`, each demonstrating a different config feature.
   against a stale generated file. This is the real scenario the hook exists for - a process
   whose own restart depends on freshly regenerated output from the very change that triggered
   it.
+- `load` (`src/load.ts`) — spawns a child that climbs to 300 MB and about a quarter of a core,
+  then drops back and repeats. Watch it in the dashboard: its CPU and memory are the whole
+  process tree's, so they track the child's "holding N MB" lines rather than staying flat.
 - `cron` (`src/cron.ts`) — `autoStart: false`: a cron-style one-shot that never runs on
   `braid start`. Start it on demand with `braid start cron` or the dashboard's Start button.
 

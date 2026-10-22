@@ -402,13 +402,20 @@ export default defineConfig({
 				<section id="stats">
 					<h2>Process stats, restart count, and uptime</h2>
 					<p>
-						Each process's CPU (percent of one core) and memory (RSS) usage is
-						sampled on a timer via <a href="https://www.npmjs.com/package/pidusage"><code>pidusage</code></a>,
-						surfaced through <code>PluginContext.getProcesses()</code> (so
+						Each process's CPU (percent of one core) and memory usage is sampled on a
+						timer, surfaced through <code>PluginContext.getProcesses()</code> (so
 						<code>GET /api/status</code> and <code>@aip-tech/braid-plugin-ui</code>'s
-						dashboard get it for free) and in <code>braid status</code>'s own output
-						once the daemon has sampled it. Adjust the polling cadence at the top
-						level of the config:
+						dashboard get it for free) and in <code>braid status</code>'s own output.
+						The figures cover the app's whole process tree: the configured
+						<code>command</code> and everything it starts (the real server under a
+						<code>pnpm dev</code>, a bundler's worker processes), but not braid's own
+						small wrapper process above it. Memory is each process's physical
+						footprint on macOS (what Activity Monitor shows) and RSS on Linux, added
+						up over the tree. CPU appears from the second sample, since it's measured
+						as the change in CPU time between two samples. On Windows there are no
+						stats. The status object's <code>appPid</code> is the app's own pid, and
+						is what <code>braid status</code> and the dashboard show. Adjust the
+						polling cadence at the top level of the config:
 					</p>
 					<pre><code class="language-typescript">export default defineConfig({
 	processes: [ /* ... */ ],

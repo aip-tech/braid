@@ -9,6 +9,10 @@ version bump.
 
 ### Added
 
+- `appPid` on each `PluginContext.getProcesses()` and `GET /api/status`
+  entry: the app's own pid, as opposed to `pid` (braid's wrapper, which
+  the pidfile and `braid stop` track). `braid status` and the startup
+  summary now show it.
 - `startupTimeoutMs` config option: how long a daemonized `braid start`
   waits for the daemon to confirm startup (default 5000, unchanged).
 - `PluginContext.shutdown()` and a core `POST /api/shutdown` route: an
@@ -21,6 +25,9 @@ version bump.
 
 ### Changed
 
+- The `pidusage` dependency is gone (and with it `safe-buffer`). Stats
+  come straight from `ps`, `/proc` and macOS's `footprint`. Windows,
+  which braid has never claimed to support, now gets no stats at all.
 - A daemon that doesn't confirm startup in time is now stopped, rather
   than left running in the background with nobody knowing about it.
   `start` waits (bounded) for it to exit before returning.
@@ -70,6 +77,18 @@ version bump.
 
 ### Fixed
 
+- CPU and memory in `braid status`, `GET /api/status` and the dashboard
+  described braid's own wrapper process, not the app: every process
+  showed about 0-2% and 30-50 MB, whatever the app was doing. They now
+  cover the app's whole process tree (the `command` and everything it
+  starts, such as the real server under `pnpm dev`), summed from one
+  `ps` call (macOS) or a `/proc` scan (Linux) per poll. On macOS, memory
+  is each process's physical footprint, which matches Activity Monitor,
+  rather than RSS, which leaves out compressed and swapped memory and
+  could under-report several times over on a busy Mac. CPU is measured
+  as the change in CPU time between polls, so it's accurate on Linux too
+  (where `ps`'s own figure is a lifetime average), and appears from the
+  second sample onwards.
 - Every supervised process, and every hook, inherited the daemon's whole
   config in `BRAID_DAEMON_INPUT`, including every other process's own
   `env`. Any process could read another's secrets, which also showed in

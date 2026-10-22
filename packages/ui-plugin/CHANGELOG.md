@@ -24,6 +24,10 @@ Requires `@aip-tech/braid` 0.10.0 or later.
 
 ### Fixed
 
+- The PID column and the detail view's PID now show the app's own pid
+  (braid 0.10's new `appPid`), not braid's wrapper's. The CPU and memory
+  figures they sit beside come from braid, and now cover the app's whole
+  process tree.
 - `preact`, `ansi_up` and `@tanstack/virtual-core` are bundled into the
   dashboard at build time, so they're now devDependencies: installing
   the plugin no longer pulls them in. The package has no runtime

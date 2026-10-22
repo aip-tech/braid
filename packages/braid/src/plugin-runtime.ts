@@ -11,6 +11,7 @@ import type {
 export type WorkerSnapshot = {
 	name: string;
 	pid: number | undefined;
+	appPid?: number;
 	alive: boolean;
 	startedAt?: string;
 	cpu?: number;
