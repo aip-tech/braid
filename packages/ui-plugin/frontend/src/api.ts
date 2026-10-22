@@ -1,3 +1,5 @@
+import { authFetch } from "./auth.js";
+
 export type ProcessStatus = {
 	name: string;
 	pid: number | undefined;
@@ -86,7 +88,7 @@ export async function postAction(
 	action: "stop" | "restart" | "start",
 	name: string,
 ): Promise<{ ok: boolean; status: number; message: string }> {
-	const res = await fetch(
+	const res = await authFetch(
 		`/api/processes/${action}?name=${encodeURIComponent(name)}`,
 		{ method: "POST" },
 	);
@@ -97,7 +99,7 @@ export async function postAction(
 /** Fetched once - the running daemon's own braid version can't change without a restart. */
 export async function fetchBraidVersion(): Promise<string | undefined> {
 	try {
-		const res = await fetch("/api/ui/version");
+		const res = await authFetch("/api/ui/version");
 		if (!res.ok) return undefined;
 		const { braidVersion } = (await res.json()) as { braidVersion: string };
 		return braidVersion;

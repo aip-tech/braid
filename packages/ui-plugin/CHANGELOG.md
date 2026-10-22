@@ -5,6 +5,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project is pre-1.0, so backwards-incompatible changes can land in a
 minor version bump.
 
+## [Unreleased]
+
+Requires `@aip-tech/braid` 0.10.0 or later.
+
+### Changed
+
+- The dashboard link braid prints now carries its token in the URL
+  fragment (`/#token=...`) rather than the query string. The page moves
+  the token into the tab's `sessionStorage`, strips it from the address
+  bar, and sends it as an `Authorization` header on every request
+  (`frontend/src/auth.ts`). There's no longer a cookie, which would have
+  been sent to every local server on 127.0.0.1. Reloading the tab keeps
+  working.
+- A refused request now says why: either the page has no token (it
+  wasn't opened through braid's link) or braid rejected it (the daemon
+  restarted with a new one). Both point to the link braid printed.
+
+### Fixed
+
+- `preact`, `ansi_up` and `@tanstack/virtual-core` are bundled into the
+  dashboard at build time, so they're now devDependencies: installing
+  the plugin no longer pulls them in. The package has no runtime
+  dependencies at all.
+- The published package no longer includes `dist/index.spec.*`.
+- The `@aip-tech/braid` peer range was `>=0.4.0`, but the dashboard has
+  needed `/api/processes/start` (0.7.0) for a while and now needs the
+  header-based auth (0.10.0). It's now `>=0.10.0 <1`.
+
 ## [0.6.2] - 2026-09-18
 
 ### Added

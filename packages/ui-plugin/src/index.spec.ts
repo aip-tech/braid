@@ -146,7 +146,7 @@ describe("uiPlugin", () => {
 
 		expect(ctx.log).toHaveBeenCalledWith(
 			expect.stringContaining(
-				"http://127.0.0.1:12345/dash/?token=secret-token",
+				"http://127.0.0.1:12345/dash/#token=secret-token",
 			),
 		);
 	});

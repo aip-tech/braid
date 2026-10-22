@@ -4,6 +4,7 @@ import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProcessStatus } from "./api.js";
 import { App } from "./app.js";
+import { setToken } from "./auth.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return {
@@ -63,6 +64,8 @@ beforeEach(() => {
 	container = document.createElement("div");
 	document.body.appendChild(container);
 	location.hash = "";
+	// As if opened through braid's #token= link - the no-token case has its own test.
+	setToken("test-token");
 });
 
 afterEach(() => {
@@ -112,9 +115,47 @@ describe("App", () => {
 		await flush();
 
 		expect(container.querySelector(".error")?.textContent).toContain(
-			"Session expired",
+			"didn't accept this page's access token",
 		);
 		expect(container.querySelectorAll("#processes tbody tr")).toHaveLength(0);
+	});
+
+	it("explains a 401 differently when the page was opened without any token", async () => {
+		setToken(undefined);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL) => {
+				const url = String(input);
+				if (url === "/api/ui/version")
+					return jsonResponse({ braidVersion: "1.0.0" });
+				return textResponse("Unauthorized", 401);
+			}),
+		);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		expect(container.querySelector(".error")?.textContent).toContain(
+			"No access token",
+		);
+	});
+
+	it("sends the token as a bearer header on its requests", async () => {
+		const fetchMock = vi.fn(
+			async (_input: RequestInfo | URL, _init?: RequestInit) =>
+				jsonResponse([]),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		act(() => render(<App />, container));
+		await flush();
+
+		const statusCall = fetchMock.mock.calls.find(
+			([input]) => String(input) === "/api/status",
+		);
+		expect(new Headers(statusCall?.[1]?.headers).get("Authorization")).toBe(
+			"Bearer test-token",
+		);
 	});
 
 	it("shows the raw status/body as a banner for any other non-ok response", async () => {
@@ -312,7 +353,7 @@ describe("App", () => {
 		});
 
 		expect(container.querySelector(".error")?.textContent).toContain(
-			"Session expired",
+			"didn't accept this page's access token",
 		);
 		expect(container.querySelector(".row-error")).toBeNull();
 	});

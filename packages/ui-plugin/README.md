@@ -31,13 +31,14 @@ in its own terminal (needs `@aip-tech/braid` `>=0.3.1` - on an older
 version, check `.braid/daemon.log` instead):
 
 ```
-[plugin:ui] dashboard ready - open http://127.0.0.1:54213/?token=... in your browser
+[plugin:ui] dashboard ready - open http://127.0.0.1:54213/#token=... in your browser
 ```
 
-Open that URL once - it sets a session cookie and redirects to the plain
-`http://127.0.0.1:<port>/`, so the token doesn't linger in your address bar
-or history. If the daemon restarts, its token changes too; check the log
-again for a fresh URL.
+Open that URL. The token travels in the URL fragment (after `#`), which your
+browser never sends to any server. The page moves it into the tab's
+`sessionStorage`, removes it from the address bar, and sends it as a header
+on every request. Reloading the tab keeps working. A new tab, or a daemon
+restart (which issues a new token), needs the link from the log again.
 
 ### Options
 

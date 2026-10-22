@@ -51,6 +51,18 @@ version bump.
   daemonized run intact, as they already did with `--foreground`. A
   function in options, which used to be dropped silently, now fails
   `start` with a clear error.
+- **Breaking for plugins that serve a browser page:** the control server
+  accepts its token only as an `Authorization: Bearer` header. The
+  `?token=` query parameter and the session cookie it set are gone.
+  Cookies aren't port-scoped, so that cookie went to every server on
+  127.0.0.1 the browser visited, and any local dev server's request log
+  could capture a full-control token. A page now gets the token from the
+  URL fragment (`#token=...`), which browsers never send to a server,
+  and sends the header itself. To support that, `registerStatic` files
+  are served without the token (and with `X-Content-Type-Options:
+  nosniff`), and a WebSocket upgrade can use a single-use, 30-second
+  ticket from the new `POST /api/ws-ticket` route in place of the header.
+  An unknown path without the token now gets 401, not 404.
 - The control server rejects a request whose `Host` isn't a loopback
   name (421), and a non-GET request or an upgrade whose `Origin` doesn't
   match the Host it was sent to (403). Only hostnames are compared, so

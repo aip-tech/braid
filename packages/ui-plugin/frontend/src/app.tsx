@@ -6,15 +6,11 @@ import {
 	postAction,
 	updateHistory,
 } from "./api.js";
+import { authFetch, unauthorizedMessage } from "./auth.js";
 import { DetailView } from "./detail-view.js";
 import { TableView } from "./table-view.js";
 
 const POLL_INTERVAL_MS = 2000;
-// Shared between refreshStatus's own 401 and runAction's, so the same root cause (the daemon
-// restarted, invalidating the session cookie/token) always reads the same way regardless of which
-// request happened to surface it first.
-const SESSION_EXPIRED_MESSAGE =
-	"Session expired (the daemon may have restarted) - reload this page.";
 
 type Route = { view: "table" } | { view: "detail"; name: string };
 
@@ -64,13 +60,15 @@ export function App() {
 	const refreshStatus = useCallback(async () => {
 		let res: Response;
 		try {
-			res = await fetch("/api/status");
+			res = await authFetch("/api/status");
 		} catch {
 			setBanner("Lost connection to braid - is the daemon still running?");
 			return;
 		}
 		if (res.status === 401) {
-			setBanner(SESSION_EXPIRED_MESSAGE);
+			// Shared with runAction's own 401, so the same root cause reads the same way whichever
+			// request surfaced it first - and tells someone who opened the page without the link why.
+			setBanner(unauthorizedMessage());
 			return;
 		}
 		if (!res.ok) {
@@ -115,7 +113,7 @@ export function App() {
 					// (the raw response body) told the user nothing actionable for what's actually a
 					// session/daemon-restart issue affecting every row, not just this one.
 					if (status === 401) {
-						setBanner(SESSION_EXPIRED_MESSAGE);
+						setBanner(unauthorizedMessage());
 					} else {
 						setRowErrors((prev) => new Map(prev).set(name, message));
 					}
