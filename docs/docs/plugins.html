@@ -3,188 +3,127 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Plugins &middot; braid</title>
+		<title>Plugins · braid</title>
+		<meta name="description" content="Use braid plugins, and write your own: routes, lifecycle events and browser pages on braid's local control server." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
 	<body data-page="plugins">
-		<div id="topnav"></div>
-
+		<header id="topnav"></header>
 		<div class="docs-shell">
-			<aside id="sidebar"></aside>
-
+			<nav id="sidebar"></nav>
 			<main class="docs-main">
-				<h1>Plugins</h1>
-				<p class="lede">
-					<code>start</code> runs a loopback-only, token-guarded control server that both
-					braid's own built-in functionality and external plugins register routes,
-					static files, and process lifecycle listeners on.
-				</p>
+				<article class="content">
+					<p class="eyebrow">Guides</p>
+					<h1>Plugins</h1>
+					<p class="lede">
+						Every running stack has a small local HTTP server. Plugins add routes,
+						pages and event listeners to it; braid's own logs and process controls
+						are built the same way.
+					</p>
 
-				<ul class="jump-to">
-					<li><a href="#using-plugins">Using plugins</a></li>
-					<li><a href="#building-a-plugin">Building a plugin</a></li>
-					<li><a href="#plugin-context">The PluginContext API</a></li>
-					<li><a href="#lifecycle-events">Lifecycle events</a></li>
-					<li><a href="#browser-content">Serving browser content</a></li>
-				</ul>
-
-				<section id="using-plugins">
-					<h2>Using plugins</h2>
-					<p>List a plugin by package name/path in <code>plugins</code> &mdash; optionally as a <code>[name, options]</code> tuple. Options must be plain data (strings, numbers, booleans, arrays, plain objects, and also <code>RegExp</code>, <code>Date</code>, <code>Map</code> and <code>Set</code>), since a background daemon receives them as a structured-clone copy. A function in options makes <code>braid start</code> fail with a clear error:</p>
-					<pre><code class="language-typescript">export default defineConfig({
-	processes: [ /* ... */ ],
+					<h2 id="using-plugins">Using a plugin</h2>
+					<p>
+						List it in <code>plugins</code>, by package name or path, optionally
+						with options:
+					</p>
+					<div class="code-block">
+						<div class="code-title">braid.config.ts</div>
+						<pre><code class="language-typescript">export default defineConfig({
+	processes: [/* ... */],
 	plugins: [
-		"@your-scope/braid-plugin-something",
-		["./plugins/local-plugin.js", { port: 4100 }],
+		"@aip-tech/braid-plugin-ui",
+		["./plugins/notify.js", { channel: "#dev" }],
 	],
 });</code></pre>
+					</div>
 					<p>
-						No dynamic discovery &mdash; if it's not listed, it doesn't run. A plugin is
-						resolved from the <em>config file's own location</em>, so it's found in
-						your project's <code>node_modules</code>, not braid's. braid's own internal
-						core plugins (<code>/api/status</code>; per-process log persistence behind
-						<code>braid logs</code>; the <code>/api/processes/stop</code>,
-						<code>/api/processes/restart</code> and <code>/api/processes/start</code>
-						routes behind <code>braid stop/restart/start &lt;name&gt;</code>; and
-						<code>/api/shutdown</code> behind a bare <code>braid stop</code>) aren't
-						configurable and aren't listed in <code>plugins</code>.
-						<a href="/braid/docs/ui-plugin.html"><code>@aip-tech/braid-plugin-ui</code></a>
-						is the first real external plugin built against this API &mdash; a web
-						dashboard with live status and stop/restart buttons.
+						Plugins resolve from the config file's directory, so they come from your
+						project's <code>node_modules</code>. Only listed plugins run.
 					</p>
-				</section>
+					<div class="callout callout-warning">
+						<p>
+							Plugins run inside braid with full access to Node and to every process
+							in the stack. Use ones you trust, as with any dependency.
+						</p>
+					</div>
 
-				<section id="building-a-plugin">
-					<h2>Building a plugin</h2>
-					<p>A plugin is an object matching <code>BraidPlugin</code>:</p>
-					<pre><code class="language-typescript">import type { BraidPlugin } from "@aip-tech/braid";
+					<h2 id="writing-a-plugin">Writing a plugin</h2>
+					<p>A plugin is an object with a <code>name</code> and a <code>register</code> function:</p>
+					<div class="code-block">
+						<div class="code-title">plugins/notify.ts</div>
+						<pre><code class="language-typescript">import type { BraidPlugin } from "@aip-tech/braid";
 
-export const helloPlugin: BraidPlugin = {
-	name: "hello",
+const notify: BraidPlugin = {
+	name: "notify",
 	register(ctx, options) {
-		ctx.registerRoute("GET", "/hello", (req, res) => {
-			res.writeHead(200, { "content-type": "text/plain" });
-			res.end("hello from a braid plugin");
+		ctx.on("processCrash", (event) => {
+			ctx.log(`${event.name} crashed (exit code ${event.code})`);
 		});
 
-		ctx.on("processCrash", (event) => {
-			ctx.log(`"${event.name}" crashed (code ${event.code})`);
+		ctx.registerRoute("GET", "/api/notify/ping", (_req, res) => {
+			res.writeHead(200, { "content-type": "text/plain" }).end("pong");
 		});
 	},
 };
 
-export default helloPlugin;</code></pre>
+export default notify;</code></pre>
+					</div>
 					<p>
-						<code>register()</code> can be async. A plugin that throws or rejects during
-						<code>register()</code> is logged and isolated &mdash; it doesn't take down
-						the manager or any other plugin. Runs in-process with full Node access, the
-						same trust level as any other dependency in your <code>node_modules</code>
-						&mdash; there's no sandboxing beyond that.
+						<code>register</code> can be async. If it, or any route or event handler,
+						throws, braid logs the error and keeps running. Every route is behind the
+						stack's access token automatically. The full API is in the
+						<a href="./plugin-api.html">Plugin API reference</a>.
 					</p>
-				</section>
+					<div class="callout callout-note">
+						<p>
+							Options cross to a background daemon as a structured-clone copy, so they
+							must be plain data. A function in plugin options makes
+							<code>braid start</code> fail with a clear error.
+						</p>
+					</div>
 
-				<section id="plugin-context">
-					<h2>The PluginContext API</h2>
-					<p>Passed to <code>register(ctx, options)</code>, one instance per plugin:</p>
-					<ul>
-						<li><code>registerRoute(method, path, handler)</code> &mdash; a plain <code>node:http</code> handler on the shared control server. Throws if that method+path is already taken by another plugin.</li>
-						<li><code>registerStatic(prefix, dir)</code> &mdash; serves files under <code>dir</code> for any request path starting with <code>prefix</code>. Throws if the prefix is already taken.</li>
-						<li><code>registerUpgrade(path, handler)</code> &mdash; raw HTTP Upgrade dispatch (e.g. for a WebSocket) on an exact path match. A handler that throws or rejects is logged and its socket destroyed; it never takes the daemon down.</li>
-						<li><code>on(type, handler)</code> &mdash; subscribes to a process lifecycle event, see below.</li>
-						<li><code>getProcesses()</code> &mdash; the current <code>{ name, pid, alive, startedAt?, cpu?, memory? }[]</code> for every <em>configured</em> process, the same data <code>status</code> renders &mdash; including one with <code>autoStart: false</code> that's never been started (<code>pid</code>/<code>startedAt</code> absent, <code>alive: false</code>). <code>cpu</code>/<code>memory</code> are likewise absent until the daemon's first sample, or while a process is stopped.</li>
-						<li><code>stopProcess(name)</code> &mdash; stops one named process. Resolves <code>"ok"</code>, <code>"unknown"</code> (not configured, or not currently running), or <code>"busy"</code> (a restart is already in progress for it).</li>
-						<li><code>shutdown()</code> &mdash; stops every process and shuts the daemon down, the same orderly way <code>braid stop</code> does. Returns immediately. Ignored (and logged) if called during <code>register()</code>, before the daemon is up.</li>
-						<li><code>restartProcess(name)</code> &mdash; stops and respawns one named process, then runs its own <code>onRestart</code> hook (if any) and cascades to <code>dependsOn</code> dependents exactly as a watch-triggered restart would. Can take a while to resolve if <code>onRestart</code> keeps retrying. For a process that hasn't been started yet (still waiting on its own <code>startAfter</code>, or <code>autoStart: false</code>), it starts it exactly as <code>startProcess</code> would, with no cascade. Resolves <code>"ok"</code>, <code>"unknown"</code>, or <code>"busy"</code>.</li>
-						<li><code>startProcess(name)</code> &mdash; starts a configured process that isn't currently running; the counterpart to <code>restartProcess</code> for one that's stopped or has <code>autoStart: false</code> and has never run. Idempotent: resolves <code>"ok"</code> as a no-op if it's already alive, rather than killing and respawning it the way <code>restartProcess</code> would. A genuine first start doesn't cascade to <code>dependsOn</code> dependents the way a restart does, but does honor the process's own <code>startAfter</code> if it sets one.</li>
-						<li><code>log(message)</code> &mdash; writes a line to stderr, prefixed with this plugin's own name. If sent before the daemon's ready handshake (e.g. from a <code>controlServerReady</code> handler), also relayed straight to the terminal that ran <code>braid start</code>, not just <code>daemon.log</code>.</li>
-					</ul>
+					<h2 id="browser-pages">Serving a page to the browser</h2>
 					<p>
-						<code>stopProcess</code>/<code>restartProcess</code>/<code>startProcess</code>/<code>shutdown</code>
-						are available to <em>every</em> plugin, not only ones that registered the
-						affected process themselves &mdash; a plugin can stop, restart, or start any
-						configured process. Same trust level as any other capability in your
-						<code>node_modules</code>, worth knowing before wiring one up to something you
-						didn't write yourself.
+						<code>ctx.registerStatic(prefix, dir)</code> serves a directory. Static
+						files are public, since a page can't attach a token to its own script
+						loads, so keep secrets out of them. API routes stay protected.
 					</p>
-					<p>
-						The control server itself is loopback-only (<code>127.0.0.1</code>). It
-						rejects a request whose <code>Host</code> isn't a loopback name (421), which
-						defeats DNS rebinding, and a non-GET request or upgrade whose
-						<code>Origin</code> doesn't match the page it was served from (403), which
-						stops another site, or another local port, from driving it. Only the
-						hostname is checked, so it still works through an SSH tunnel or a
-						devcontainer port forward. It also
-						requires a bearer token on every request (a per-run secret written to the
-						pidfile) &mdash; enforced automatically for every route, a plugin's own
-						handler doesn't need to check it. The token is accepted only as an
-						<code>Authorization: Bearer</code> header: never as a cookie or a query
-						parameter. Static files are the exception, served without it; see
-						<a href="#browser-content">Serving browser content</a> if you're building
-						something a browser loads directly.
-					</p>
-				</section>
+					<ol class="steps">
+						<li>
+							<h3>Print the page's link with the token in the fragment</h3>
+							<pre><code class="language-typescript">ctx.on("controlServerReady", ({ port, token }) => {
+	ctx.log(`open http://127.0.0.1:${port}/#token=${token}`);
+});</code></pre>
+							<p>Browsers never send the part after <code>#</code> to a server, so the token stays out of logs.</p>
+						</li>
+						<li>
+							<h3>Read it once, then send it as a header</h3>
+							<pre><code class="language-typescript">const token = new URLSearchParams(location.hash.slice(1)).get("token");
+history.replaceState(null, "", location.pathname);
 
-				<section id="lifecycle-events">
-					<h2>Lifecycle events</h2>
-					<table class="event-table">
-						<thead>
-							<tr><th>Event</th><th>Payload</th><th>Fires when</th></tr>
-						</thead>
-						<tbody>
-							<tr><td><code>processStart</code></td><td><code>{ name, pid }</code></td><td>A process is first forked.</td></tr>
-							<tr><td><code>processExit</code></td><td><code>{ name, code, signal }</code></td><td>A process's underlying child exits.</td></tr>
-							<tr><td><code>processCrash</code></td><td><code>{ name, code }</code></td><td>A process crashes (or fails to start) &mdash; the whole stack is about to shut down.</td></tr>
-							<tr><td><code>processRestart</code></td><td><code>{ name }</code></td><td>A <em>watch-triggered</em> restart happened internally, not exited. A manual (<code>restartProcess</code>/<code>braid restart &lt;name&gt;</code>) or <code>dependsOn</code>-cascade restart shows up as a plain <code>processExit</code>+<code>processStart</code> pair instead, not this event.</td></tr>
-							<tr><td><code>processOutput</code></td><td><code>{ name, stream, chunk }</code></td><td>Raw stdout/stderr bytes from a process, already line-prefixed.</td></tr>
-							<tr><td><code>daemonShutdown</code></td><td>&mdash;</td><td>The daemon has started shutting down; its processes are about to be stopped.</td></tr>
-							<tr><td><code>daemonStopped</code></td><td>&mdash;</td><td>Every process has stopped and its last output has been delivered &mdash; the last chance to clean up (e.g. end open connections) before the control server closes.</td></tr>
-							<tr><td><code>controlServerReady</code></td><td><code>{ port, token }</code></td><td>Fires once, after the control server is listening and every plugin has finished <code>register()</code>'ing &mdash; the earliest point a plugin can know its own reachable port/token (<code>register()</code> itself runs before the port is known). Useful for logging a browser-openable URL for content served via <code>registerStatic</code>.</td></tr>
-						</tbody>
-					</table>
+await fetch("/api/status", {
+	headers: { Authorization: `Bearer ${token}` },
+});</code></pre>
+						</li>
+						<li>
+							<h3>For a WebSocket, use a ticket</h3>
+							<p>
+								A browser can't put headers on a WebSocket. <code>POST /api/ws-ticket</code>
+								returns a single-use ticket, valid for 30 seconds, to connect with
+								<code>?ticket=&lt;ticket&gt;</code>.
+							</p>
+						</li>
+					</ol>
 					<p>
-						Every listener is isolated: a synchronous throw or a rejected promise from
-						one plugin's handler is logged, not left to crash the manager or block
-						other plugins' listeners for the same event. Route and upgrade handlers are
-						isolated the same way. As a last resort, any error nothing catches stops
-						every process cleanly and is logged to <code>.braid/daemon.log</code>,
-						instead of killing the daemon and leaving its processes orphaned.
+						The <a href="https://github.com/aip-tech/braid/tree/main/packages/ui-plugin">web dashboard's source</a>
+						is a complete working example.
 					</p>
-				</section>
-
-				<section id="browser-content">
-					<h2>Serving browser content</h2>
-					<p>
-						Files registered with <code>registerStatic</code> are served
-						<em>without</em> the token, since a page can't put a header on its own
-						<code>&lt;script&gt;</code> and <code>&lt;link&gt;</code> loads. Treat a static
-						directory as public: put nothing secret in it. Routes and upgrades still
-						need the token.
-					</p>
-					<p>
-						To give a page the token, log its URL with the token in the fragment,
-						<code>http://127.0.0.1:&lt;port&gt;/#token=&lt;token&gt;</code>, from a
-						<code>controlServerReady</code> listener. Browsers never send a fragment to
-						any server. The page reads it from <code>location.hash</code>, keeps it in
-						<code>sessionStorage</code>, strips it from the address bar with
-						<code>history.replaceState</code>, and sends
-						<code>Authorization: Bearer &lt;token&gt;</code> on its own
-						<code>fetch()</code> calls.
-					</p>
-					<p>
-						A browser can't set headers on a WebSocket, so for an upgrade the page
-						first calls <code>POST /api/ws-ticket</code> (with the header) to get a
-						single-use ticket, valid for 30 seconds, and connects with
-						<code>?ticket=&lt;ticket&gt;</code>.
-					</p>
-					<p>
-						See the
-						<a href="https://github.com/aip-tech/braid/blob/main/packages/ui-plugin/frontend/src/auth.ts"><code>@aip-tech/braid-plugin-ui</code></a>
-						source for a working example.
-					</p>
-				</section>
+				</article>
+				<nav id="pager"></nav>
 			</main>
+			<aside id="toc"></aside>
 		</div>
-
 		<script type="module" src="/src/main.ts"></script>
 	</body>
 </html>

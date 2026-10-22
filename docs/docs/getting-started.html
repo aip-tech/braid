@@ -3,81 +3,111 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Getting Started &middot; braid</title>
+		<title>Getting started · braid</title>
+		<meta name="description" content="Install braid, describe your processes in one config file, and run them all as one stack." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
 	<body data-page="getting-started">
-		<div id="topnav"></div>
-
+		<header id="topnav"></header>
 		<div class="docs-shell">
-			<aside id="sidebar"></aside>
-
+			<nav id="sidebar"></nav>
 			<main class="docs-main">
-				<h1>Getting Started</h1>
-				<p class="lede">
-					Install braid, write a config listing the processes your project runs
-					side by side, and start them all as one background daemon.
-				</p>
-
-				<section id="install">
-					<h2>Install</h2>
-					<pre><code class="language-bash">npm install @aip-tech/braid</code></pre>
-					<p>
-						braid needs Node 22.18 or later, the first release that runs a
-						<code>braid.config.ts</code> natively.
+				<article class="content">
+					<p class="eyebrow">Start here</p>
+					<h1>Getting started</h1>
+					<p class="lede">
+						Describe the processes your project runs side by side in one config file,
+						then start, watch and stop them as a single stack.
 					</p>
-				</section>
 
-				<section id="first-config">
-					<h2>Write a config</h2>
-					<p><code>braid.config.ts</code>, next to your <code>package.json</code>:</p>
-					<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
+					<div class="callout callout-note" data-title="Requirements">
+						<p>Node 22.18 or later, on macOS or Linux.</p>
+					</div>
+
+					<ol class="steps">
+						<li>
+							<h3>Install</h3>
+							<div class="tabs" data-group="pm">
+								<div class="tab-panel" data-label="npm"><pre><code class="language-bash">npm install --save-dev @aip-tech/braid</code></pre></div>
+								<div class="tab-panel" data-label="pnpm"><pre><code class="language-bash">pnpm add --save-dev @aip-tech/braid</code></pre></div>
+								<div class="tab-panel" data-label="yarn"><pre><code class="language-bash">yarn add --dev @aip-tech/braid</code></pre></div>
+							</div>
+						</li>
+						<li>
+							<h3>Describe your processes</h3>
+							<p>Create <code>braid.config.ts</code> next to your <code>package.json</code>:</p>
+							<div class="code-block">
+								<div class="code-title">braid.config.ts</div>
+								<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
 
 export default defineConfig({
 	processes: [
-		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-		{ name: "client", command: "pnpm", args: ["--filter", "./client", "run", "dev"] },
+		{
+			name: "api",
+			command: "pnpm",
+			args: ["--filter", "./api", "dev"],
+			watch: ["api/src"],
+		},
+		{ name: "web", command: "pnpm", args: ["--filter", "./web", "dev"] },
 	],
 });</code></pre>
-					<p>
-						<code>defineConfig</code> gives you full editor autocomplete and fills in a
-						couple of defaults (like <code>logs.maxSizeBytes</code>) that don't depend
-						on where the CLI is invoked from. A bare array export also works, treated
-						as <code>{ processes: [...] }</code>.
-					</p>
-					<p>
-						See <a href="./config.html">Config</a> for the full field list &mdash;
-						<code>watch</code>, <code>dependsOn</code>, <code>onRestart</code>,
-						<code>beforeRestart</code>, <code>readyPattern</code>,
-						<code>startAfter</code>, <code>autoStart</code>, <code>logs</code>, and
-						more.
-					</p>
-				</section>
+							</div>
+							<p>
+								<code>defineConfig</code> gives you autocomplete and type checking. Here
+								<code>api</code> restarts whenever a file under <code>api/src</code>
+								changes; <code>web</code> runs a dev server with its own reload.
+							</p>
+						</li>
+						<li>
+							<h3>Start the stack</h3>
+							<pre><code class="language-bash">npx braid start</code></pre>
+							<p>braid starts every process in a background daemon and prints a summary:</p>
+							<pre><code class="nohighlight">[braid] 2 processes running (pid 40213)
+  ● api  pid 40214
+  ● web  pid 40215</code></pre>
+							<p>Closing the terminal doesn't stop it.</p>
+						</li>
+						<li>
+							<h3>Check on it, then stop it</h3>
+							<pre><code class="language-bash">npx braid status          # what's running, with CPU and memory
+npx braid logs --follow   # every process's output, live
+npx braid stop            # stop everything</code></pre>
+						</li>
+					</ol>
 
-				<section id="run-it">
-					<h2>Run it</h2>
-					<pre><code class="language-bash">npx braid start     # starts every configured process as a background daemon
-npx braid status    # list each process's name/pid/alive state
-npx braid logs --follow
-npx braid stop       # kill everything</code></pre>
-					<p>
-						Or add a <code>package.json</code> script (<code>"dev": "braid start"</code>)
-						once <code>@aip-tech/braid</code> is an installed dependency, and just run
-						<code>pnpm dev</code>. See <a href="./cli.html">CLI</a> for every command
-						and flag.
-					</p>
-				</section>
+					<div class="callout callout-tip">
+						<p>
+							Add <code>"dev": "braid start --foreground"</code> to your
+							<code>package.json</code> scripts to run the stack attached to your
+							terminal instead, with every process's output streamed there until
+							<kbd>Ctrl</kbd>+<kbd>C</kbd>.
+						</p>
+					</div>
 
-				<section id="next">
-					<h2>Next</h2>
-					<ul class="next-links">
-						<li><a href="./config.html">Config reference</a> &mdash; every <code>ProcessConfig</code> field, dependent restarts, readiness, and logs.</li>
-						<li><a href="./plugins.html">Plugins</a> &mdash; using plugins, and building your own.</li>
-					</ul>
-				</section>
+					<h2 id="next-steps">Next steps</h2>
+					<div class="card-grid">
+						<a class="card" href="./config.html">
+							<span class="card-icon" data-icon="layers"></span>
+							<h3>Configuration</h3>
+							<p>Restarts, dependencies between processes, crashes and logs.</p>
+						</a>
+						<a class="card" href="./cli.html">
+							<span class="card-icon" data-icon="terminal"></span>
+							<h3>CLI</h3>
+							<p>Every command and flag.</p>
+						</a>
+						<a class="card" href="./ui-plugin.html">
+							<span class="card-icon" data-icon="monitor"></span>
+							<h3>Web dashboard</h3>
+							<p>Status, controls and live logs in the browser.</p>
+						</a>
+					</div>
+				</article>
+				<nav id="pager"></nav>
 			</main>
+			<aside id="toc"></aside>
 		</div>
-
 		<script type="module" src="/src/main.ts"></script>
 	</body>
 </html>

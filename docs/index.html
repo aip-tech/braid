@@ -3,71 +3,109 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>braid</title>
+		<title>braid · Run your dev stack as one</title>
 		<meta
 			name="description"
-			content="Runs multiple long-lived processes as one unit, as a background daemon: PID tracking, dependent-process restarts, and persistent per-process logs."
+			content="braid runs every process your project needs as one stack: restarts on file changes, ordered startup, crash handling and persistent logs, from one config file."
 		/>
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
 	<body data-page="home">
-		<div id="topnav"></div>
+		<header id="topnav"></header>
 
-		<main>
+		<main class="home content-home">
 			<section class="hero">
-				<p class="eyebrow">@aip-tech/braid</p>
-				<h1>Run your whole dev stack as one daemon</h1>
-				<p class="hero-tagline">
-					PID tracking, watch-triggered restarts, dependent-process restarts, and
-					persistent per-process logs &mdash; one CLI, one config file.
-				</p>
-				<div class="hero-actions">
-					<a class="btn btn-primary" href="/braid/docs/getting-started.html">Get started</a>
-					<a class="btn btn-secondary" href="https://github.com/aip-tech/braid">View on GitHub</a>
+				<div>
+					<p class="eyebrow">@aip-tech/braid</p>
+					<h1>Run your whole dev stack <em>as one</em></h1>
+					<p class="hero-tagline">
+						Describe your API, web app and workers in one config file. braid starts
+						them in the right order, restarts them when files change, and keeps their
+						logs.
+					</p>
+					<div class="hero-actions">
+						<a class="btn btn-primary" href="/braid/docs/getting-started.html">Get started <span data-icon="arrowRight"></span></a>
+						<a class="btn btn-secondary" href="https://github.com/aip-tech/braid"><span data-icon="github"></span>GitHub</a>
+					</div>
+					<div class="hero-install tabs" data-group="pm">
+						<div class="tab-panel" data-label="npm"><pre><code class="language-bash">npm install --save-dev @aip-tech/braid</code></pre></div>
+						<div class="tab-panel" data-label="pnpm"><pre><code class="language-bash">pnpm add --save-dev @aip-tech/braid</code></pre></div>
+						<div class="tab-panel" data-label="yarn"><pre><code class="language-bash">yarn add --dev @aip-tech/braid</code></pre></div>
+					</div>
 				</div>
-				<pre class="hero-install"><code class="language-bash">npm install @aip-tech/braid</code></pre>
+				<div class="hero-code">
+					<div class="code-block">
+						<div class="code-title">braid.config.ts</div>
+						<pre><code class="language-typescript">export default defineConfig({
+	processes: [
+		{
+			name: "api",
+			command: "pnpm",
+			args: ["--filter", "./api", "dev"],
+			watch: ["api/src"],
+			readyPattern: "^Server listening",
+		},
+		{
+			name: "web",
+			command: "pnpm",
+			args: ["--filter", "./web", "dev"],
+			startAfter: { processes: ["api"] },
+		},
+		{
+			name: "worker",
+			command: "node",
+			args: ["worker.js"],
+			autoRestart: true,
+		},
+	],
+});</code></pre>
+					</div>
+				</div>
 			</section>
 
-			<section class="cards">
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></div>
-					<h3>One daemon, every process</h3>
-					<p>Forks one child per configured process, tracks PIDs in a pidfile, and runs detached in the background &mdash; closing the terminal doesn't stop your stack.</p>
-				</div>
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16"/><path d="M3 12a9 9 0 0 1 15.3-6.4L21 8"/><path d="M3 21v-5h5"/><path d="M21 3v5h-5"/></svg></div>
-					<h3>Dependent restarts</h3>
-					<p>A process can restart, run a hook, and wait for readiness whenever another one it depends on restarts &mdash; e.g. regenerating a GraphQL SDK once the API is back up.</p>
-				</div>
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/></svg></div>
-					<h3>Persistent logs</h3>
-					<p>Rotated per-process log files survive restarts and the terminal that started them. Tail one process, or every process interleaved, with <code>braid logs --follow</code>.</p>
-				</div>
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v3a6 6 0 0 1-12 0V8Z"/></svg></div>
-					<h3>Plugin architecture</h3>
-					<p>A loopback-only control server that plugins register routes, static files, and lifecycle listeners on &mdash; the same mechanism braid's own core features are built with.</p>
-				</div>
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg></div>
-					<h3>Kill-everything-on-crash</h3>
-					<p>Mirrors <code>concurrently --kill-others-on-fail</code> by default &mdash; one process crashing tears down the rest, so you never debug a half-alive stack.</p>
-				</div>
-				<div class="card">
-					<div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg></div>
-					<h3>One small CLI</h3>
-					<p><code>start</code>, <code>status</code>, <code>logs</code>, <code>stop</code>, <code>restart</code> &mdash; a predictable command set with no dashboard required. Want one anyway? <a href="/braid/docs/ui-plugin.html"><code>@aip-tech/braid-plugin-ui</code></a> adds a web UI as an opt-in plugin.</p>
+			<section class="home-section">
+				<h2 class="section-title">Everything a multi-process project needs</h2>
+				<p class="section-lede">One small CLI and one config file, with no services to install.</p>
+				<div class="feature-grid">
+					<div class="card">
+						<span class="card-icon" data-icon="layers"></span>
+						<h3>One stack, one command</h3>
+						<p>Start everything in the background with <code>braid start</code>. Closing the terminal doesn't stop it.</p>
+					</div>
+					<div class="card">
+						<span class="card-icon" data-icon="refresh"></span>
+						<h3>Restarts that respect dependencies</h3>
+						<p>Restart on file changes, wait for a process to be ready, and restart what depends on it.</p>
+					</div>
+					<div class="card">
+						<span class="card-icon" data-icon="shield"></span>
+						<h3>Crashes handled</h3>
+						<p>A crash stops the whole stack by default, or restarts just that process with backoff.</p>
+					</div>
+					<div class="card">
+						<span class="card-icon" data-icon="fileText"></span>
+						<h3>Logs that persist</h3>
+						<p>Per-process, rotated log files. Tail one process or all of them with <code>braid logs</code>.</p>
+					</div>
+					<div class="card">
+						<span class="card-icon" data-icon="activity"></span>
+						<h3>Real resource usage</h3>
+						<p>CPU and memory for each app and everything it starts, in <code>braid status</code>.</p>
+					</div>
+					<div class="card">
+						<span class="card-icon" data-icon="monitor"></span>
+						<h3>Optional dashboard</h3>
+						<p>Add the <a href="/braid/docs/ui-plugin.html">web dashboard</a> plugin for status, controls and live logs in the browser.</p>
+					</div>
 				</div>
 			</section>
 		</main>
 
-		<footer>
-			<p>
-				MIT licensed. See
-				<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/CHANGELOG.md">CHANGELOG.md</a>
-				for release notes.
-			</p>
+		<footer class="site-footer">
+			MIT licensed ·
+			<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/CHANGELOG.md">Changelog</a> ·
+			<a href="https://www.npmjs.com/package/@aip-tech/braid">npm</a>
 		</footer>
 
 		<script type="module" src="/src/main.ts"></script>

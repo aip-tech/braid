@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Plugin API · braid</title>
+		<meta name="description" content="The braid plugin API: PluginContext, lifecycle events and the control server's built-in routes." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body data-page="plugin-api">
+		<header id="topnav"></header>
+		<div class="docs-shell">
+			<nav id="sidebar"></nav>
+			<main class="docs-main">
+				<article class="content">
+					<p class="eyebrow">Reference</p>
+					<h1>Plugin API</h1>
+					<p class="lede">
+						What <code>register(ctx, options)</code> gets, the events it can listen
+						to, and the routes every stack serves. For a walkthrough, see the
+						<a href="./plugins.html">plugins guide</a>.
+					</p>
+
+					<h2 id="braid-plugin">BraidPlugin</h2>
+					<pre><code class="language-typescript">type BraidPlugin = {
+	name: string;
+	register(ctx: PluginContext, options?: Record&lt;string, unknown&gt;): void | Promise&lt;void&gt;;
+};</code></pre>
+
+					<h2 id="plugin-context">PluginContext</h2>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Method</th><th>Description</th></tr></thead>
+							<tbody>
+								<tr><td><code>registerRoute(method, path, handler)</code></td><td>Add a <code>node:http</code> handler. Token-protected. Throws if the method and path are taken.</td></tr>
+								<tr><td><code>registerStatic(prefix, dir)</code></td><td>Serve files from <code>dir</code> under <code>prefix</code>, without a token.</td></tr>
+								<tr><td><code>registerUpgrade(path, handler)</code></td><td>Handle an HTTP upgrade, such as a WebSocket, on an exact path. Token or ticket protected.</td></tr>
+								<tr><td><code>on(event, listener)</code></td><td>Listen to a <a href="#events">lifecycle event</a>.</td></tr>
+								<tr><td><code>getProcesses()</code></td><td>A <a href="#process-status">status entry</a> for every configured process.</td></tr>
+								<tr><td><code>startProcess(name)</code></td><td>Start a process that isn't running. Does nothing if it is.</td></tr>
+								<tr><td><code>stopProcess(name)</code></td><td>Stop one process.</td></tr>
+								<tr><td><code>restartProcess(name)</code></td><td>Restart one process, running its hooks and dependents as a file change would.</td></tr>
+								<tr><td><code>shutdown()</code></td><td>Stop the whole stack, as <code>braid stop</code> does. Ignored during <code>register</code>.</td></tr>
+								<tr><td><code>log(message)</code></td><td>Write a line to the daemon log, tagged with the plugin's name.</td></tr>
+							</tbody>
+						</table>
+					</div>
+					<p>
+						The three process methods resolve to <code>"ok"</code>,
+						<code>"unknown"</code> (no such process, or for <code>stopProcess</code>, not
+						running) or <code>"busy"</code> (a restart is already in progress).
+					</p>
+
+					<h3 id="process-status">Process status</h3>
+					<p>Each entry from <code>getProcesses()</code>, and from <code>GET /api/status</code>:</p>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+							<tbody>
+								<tr><td><code>name</code></td><td><code>string</code></td><td>The process's name.</td></tr>
+								<tr><td><code>alive</code></td><td><code>boolean</code></td><td>Whether it's running.</td></tr>
+								<tr><td><code>pid</code></td><td><code>number?</code></td><td>braid's wrapper process for it. Absent before its first start.</td></tr>
+								<tr><td><code>appPid</code></td><td><code>number?</code></td><td>The app itself, while it's running.</td></tr>
+								<tr><td><code>startedAt</code></td><td><code>string?</code></td><td>ISO time it was started.</td></tr>
+								<tr><td><code>cpu</code></td><td><code>number?</code></td><td>Percent of one core, across the app's process tree.</td></tr>
+								<tr><td><code>memory</code></td><td><code>number?</code></td><td>Bytes, across the app's process tree.</td></tr>
+								<tr><td><code>restartCount</code></td><td><code>number</code></td><td>Restarts since the stack started.</td></tr>
+								<tr><td><code>url</code></td><td><code>string?</code></td><td>The process's configured <code>url</code>.</td></tr>
+							</tbody>
+						</table>
+					</div>
+
+					<h2 id="events">Lifecycle events</h2>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Event</th><th>Payload</th><th>Fires when</th></tr></thead>
+							<tbody>
+								<tr><td><code>controlServerReady</code></td><td><code>{ port, token }</code></td><td>Once, when the server is listening and every plugin has registered. The first point the port and token are known.</td></tr>
+								<tr><td><code>processStart</code></td><td><code>{ name, pid }</code></td><td>A process's wrapper starts: at startup, and on a manual or <code>dependsOn</code> restart.</td></tr>
+								<tr><td><code>processRestart</code></td><td><code>{ name }</code></td><td>A watch-triggered or <code>autoRestart</code> restart begins.</td></tr>
+								<tr><td><code>processOutput</code></td><td><code>{ name, stream, chunk }</code></td><td>Output bytes, with braid's <code>[name]</code> prefix. Chunks aren't split on line boundaries.</td></tr>
+								<tr><td><code>processExit</code></td><td><code>{ name, code, signal }</code></td><td>A process's wrapper exits.</td></tr>
+								<tr><td><code>processCrash</code></td><td><code>{ name, code }</code></td><td>A process crashed; the stack is about to stop.</td></tr>
+								<tr><td><code>daemonShutdown</code></td><td>none</td><td>Shutdown has begun; processes are about to stop.</td></tr>
+								<tr><td><code>daemonStopped</code></td><td>none</td><td>Every process has stopped and its output is delivered. The last event before the server closes.</td></tr>
+							</tbody>
+						</table>
+					</div>
+
+					<h2 id="routes">Built-in routes</h2>
+					<p>Every route needs <code>Authorization: Bearer &lt;token&gt;</code>. The token and port are in <code>.braid/run.json</code>.</p>
+					<div class="table-wrap">
+						<table>
+							<thead><tr><th>Route</th><th>Description</th></tr></thead>
+							<tbody>
+								<tr><td><code>GET /api/status</code></td><td>The <a href="#process-status">status entries</a>, as JSON.</td></tr>
+								<tr><td><code>GET /api/logs</code></td><td>Output. Query: <code>name</code>, <code>lines</code>, <code>follow=true</code>, <code>json=true</code>.</td></tr>
+								<tr><td><code>GET /api/logs/history</code></td><td>Older output, a page at a time. Query: <code>name</code>, <code>lines</code>, <code>before</code> (a cursor from the previous page), <code>json=true</code>.</td></tr>
+								<tr><td><code>POST /api/processes/start</code></td><td>Start a process. Query: <code>name</code>.</td></tr>
+								<tr><td><code>POST /api/processes/stop</code></td><td>Stop a process. Query: <code>name</code>.</td></tr>
+								<tr><td><code>POST /api/processes/restart</code></td><td>Restart a process. Query: <code>name</code>.</td></tr>
+								<tr><td><code>POST /api/shutdown</code></td><td>Stop the stack.</td></tr>
+								<tr><td><code>POST /api/ws-ticket</code></td><td>A single-use WebSocket ticket, valid for 30 seconds.</td></tr>
+							</tbody>
+						</table>
+					</div>
+
+					<h2 id="security">Security</h2>
+					<p>The control server only listens on <code>127.0.0.1</code>, and rejects:</p>
+					<ul>
+						<li>requests without the token (static files excepted);</li>
+						<li>a <code>Host</code> that isn't a loopback name, which blocks DNS rebinding (port forwards still work);</li>
+						<li>a <code>POST</code> or upgrade whose <code>Origin</code> isn't the page that made it, which blocks other sites and other local ports.</li>
+					</ul>
+					<p>The token is never accepted in a cookie or query string.</p>
+				</article>
+				<nav id="pager"></nav>
+			</main>
+			<aside id="toc"></aside>
+		</div>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

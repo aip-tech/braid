@@ -3,496 +3,222 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Config &middot; braid</title>
+		<title>Configuration · braid</title>
+		<meta name="description" content="How to configure braid: restarts on file changes, processes that depend on each other, crashes, logs and foreground mode." />
+		<script>try{const t=localStorage.getItem("braid-theme");if(t)document.documentElement.dataset.theme=t}catch{}</script>
 		<link rel="stylesheet" href="/src/style.css" />
 	</head>
 	<body data-page="config">
-		<div id="topnav"></div>
-
+		<header id="topnav"></header>
 		<div class="docs-shell">
-			<aside id="sidebar"></aside>
-
+			<nav id="sidebar"></nav>
 			<main class="docs-main">
-				<h1>Config</h1>
-				<p class="lede">
-					<code>braid.config.ts</code> default-exports a <code>{ processes, plugins?,
-					logs?, foreground?, statsPollIntervalMs?, startupTimeoutMs? }</code> object (or a bare
-					<code>ProcessConfig[]</code>, treated the
-					same way). Full field list and defaults live in
-					<a href="https://github.com/aip-tech/braid/blob/main/packages/braid/src/types.ts"><code>src/types.ts</code></a>.
-				</p>
+				<article class="content">
+					<p class="eyebrow">Guides</p>
+					<h1>Configuration</h1>
+					<p class="lede">
+						The common things a stack needs, one at a time. Every option is listed,
+						with its type and default, in the <a href="./reference.html">config options reference</a>.
+					</p>
 
-				<ul class="jump-to">
-					<li><a href="#basics">Basics</a></li>
-					<li><a href="#watch">Watching and restarting</a></li>
-					<li><a href="#stopping-unresponsive-processes">Stopping unresponsive processes</a></li>
-					<li><a href="#dependent-restarts">Dependent restarts</a></li>
-					<li><a href="#post-restart-hooks">Post-restart hooks</a></li>
-					<li><a href="#pre-restart-hooks">Pre-restart hooks</a></li>
-					<li><a href="#waiting-for-readiness">Waiting for readiness</a></li>
-					<li><a href="#waiting-to-start">Waiting to start</a></li>
-					<li><a href="#starting-on-demand">Starting on demand</a></li>
-					<li><a href="#restarting-on-crash">Restarting on crash</a></li>
-					<li><a href="#logs">Logs</a></li>
-					<li><a href="#foreground">Foreground mode</a></li>
-					<li><a href="#startup-timeout">Startup timeout</a></li>
-					<li><a href="#stats">Process stats, restart count, and uptime</a></li>
-					<li><a href="#startup-summary">Startup summary and <code>url</code></a></li>
-					<li><a href="#json-output">Machine-readable output</a></li>
-				</ul>
-
-				<section id="basics">
-					<h2>Basics</h2>
-					<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
+					<h2 id="the-config-file">The config file</h2>
+					<p>
+						braid reads <code>braid.config.ts</code> from the directory you run it in
+						(or the file given to <code>--config</code>). It default-exports an object
+						whose <code>processes</code> lists everything to run:
+					</p>
+					<div class="code-block">
+						<div class="code-title">braid.config.ts</div>
+						<pre><code class="language-typescript">import { defineConfig } from "@aip-tech/braid";
 
 export default defineConfig({
 	processes: [
 		{
 			name: "api",
 			command: "pnpm",
-			args: ["--filter", "./api", "run", "dev"],
-			cwd: "api",
-			color: "blue",
+			args: ["--filter", "./api", "dev"],
+			cwd: ".",
 			env: { NODE_ENV: "development" },
+			color: "blue",
 		},
 	],
 });</code></pre>
-					<ul>
-						<li><code>name</code> &mdash; unique; used for log prefixes, the pidfile, status output and the process's log file name. It can't contain <code>/</code>, <code>\</code> or control characters, and can't be <code>.</code>, <code>..</code> or <code>*</code>.</li>
-						<li><code>command</code>/<code>args</code> &mdash; the process to run.</li>
-						<li><code>cwd</code> &mdash; resolved relative to wherever the CLI was invoked; defaults to that same directory.</li>
-						<li><code>env</code> &mdash; extra environment variables merged over <code>process.env</code>, for this process only. No other process can see them: braid passes its config to the daemon over IPC, never through an environment variable, and strips its own internal <code>BRAID_*</code> variables from everything it starts. (Your own <code>BRAID_*</code> variables pass through untouched.)</li>
-						<li><code>color</code> &mdash; ANSI color name used for this process's log prefix.</li>
-					</ul>
-				</section>
-
-				<section id="watch">
-					<h2>Watching and restarting</h2>
+					</div>
 					<p>
-						Set <code>watch</code> to restart a process whenever a matched path changes.
-						Omit it for a command that manages its own reload (a dev server with its own
-						HMR, for instance).
+						Each process needs a unique <code>name</code> and a <code>command</code>.
+						Its <code>env</code> is visible to that process only.
+					</p>
+
+					<h2 id="restarting-on-changes">Restarting on file changes</h2>
+					<p>
+						Give a process <code>watch</code> paths and braid restarts it when a
+						matching file changes. Leave it out for anything with its own hot reload.
 					</p>
 					<pre><code class="language-typescript">{
 	name: "api",
 	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
+	args: ["--filter", "./api", "dev"],
 	watch: ["api/src"],
-	ext: "ts,graphql,json", // @default "ts,js,json" - comma-separated, only used when watch is set
-	exclude: ["api/src/__generated__"], // leave generated files out of the watch
-},</code></pre>
+	ext: "ts,graphql,json",
+	exclude: ["api/src/__generated__"],
+}</code></pre>
 					<p>
-						<code>exclude</code> is resolved relative to <code>cwd</code> the same way
-						<code>watch</code> entries are, and only used when <code>watch</code> is
-						set. Each entry excludes itself and everything under it &mdash; a directory
-						excludes its whole subtree, so a generated-code folder living inside an
-						otherwise-watched directory doesn't trigger its own restart every time it's
-						regenerated. A glob is accepted too, passed straight through to the
-						underlying watcher.
+						<code>ext</code> filters by extension (default <code>ts,js,json</code>).
+						<code>exclude</code> leaves a path and everything under it out of the
+						watch, which stops generated files from triggering their own restart.
+						Run <code>braid start --no-watch</code> to switch watching off for one run.
 					</p>
-				</section>
 
-				<section id="stopping-unresponsive-processes">
-					<h2>Stopping unresponsive processes</h2>
+					<h2 id="dependencies">Processes that depend on each other</h2>
 					<p>
-						Every stop &mdash; a manual <code>stop</code>/<code>restart</code>, a
-						<code>dependsOn</code> cascade, a watch-triggered restart, or daemon
-						shutdown &mdash; sends SIGTERM to the process's whole tree first. Set
-						<code>stopTimeoutMs</code> to escalate to SIGKILL if it hasn't exited in
-						time &mdash; useful for a process that traps SIGTERM for its own cleanup but
-						occasionally hangs, or a wrapper script that doesn't forward the signal to
-						its own children.
+						Five options cover the ways one process can rely on another. Each is
+						independent, so combine only the ones you need:
+					</p>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr><th>Option</th><th>What it does</th></tr>
+							</thead>
+							<tbody>
+								<tr><td><a href="./reference.html#readypattern"><code>readyPattern</code></a></td><td>Defines when a process counts as ready: the first output line matching this regex.</td></tr>
+								<tr><td><a href="./reference.html#startafter"><code>startAfter</code></a></td><td>Holds a process's first start until the processes it names are ready.</td></tr>
+								<tr><td><a href="./reference.html#dependson"><code>dependsOn</code></a></td><td>Restarts a process whenever a process it depends on restarts, optionally running a command in between.</td></tr>
+								<tr><td><a href="./reference.html#onrestart"><code>onRestart</code></a></td><td>Runs a command after a process restarts itself.</td></tr>
+								<tr><td><a href="./reference.html#beforerestart"><code>beforeRestart</code></a></td><td>Runs a command after a watched process stops and before it starts again.</td></tr>
+							</tbody>
+						</table>
+					</div>
+					<p>
+						A typical pairing: a web app that waits for its API on first start, and
+						regenerates its API client whenever the API restarts.
 					</p>
 					<pre><code class="language-typescript">{
 	name: "api",
 	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	stopTimeoutMs: 10000, // @default 5000
-},</code></pre>
-				</section>
-
-				<section id="dependent-restarts">
-					<h2>Dependent restarts</h2>
-					<p>
-						A process can restart whenever another one does &mdash; e.g. a client that
-						needs to regenerate its GraphQL SDK once the API it talks to restarts:
-					</p>
-					<pre><code class="language-typescript">{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], watch: ["api/src"] },
-{
-	name: "client",
-	command: "pnpm",
-	args: ["--filter", "./client", "run", "dev"],
-	dependsOn: {
-		processes: ["api"],
-		run: { command: "pnpm", args: ["--filter", "./client", "run", "generate"] },
-	},
-},</code></pre>
-					<p>
-						When <code>api</code> restarts: <code>client</code> stops once
-						<code>api</code> has actually re-spawned (not the instant it decides
-						to restart), <code>run</code> executes (retried on failure &mdash;
-						<code>retries</code>/<code>retryDelayMs</code>, default 5&times; / 1s
-						apart, since <code>api</code> may still be starting back up), then
-						<code>client</code> restarts. Left stopped with a logged reason if
-						<code>run</code> never succeeds. A <code>dependsOn</code> chain that loops
-						back on its own trigger is rejected at startup. Multiple processes can
-						depend on the same trigger &mdash; each cascades independently, in
-						parallel.
-					</p>
-				</section>
-
-				<section id="post-restart-hooks">
-					<h2>Post-restart hooks</h2>
-					<p>
-						For a shared workspace package other processes just read from (no process
-						of its own to restart), run a command directly after the process that
-						changed it restarts:
-					</p>
-					<pre><code class="language-typescript">{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
+	args: ["--filter", "./api", "dev"],
 	watch: ["api/src"],
-	onRestart: { command: "pnpm", args: ["--filter", "./types", "run", "generate"] },
-},</code></pre>
-					<p>
-						Same shape and retry behavior as <code>dependsOn.run</code>, but scoped to
-						<code>api</code> restarting itself &mdash; no dependent process is stopped
-						or restarted. If <code>api</code> also has dependents (via
-						<code>dependsOn</code>), they're notified only once this hook succeeds, and
-						not at all if it never does.
-					</p>
-				</section>
-
-				<section id="pre-restart-hooks">
-					<h2>Pre-restart hooks</h2>
-					<p>
-						For a process that needs to regenerate its own on-disk dependencies (e.g. a
-						GraphQL SDK generated from a schema it also watches) before it restarts on
-						that same change, <code>beforeRestart</code> runs after the process is
-						stopped and before a fresh one starts:
-					</p>
-					<pre><code class="language-typescript">{
-	name: "client",
-	command: "pnpm",
-	args: ["vike", "dev"],
-	watch: ["server", "lib/sdk"],
-	beforeRestart: { command: "pnpm", args: ["--filter", "lib/sdk", "run", "generate"] },
-},</code></pre>
-					<p>
-						<code>client</code> is fully stopped, <code>generate</code> runs to
-						completion (retried like <code>onRestart</code>/<code>dependsOn.run</code>),
-						and only then does <code>client</code> restart &mdash; the fresh process
-						never boots against stale or half-regenerated code. Requires
-						<code>watch</code>; rejected at startup otherwise. If the hook keeps failing
-						past its retries, <code>client</code> is left stopped, but the watcher stays
-						active &mdash; the next matching file change retries the whole cycle, rather
-						than requiring a manual restart.
-					</p>
-				</section>
-
-				<section id="waiting-for-readiness">
-					<h2>Waiting for readiness</h2>
-					<p>
-						Re-spawning a process isn't the same as it being ready &mdash; an API might
-						take a moment after restarting before it's actually serving.
-						<code>readyPattern</code> holds off <code>onRestart</code> and any
-						<code>dependsOn</code> cascades until a regex matches a line of that
-						process's own stdout/stderr. It's tested against each whole line exactly as
-						the app printed it, so braid's own <code>[name]</code> prefix, timestamps and
-						colors aren't part of it, and an anchored pattern like
-						<code>^Server listening</code> works. braid's own <code>braid: ...</code>
-						notices are never matched:
-					</p>
-					<pre><code class="language-typescript">{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	watch: ["api/src"],
-	readyPattern: "Server listening",
-	readyTimeoutMs: 15000, // @default 10000
-},</code></pre>
-					<p>
-						Without <code>readyPattern</code>, dependents are held off only until
-						<code>api</code> has re-spawned (not exited/killed while restarting, but
-						not necessarily done starting up either) &mdash; a
-						<code>run</code>/<code>onRestart</code> hook's own retry is what bridges
-						the rest of that gap. If <code>readyPattern</code> never matches within
-						<code>readyTimeoutMs</code>, braid logs why (in <code>api</code>'s own log)
-						and proceeds anyway, rather than holding dependents off forever on a
-						misconfigured pattern.
-					</p>
-				</section>
-
-				<section id="waiting-to-start">
-					<h2>Waiting to start</h2>
-					<p>
-						<code>readyPattern</code>/<code>dependsOn</code> both govern
-						<em>restarts</em> &mdash; braid still forks every configured process at
-						once on <code>start</code>, regardless of what any of them need to talk
-						to. <code>startAfter</code> delays a process's very first fork until the
-						processes it names are ready:
-					</p>
-					<pre><code class="language-typescript">{
-	name: "api",
-	command: "pnpm",
-	args: ["--filter", "./api", "run", "dev"],
-	readyPattern: "Server listening",
+	readyPattern: "^Server listening",
 },
 {
-	name: "client",
+	name: "web",
 	command: "pnpm",
-	args: ["--filter", "./client", "run", "dev"],
+	args: ["--filter", "./web", "dev"],
 	startAfter: { processes: ["api"] },
-},</code></pre>
+	dependsOn: {
+		processes: ["api"],
+		run: { command: "pnpm", args: ["--filter", "./web", "codegen"] },
+	},
+}</code></pre>
 					<p>
-						<code>client</code> isn't forked until <code>api</code>'s own
-						<code>readyPattern</code> matches (or its <code>readyTimeoutMs</code>
-						elapses &mdash; same best-effort semantics as above); if <code>api</code>
-						sets no <code>readyPattern</code>, <code>client</code> forks as soon as
-						<code>api</code> has been forked. This only affects each process's first
-						spawn &mdash; once everything is up, later watch-triggered/
-						<code>dependsOn</code>/manual restarts are entirely unaffected, and
-						<code>start</code> itself doesn't wait around for a slow
-						<code>startAfter</code> chain to finish before returning. A
-						<code>startAfter</code> chain that loops back on itself is rejected at
-						startup, same as a circular <code>dependsOn</code>.
+						When <code>api</code> restarts, <code>web</code> waits until
+						<code>api</code> prints its ready line, stops, runs the codegen command, then
+						starts again. Hook commands are retried (5 times, 1 second apart by
+						default), since the process they rely on may still be warming up.
 					</p>
-				</section>
+					<div class="callout callout-note">
+						<p>
+							<code>readyPattern</code> is matched against each line exactly as the app
+							printed it, so anchors like <code>^</code> work. If it never matches
+							within <code>readyTimeoutMs</code> (10 seconds by default), braid notes it
+							in the process's log and carries on.
+						</p>
+					</div>
+					<p>
+						Circular <code>dependsOn</code> or <code>startAfter</code> chains, and names
+						that don't exist, are rejected when the stack starts.
+					</p>
 
-				<section id="starting-on-demand">
-					<h2>Starting on demand</h2>
-					<p>
-						Set <code>autoStart: false</code> to keep a process from forking at all
-						when <code>start</code> boots the whole stack &mdash; useful for a
-						cron-style job you only want to run when you ask for it. It's still
-						fully configured (listed by <code>status</code>/the dashboard as
-						&ldquo;not started&rdquo;), just never spawned automatically:
-					</p>
-					<pre><code class="language-typescript">{
-	name: "cron",
-	command: "pnpm",
-	args: ["--filter", "./jobs", "run", "nightly-report"],
-	autoStart: false, // @default true
-},</code></pre>
-					<p>
-						Start it later with <code>braid start cron</code>, the dashboard's Start
-						button, or <code>PluginContext.startProcess()</code> from a plugin. Calling
-						start on an already-running process is a safe no-op &mdash; it doesn't kill
-						and respawn it the way <code>restart</code> would. A process can combine
-						<code>autoStart: false</code> with its own <code>startAfter</code> &mdash;
-						its later manual start still waits on those dependencies first &mdash; but
-						not with <code>dependsOn</code> (a dependency's restart would force-start it
-						early, defeating the point), and it can't be named as someone else's
-						<code>startAfter</code> target (that dependent would never see it become
-						ready on its own). Both are rejected at startup.
-					</p>
-				</section>
-
-				<section id="restarting-on-crash">
-					<h2>Restarting on crash</h2>
+					<h2 id="crashes">When a process crashes</h2>
 					<p>
 						By default, any process exiting with a non-zero code stops the whole
-						stack (mirrors <code>concurrently --kill-others-on-fail</code>). Set
-						<code>autoRestart: true</code> to restart just that process instead,
-						with exponential backoff:
+						stack, so you're never debugging half of it. To restart just that process
+						instead, turn on <code>autoRestart</code>:
 					</p>
 					<pre><code class="language-typescript">{
 	name: "worker",
+	command: "node",
+	args: ["worker.js"],
+	autoRestart: true,
+	maxRestarts: 10,
+	restartDelayMs: 1000,
+}</code></pre>
+					<p>
+						Restarts back off exponentially (doubling, up to 10 seconds). After
+						<code>maxRestarts</code> crashes in a row, braid gives up and stops the
+						stack. A command that can't be started at all, such as a typo, stops the
+						stack straight away rather than retrying.
+					</p>
+
+					<h2 id="stopping">Stopping cleanly</h2>
+					<p>
+						braid stops a process with <code>SIGTERM</code>, then <code>SIGKILL</code>
+						if it's still running after <code>stopTimeoutMs</code> (5 seconds by
+						default). Raise it for an app with slow cleanup:
+					</p>
+					<pre><code class="language-typescript">{ name: "db", command: "./start-db.sh", stopTimeoutMs: 15000 }</code></pre>
+					<p>
+						Everything an app prints while shutting down still reaches its log.
+					</p>
+
+					<h2 id="on-demand">Processes you start yourself</h2>
+					<p>
+						<code>autoStart: false</code> keeps a process out of
+						<code>braid start</code>. It's still listed in <code>braid status</code>,
+						and you start it when you need it:
+					</p>
+					<pre><code class="language-typescript">{
+	name: "report",
 	command: "pnpm",
-	args: ["--filter", "./worker", "run", "start"],
-	autoRestart: true,       // @default false
-	maxRestarts: 10,         // @default 10 - give up (and stop the whole stack) after this many in a row
-	restartDelayMs: 1000,    // @default 1000 - base delay, doubling each attempt, capped at 10s
-	minUptimeMs: 1000,       // @default 1000 - a run this long or longer resets the consecutive-crash count
-},</code></pre>
-					<p>
-						A crash-triggered restart runs exactly like any other restart:
-						<code>onRestart</code> fires and any <code>dependsOn</code> dependents
-						cascade, once per attempt &mdash; including during a crash loop, so a
-						heavy <code>onRestart</code> hook will re-run more than once if the
-						process keeps failing fast.
-					</p>
-					<p>
-						A <code>command</code> that can't be started at all (not found, not
-						executable) stops the stack straight away with a <code>failed to start</code>
-						line in that process's log &mdash; it isn't retried even with
-						<code>autoRestart</code>, since it would fail the same way every time.
-					</p>
-					<p>
-						Each process runs under a small braid wrapper process. If that wrapper is
-						killed from outside braid by anything other than a plain
-						<code>SIGTERM</code>/<code>SIGINT</code> (a <code>kill -9</code>, the OOM
-						killer), braid kills the app it was supervising and treats it as a crash
-						too, rather than leaving the app running unsupervised.
-					</p>
-				</section>
+	args: ["--filter", "./jobs", "nightly-report"],
+	autoStart: false,
+}</code></pre>
+					<pre><code class="language-bash">npx braid start report</code></pre>
 
-				<section id="logs">
-					<h2>Logs</h2>
+					<h2 id="logs">Logs</h2>
 					<p>
-						Each process gets a rotated log file at <code>.braid/logs/&lt;name&gt;.log</code>.
-						Rotated (one backup kept) on every <code>start</code>, on a watch-triggered
-						restart, and past <code>logs.maxSizeBytes</code> (default 5MB, set at the
-						top level of the config, not per-process):
+						Each process writes to <code>.braid/logs/&lt;name&gt;.log</code>, with one
+						rotated backup. Logs rotate on every <code>start</code>, on watch and crash
+						restarts, and once a file passes <code>logs.maxSizeBytes</code> (5 MB by
+						default):
 					</p>
 					<pre><code class="language-typescript">export default defineConfig({
-	processes: [ /* ... */ ],
-	logs: {
-		dir: ".braid/logs",   // @default ".braid/logs"
-		maxSizeBytes: 5242880, // @default 5MB
-		timestamps: false,    // @default false
-	},
+	processes: [/* ... */],
+	logs: { dir: ".braid/logs", maxSizeBytes: 5_242_880, timestamps: true },
 });</code></pre>
 					<p>
-						Braid's own diagnostics (plugin failures, crash notices) go to
-						<code>.braid/daemon.log</code>; a
-						<code>dependsOn</code>/<code>onRestart</code>/<code>beforeRestart</code>
-						hook that keeps failing, or a <code>readyPattern</code> that never matches,
-						is also logged into the relevant process's own log &mdash; visible via
-						<code>braid logs</code>/<code>--follow</code>, not just <code>daemon.log</code>.
+						<code>timestamps</code> prefixes every line with the time. braid's own
+						messages, such as plugin errors, go to <code>.braid/daemon.log</code>. Read
+						logs with <a href="./cli.html#logs"><code>braid logs</code></a>.
 					</p>
-					<p>
-						<code>logs.timestamps</code> prepends a dimmed <code>HH:MM:SS.mmm</code> to
-						every line, before the <code>[name]</code> tag. It's the same bytes wherever
-						that line shows up &mdash; a process's log file, the web UI's log view, and
-						the terminal during <code>braid start</code> all get it together, there's no
-						way to enable it in just one place.
-					</p>
-				</section>
 
-				<section id="foreground">
-					<h2>Foreground mode</h2>
+					<h2 id="foreground">Foreground or background</h2>
 					<p>
-						<code>start</code> forks a background daemon by default. Set <code>foreground:
-						true</code> at the top level of the config to make it run attached to the
-						terminal instead &mdash; it then blocks, streaming every process's combined
-						output there, until Ctrl-C (or a <code>braid stop</code> from another
-						terminal) stops everything:
+						<code>braid start</code> runs the stack in a background daemon. Set
+						<code>foreground: true</code>, or pass <code>--foreground</code>, to keep
+						it attached to the terminal instead, streaming every process's output
+						until <kbd>Ctrl</kbd>+<kbd>C</kbd>. <code>--daemon</code> forces the
+						background mode whatever the config says.
 					</p>
-					<pre><code class="language-typescript">export default defineConfig({
-	processes: [ /* ... */ ],
-	foreground: true, // @default false
-});</code></pre>
-					<p>
-						Override this per invocation with <code>braid start --foreground</code> or
-						<code>braid start --daemon</code>, regardless of what the config says.
-					</p>
-					<p>
-						Each process runs in its own process group, so Ctrl-C reaches braid rather
-						than every app directly: braid then stops each one the same way it does in
-						daemon mode, with <code>SIGTERM</code> and a <code>SIGKILL</code> after
-						<code>stopTimeoutMs</code>. An app that ignores <code>SIGINT</code> no
-						longer outlives the stop.
-					</p>
-				</section>
 
-				<section id="startup-timeout">
-					<h2>Startup timeout</h2>
+					<h2 id="stats">Resource usage</h2>
 					<p>
-						A daemonized <code>start</code> waits for the daemon to confirm that every
-						plugin has registered and every process has forked. If that takes longer
-						than <code>startupTimeoutMs</code>, <code>start</code> fails and stops the
-						daemon, rather than leaving it running in the background. Raise it if a
-						plugin's <code>register()</code> or a cold TypeScript compile is
-						legitimately slow:
+						<code>braid status</code> and the dashboard show each process's CPU and
+						memory, covering the app and everything it starts (the real server under
+						a <code>pnpm dev</code>, a bundler's workers). Figures refresh every
+						<code>statsPollIntervalMs</code> (2 seconds by default). CPU appears from
+						the second sample.
 					</p>
-					<pre><code class="language-typescript">export default defineConfig({
-	processes: [ /* ... */ ],
-	startupTimeoutMs: 5000, // @default 5000
-});</code></pre>
-				</section>
-
-				<section id="stats">
-					<h2>Process stats, restart count, and uptime</h2>
-					<p>
-						Each process's CPU (percent of one core) and memory usage is sampled on a
-						timer, surfaced through <code>PluginContext.getProcesses()</code> (so
-						<code>GET /api/status</code> and <code>@aip-tech/braid-plugin-ui</code>'s
-						dashboard get it for free) and in <code>braid status</code>'s own output.
-						The figures cover the app's whole process tree: the configured
-						<code>command</code> and everything it starts (the real server under a
-						<code>pnpm dev</code>, a bundler's worker processes), but not braid's own
-						small wrapper process above it. Memory is each process's physical
-						footprint on macOS (what Activity Monitor shows) and RSS on Linux, added
-						up over the tree. CPU appears from the second sample, since it's measured
-						as the change in CPU time between two samples. On Windows there are no
-						stats. The status object's <code>appPid</code> is the app's own pid, and
-						is what <code>braid status</code> and the dashboard show. Adjust the
-						polling cadence at the top level of the config:
-					</p>
-					<pre><code class="language-typescript">export default defineConfig({
-	processes: [ /* ... */ ],
-	statsPollIntervalMs: 2000, // @default 2000
-});</code></pre>
-					<p>
-						A process that's stopped (or hasn't been sampled yet) simply has no
-						<code>cpu</code>/<code>memory</code> fields, rather than stale or zeroed
-						values.
-					</p>
-					<p>
-						The same status object also carries <code>restartCount</code>
-						&mdash; every completed restart since the daemon started (watch-triggered,
-						<code>autoRestart</code>, a manual <code>braid restart</code>, or a
-						<code>dependsOn</code> cascade), <code>0</code> rather than absent for a
-						process that's never restarted &mdash; and an <code>up Xh Ym</code>-style
-						uptime, computed from its <code>startedAt</code> timestamp. Both show up in
-						<code>braid status</code>'s text output and the dashboard's table/detail
-						views alongside CPU/memory.
-					</p>
-				</section>
-
-				<section id="startup-summary">
-					<h2>Startup summary and <code>url</code></h2>
-					<p>
-						Once every process has forked, <code>start</code> prints a one-time
-						summary &mdash; a header counting how many are actually alive, and one
-						line per configured process with its own alive marker, address (if it
-						set one), and pid:
-					</p>
-					<pre><code class="language-text">[braid] 3 processes running (pid 40213)
-  ● api      http://localhost:4000    pid 40214
-  ● web      http://localhost:5173    pid 40215
-  ● worker                            pid 40216</code></pre>
-					<p>
-						The address column comes from a process's own <code>url</code>, purely
-						informational &mdash; braid never verifies anything is actually
-						listening there, since there's no reliable, cross-platform way to detect
-						what a child process bound to without either it telling braid or
-						shelling out to something like <code>lsof</code> per-pid:
-					</p>
-					<pre><code class="language-typescript">export default defineConfig({
-	processes: [
-		{ name: "api", command: "pnpm", args: ["--filter", "./api", "run", "dev"], url: "http://localhost:4000" },
-	],
-});</code></pre>
-					<p>
-						This same summary prints in <code>--foreground</code> mode too, right
-						before the "Press Ctrl-C to stop" line. If <code>@aip-tech/braid-plugin-ui</code>
-						is configured, its own "open this URL" line prints right after the
-						summary, not before it.
-					</p>
-				</section>
-
-				<section id="json-output">
-					<h2>Machine-readable output</h2>
-					<p>
-						<code>braid status --json</code> and <code>braid logs [name] --json</code>
-						give the same data as their human-readable counterparts in a form meant
-						for scripting or CI, rather than a terminal:
-					</p>
-					<ul>
-						<li><code>status --json</code> prints one JSON array of the same status objects <code>GET /api/status</code> and the dashboard already use &mdash; no separate shape to learn.</li>
-						<li><code>logs [name] --json</code> streams newline-delimited JSON, one object per line: <code>{"name": "api", "text": "..."}</code>. ANSI color codes are stripped from <code>text</code>; the <code>[name]</code>/timestamp prefix itself is left in, since it's real, reconstructable text with no delimiter that reliably tells it apart from a process's own output that happens to look the same.</li>
-					</ul>
-					<p>
-						Both work with <code>--follow</code>/<code>--lines</code> exactly like the
-						default text output does, and with or without a specific process name.
-					</p>
-				</section>
+					<div class="callout callout-note">
+						<p>
+							On macOS, memory is the physical footprint Activity Monitor shows; on
+							Linux it's RSS. Windows gets no figures.
+						</p>
+					</div>
+				</article>
+				<nav id="pager"></nav>
 			</main>
+			<aside id="toc"></aside>
 		</div>
-
 		<script type="module" src="/src/main.ts"></script>
 	</body>
 </html>
