@@ -9,6 +9,12 @@ version bump.
 
 ### Added
 
+- A `daemonStopped` plugin lifecycle event, fired once every process has
+  stopped and its last output has been delivered, just before the
+  control server closes.
+- An `exports` map in `package.json`. Only the main entry point and
+  `./package.json` are importable; reaching into `dist/` files directly
+  no longer works.
 - `appPid` on each `PluginContext.getProcesses()` and `GET /api/status`
   entry: the app's own pid, as opposed to `pid` (braid's wrapper, which
   the pidfile and `braid stop` track). `braid status` and the startup
@@ -25,6 +31,23 @@ version bump.
 
 ### Changed
 
+- Requires Node 22.18 or later (`engines`), the first release that runs
+  a `braid.config.ts` natively. On an older Node, a TypeScript config's
+  load error now says so, rather than only "Unknown file extension".
+- Process names are validated at startup. A name can't contain `/`,
+  `\` or control characters, and can't be `.`, `..` or `*`: a name
+  becomes its log file's name, so a separator or `..` wrote that log
+  outside the logs directory, and `*` already means every process in
+  the log routes.
+- `readyPattern` is now tested against each line of the app's own
+  output, as the app printed it: without braid's `[name]` prefix,
+  timestamp or colors, and never against braid's own `braid: ...`
+  notices. An anchored pattern like `^Server listening` used to never
+  match, which stalled every restart for `readyTimeoutMs`. A pattern
+  that relied on spanning two lines no longer matches.
+- `daemonShutdown` now means shutdown has started. The control server
+  closes after the new `daemonStopped` event, not right after
+  `daemonShutdown`.
 - The `pidusage` dependency is gone (and with it `safe-buffer`). Stats
   come straight from `ps`, `/proc` and macOS's `footprint`. Windows,
   which braid has never claimed to support, now gets no stats at all.
@@ -77,6 +100,15 @@ version bump.
 
 ### Fixed
 
+- Whatever an app printed while shutting down (a "flushing state" line,
+  a final error) never reached its log or a `--foreground` terminal,
+  because the logs were closed before the processes were stopped. They
+  now close only after every process has exited and its output has been
+  read to the end.
+- A multi-byte character (é, 日, an emoji) split across two chunks of a
+  process's output became two U+FFFD replacement characters in its log,
+  its `[name]`-prefixed lines and `braid logs`. Output is now decoded
+  across chunk boundaries.
 - CPU and memory in `braid status`, `GET /api/status` and the dashboard
   described braid's own wrapper process, not the app: every process
   showed about 0-2% and 30-50 MB, whatever the app was doing. They now

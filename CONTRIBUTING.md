@@ -4,7 +4,7 @@ Thanks for taking a look. This is a small project, so the process is lightweight
 
 ## Setup
 
-Requires Node 22+ and [pnpm](https://pnpm.io) (the exact version is pinned in the root `package.json`'s `packageManager` field).
+Requires Node 22.18+ and [pnpm](https://pnpm.io) (the exact version is pinned in the root `package.json`'s `packageManager` field).
 
 ```bash
 git clone git@github.com:aip-tech/braid.git

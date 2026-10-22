@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
 	findDependencyCycle,
 	findStartAfterCycle,
+	invalidNameReason,
 	validateAutoStart,
 	validateDependsOn,
+	validateProcessNames,
 	validateReadyPattern,
 	validateStartAfter,
 	validateUniqueNames,
@@ -282,6 +284,36 @@ describe("validateAutoStart", () => {
 		expect(() => validateAutoStart([config("api"), cron])).toThrow(
 			/"cron" has autoStart: false and also declares dependsOn/,
 		);
+	});
+});
+
+describe("validateProcessNames", () => {
+	it("accepts ordinary names, including dots, dashes, spaces and unicode", () => {
+		expect(() =>
+			validateProcessNames(
+				["web", "api.v2", "my-app", "my app", "a..b", "日本"].map((name) =>
+					config(name),
+				),
+			),
+		).not.toThrow();
+	});
+
+	it("rejects names that would escape the logs directory, clash with '*', or break log lines", () => {
+		for (const [name, reason] of [
+			["../etc", "contains a path separator"],
+			["a/b", "contains a path separator"],
+			["a\\b", "contains a path separator"],
+			[".", "is a path segment"],
+			["..", "is a path segment"],
+			["*", "is reserved"],
+			["line\nbreak", "contains a control character"],
+			["bell\u0007", "contains a control character"],
+		]) {
+			expect(invalidNameReason(name as string)).toContain(reason);
+			expect(() => validateProcessNames([config(name as string)])).toThrow(
+				`braid: process name ${JSON.stringify(name)} ${invalidNameReason(name as string)}`,
+			);
+		}
 	});
 });
 

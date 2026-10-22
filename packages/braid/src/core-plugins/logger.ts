@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import SonicBoom from "sonic-boom";
 import { DEFAULT_LOG_MAX_SIZE_BYTES } from "../config.js";
 import { stripAnsi } from "../prefix.js";
@@ -17,7 +18,7 @@ type Destination = {
 	stream: SonicBoom;
 	filePath: string;
 	bytesWritten: number;
-	/** Set once daemonShutdown has called stream.end() on it - SonicBoom finishes destroying
+	/** Set once daemonStopped has called stream.end() on it - SonicBoom finishes destroying
 	 *  itself asynchronously, so a still-running process's own output can otherwise arrive in the
 	 *  gap and throw "SonicBoom destroyed" trying to write to it. */
 	ended: boolean;
@@ -36,6 +37,8 @@ type Destination = {
 	 *  the processOutput handler) - nothing is lost by not tracking it while nobody's watching that
 	 *  way, since a newly-connecting json follower only cares about lines from here on anyway. */
 	jsonPendingLine: string;
+	/** Reassembles a multi-byte character that the pipe split across two chunks. */
+	decoder: StringDecoder;
 };
 
 /** A live `/api/logs?follow=true` subscriber - `json` picked per-connection (via its own `?json=`
@@ -181,6 +184,7 @@ export const loggerPlugin: BraidPlugin = {
 				ended: false,
 				generation: rotated ? 1 : 0,
 				jsonPendingLine: "",
+				decoder: new StringDecoder("utf8"),
 			};
 			destinations.set(name, destination);
 			return destination;
@@ -209,7 +213,9 @@ export const loggerPlugin: BraidPlugin = {
 			const destination = getOrCreateDestination(event.name);
 			// Once shutting down, there's nowhere useful left to persist this to anyway.
 			if (destination.ended) return;
-			const text = event.chunk.toString();
+			// Decoded per destination, not per chunk: a multi-byte character split across two
+			// chunks would otherwise become two U+FFFD replacement characters (see linePrefixer).
+			const text = destination.decoder.write(event.chunk);
 			destination.stream.write(text);
 			destination.bytesWritten += Buffer.byteLength(text);
 			if (destination.bytesWritten >= maxSizeBytes) {
@@ -238,8 +244,11 @@ export const loggerPlugin: BraidPlugin = {
 			rotateNow(event.name);
 		});
 
-		// Ending followers here matters: an open one would otherwise hang controlServer.close().
-		ctx.on("daemonShutdown", () => {
+		// On daemonStopped, not daemonShutdown: the processes are still stopping when
+		// daemonShutdown fires, and whatever they print on their way out belongs in their logs (and
+		// in a `--foreground` terminal following them). Ending followers here also matters: an open
+		// one would otherwise hang controlServer.close(), which comes right after.
+		ctx.on("daemonStopped", () => {
 			clearInterval(heartbeat);
 			for (const set of followers.values()) {
 				for (const follower of set) follower.res.end();

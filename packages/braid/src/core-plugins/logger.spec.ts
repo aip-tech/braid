@@ -98,6 +98,37 @@ describe("core:logger plugin", () => {
 		await h.cleanup();
 	});
 
+	it("keeps writing what processes print after daemonShutdown, until daemonStopped", async () => {
+		const h = await createHarness();
+		emitOutput(h.emitter, "web", "[web] running\n");
+		h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+		// The app's own goodbye, printed while braid is stopping it.
+		emitOutput(h.emitter, "web", "[web] flushing state, bye\n");
+		h.emitter.emit("daemonStopped", { type: "daemonStopped" });
+		emitOutput(h.emitter, "web", "[web] after the end\n");
+		expect(readFileSync(h.logPath("web"), "utf8")).toBe(
+			"[web] running\n[web] flushing state, bye\n",
+		);
+		await h.cleanup();
+	});
+
+	it("keeps a multi-byte character intact when the pipe splits it across two chunks", async () => {
+		const h = await createHarness();
+		const bytes = Buffer.from("[web] 日本語 ok\n");
+		// Split inside "本" (3 bytes: e6 9c ac).
+		const cut = Buffer.from("[web] 日").length + 1;
+		for (const chunk of [bytes.subarray(0, cut), bytes.subarray(cut)]) {
+			h.emitter.emit("processOutput", {
+				type: "processOutput",
+				name: "web",
+				stream: "stdout",
+				chunk,
+			});
+		}
+		expect(readFileSync(h.logPath("web"), "utf8")).toBe("[web] 日本語 ok\n");
+		await h.cleanup();
+	});
+
 	it("defaults dir to .braid/logs under process.cwd() when no options are given at all", async () => {
 		const tmpDir = mkdtempSync(join(tmpdir(), "braid-logger-cwd-test-"));
 		const originalCwd = process.cwd();
@@ -287,7 +318,7 @@ describe("core:logger plugin", () => {
 				"broadcast\n",
 			);
 
-			h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+			h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 			await h.cleanup();
 		});
 
@@ -349,7 +380,7 @@ describe("core:logger plugin", () => {
 				"live chunk\n",
 			);
 
-			h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+			h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 			await h.cleanup();
 		});
 
@@ -369,11 +400,11 @@ describe("core:logger plugin", () => {
 				"live chunk\n",
 			);
 
-			h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+			h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 			await h.cleanup();
 		});
 
-		it("ends open followers on daemonShutdown instead of hanging control-server.close()", async () => {
+		it("ends open followers on daemonStopped instead of hanging control-server.close()", async () => {
 			const h = await createHarness();
 			const res = await fetch(
 				`http://127.0.0.1:${h.port}/api/logs?name=web&follow=true`,
@@ -382,7 +413,7 @@ describe("core:logger plugin", () => {
 			const reader = res.body?.getReader();
 			if (!reader) throw new Error("expected a readable response body");
 
-			h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+			h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 
 			const result = await Promise.race([
 				reader.read(),
@@ -418,7 +449,7 @@ describe("core:logger plugin", () => {
 					"still alive\n",
 				);
 
-				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 				await h.cleanup();
 			} finally {
 				vi.useRealTimers();
@@ -499,7 +530,7 @@ describe("core:logger plugin", () => {
 					JSON.parse(Buffer.from(value ?? new Uint8Array()).toString()),
 				).toEqual({ name: "web", text: "live line" });
 
-				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 				await h.cleanup();
 			});
 
@@ -527,7 +558,7 @@ describe("core:logger plugin", () => {
 					{ name: "web", text: "second" },
 				]);
 
-				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 				await h.cleanup();
 			});
 
@@ -561,7 +592,7 @@ describe("core:logger plugin", () => {
 					),
 				).toEqual({ name: "web", text: "shared" });
 
-				h.emitter.emit("daemonShutdown", { type: "daemonShutdown" });
+				h.emitter.emit("daemonStopped", { type: "daemonStopped" });
 				await h.cleanup();
 			});
 		});

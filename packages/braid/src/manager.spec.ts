@@ -3990,3 +3990,110 @@ describe("process stats", () => {
 		30_000,
 	);
 });
+
+describe("runManager name validation", () => {
+	it("rejects a process name that would put its log outside the logs directory, before taking the lock or spawning anything", async () => {
+		const tmpDir = mkdtempSync(join(tmpdir(), "braid-names-"));
+		const pidfilePath = join(tmpDir, ".braid", "run.json");
+		try {
+			await expect(
+				runManager([{ name: "../escape", command: "node" }], pidfilePath),
+			).rejects.toThrow('process name "../escape" contains a path separator');
+			expect(existsSync(join(tmpDir, ".braid", "start.lock"))).toBe(false);
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("readyPattern matching", () => {
+	let tmpDir: string;
+	let pidfilePath: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-ready-"));
+		pidfilePath = join(tmpDir, ".braid", "run.json");
+	});
+
+	afterEach(async () => {
+		await forceStopFromPidfile(pidfilePath);
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("matches an anchored pattern against the app's own text, even with timestamps and colors on", async () => {
+		const stderr = vi.spyOn(process.stderr, "write");
+		const startedAt = Date.now();
+		const managerPromise = runManager(
+			[
+				{
+					name: "api",
+					color: "blue",
+					command: "node",
+					args: [join(FIXTURES, "slow-start.js"), "200"],
+					// slow-start prints "ready-marker <pid>". Anchored, which only works once braid's
+					// own "HH:MM:SS.mmm [api] " prefix isn't part of what's matched.
+					readyPattern: "^ready-marker \\d+$",
+					readyTimeoutMs: 5000,
+				},
+				{
+					name: "web",
+					command: "node",
+					args: [join(FIXTURES, "keep-alive.js")],
+					startAfter: { processes: ["api"] },
+				},
+			],
+			pidfilePath,
+			{ logs: { timestamps: true } },
+		);
+		await waitFor(
+			() => statusFromPidfile(pidfilePath).some((w) => w.name === "web"),
+			{ timeoutMs: 8000 },
+		);
+		// Well inside the 5s readyTimeoutMs: it matched, rather than timing out.
+		expect(Date.now() - startedAt).toBeLessThan(4000);
+		expect(
+			stderr.mock.calls.some(([line]) =>
+				String(line).includes("never matched"),
+			),
+		).toBe(false);
+		stderr.mockRestore();
+		await stopFromPidfile(pidfilePath);
+		await managerPromise;
+	}, 15000);
+});
+
+describe("output printed while shutting down", () => {
+	it("still reaches the process's log", async () => {
+		const tmpDir = mkdtempSync(join(tmpdir(), "braid-shutdown-output-"));
+		const pidfilePath = join(tmpDir, ".braid", "run.json");
+		try {
+			const controller = new AbortController();
+			const managerPromise = runManager(
+				[
+					{
+						name: "app",
+						command: "node",
+						args: [join(FIXTURES, "graceful-exit.js")],
+					},
+				],
+				pidfilePath,
+				{ signal: controller.signal },
+			);
+			const logPath = join(dirname(pidfilePath), "logs", "app.log");
+			await waitFor(
+				() =>
+					existsSync(logPath) &&
+					readFileSync(logPath, "utf8").includes("started"),
+			);
+			controller.abort();
+			await managerPromise;
+
+			const log = readFileSync(logPath, "utf8");
+			expect(log).toContain("braid: stopping");
+			expect(log).toContain("graceful shutdown, flushing state");
+			expect(log).toContain("done, bye");
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
+	}, 15000);
+});

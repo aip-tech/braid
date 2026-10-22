@@ -47,8 +47,9 @@ export type ProcessConfig = {
 	 */
 	exclude?: string[];
 	/**
-	 * A regex (as a string, passed to `new RegExp()`) matched against this process's own
-	 * stdout/stderr after each restart. Until it matches (or `readyTimeoutMs` elapses), `onRestart`
+	 * A regex (as a string, passed to `new RegExp()`) matched against each line of this process's
+	 * own stdout/stderr after each restart - the line as the app printed it, without braid's
+	 * `[name]` prefix, timestamp or colors, and never braid's own `braid: ...` notices. Until it matches (or `readyTimeoutMs` elapses), `onRestart`
 	 * and any dependents' `dependsOn` cascades are held off - e.g. an API's own
 	 * `"Server listening"` log line, so a client's codegen hook doesn't run against a server that's
 	 * merely been re-spawned but hasn't finished its own startup yet. Without this, both are held
@@ -259,6 +260,11 @@ export type PluginLifecycleEvent =
 			chunk: Buffer;
 	  }
 	| { type: "daemonShutdown" }
+	| {
+			/** Every process has stopped and its last output has been delivered - fires after
+			 *  `daemonShutdown`, just before the control server closes. */
+			type: "daemonStopped";
+	  }
 	| {
 			/**
 			 * Fires once, after the control server is listening and every core/external plugin has

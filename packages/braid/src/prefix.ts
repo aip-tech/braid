@@ -1,3 +1,5 @@
+import { StringDecoder } from "node:string_decoder";
+
 const COLOR_CODES: Record<string, string> = {
 	black: "30",
 	red: "31",
@@ -27,6 +29,21 @@ const ANSI_PATTERN = [
 /** Strips ANSI escape sequences (color, cursor movement, OSC hyperlinks, ...) from `text`. */
 export function stripAnsi(text: string): string {
 	return text.replace(new RegExp(ANSI_PATTERN, "g"), "");
+}
+
+// linePrefixer's optional `HH:MM:SS.mmm ` timestamp, once colors are stripped.
+const TIMESTAMP_PREFIX = /^\d{2}:\d{2}:\d{2}\.\d{3} /;
+
+/**
+ * The app's own text from one line of a process's prefixed output: colors stripped (braid's and
+ * the app's own), then braid's timestamp and `[name] ` prefix removed. Undefined for braid's own
+ * `braid: ...` notices, which are in the same stream but aren't the app's output.
+ */
+export function appLineText(line: string, name: string): string | undefined {
+	let text = stripAnsi(line).replace(TIMESTAMP_PREFIX, "");
+	const tag = `[${name}] `;
+	if (text.startsWith(tag)) text = text.slice(tag.length);
+	return text.startsWith("braid: ") ? undefined : text;
 }
 
 // Every process gets its own configured color for its "[name]" prefix - braid's own messages
@@ -71,6 +88,10 @@ export function linePrefixer(
 ): LinePrefixer {
 	const namePrefix = `${colorize(`[${name}]`, color)} `;
 	let buffer = "";
+	// A pipe hands over output in arbitrary byte chunks, so a multi-byte character (é, 日, an
+	// emoji) can be split across two of them. Decoding each chunk on its own would turn both
+	// halves into U+FFFD; the decoder holds an incomplete character back until the rest arrives.
+	const decoder = new StringDecoder("utf8");
 
 	function prefixFor(): string {
 		if (!timestamps) return namePrefix;
@@ -81,7 +102,7 @@ export function linePrefixer(
 
 	return {
 		write(chunk) {
-			buffer += chunk.toString();
+			buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
 			const lines = buffer.split("\n");
 			// istanbul ignore next -- String.split always returns at least one element (even for an
 			// empty string), so pop() here can never actually be undefined.
@@ -91,6 +112,8 @@ export function linePrefixer(
 			}
 		},
 		flush() {
+			// Whatever the decoder was still holding (a truncated character at the very end).
+			buffer += decoder.end();
 			if (buffer.length > 0) {
 				sink(`${prefixFor()}${buffer}\n`);
 				buffer = "";

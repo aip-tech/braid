@@ -172,6 +172,19 @@ function validateProcessConfigShapes(
 	});
 }
 
+/**
+ * A pointer for the one config-load failure that isn't the config's own fault: a `.ts` config
+ * on a Node that can't run TypeScript natively (type stripping is on by default only from 22.18).
+ */
+export function configLoadHint(
+	error: unknown,
+	nodeVersion: string = process.version,
+): string {
+	const code = (error as { code?: unknown } | null)?.code;
+	if (code !== "ERR_UNKNOWN_FILE_EXTENSION") return "";
+	return ` (a TypeScript config needs Node 22.18 or later, which runs it natively - this is ${nodeVersion}. Upgrade Node, or use a braid.config.js/.mjs)`;
+}
+
 export async function loadConfig(configPath: string): Promise<BraidConfig> {
 	if (!existsSync(configPath)) {
 		throw new Error(`braid config not found at ${configPath}`);
@@ -185,7 +198,7 @@ export async function loadConfig(configPath: string): Promise<BraidConfig> {
 		throw new Error(
 			`braid: failed to load config at ${configPath}: ${
 				error instanceof Error ? error.message : String(error)
-			}`,
+			}${configLoadHint(error)}`,
 		);
 	}
 	const exported = mod.default;

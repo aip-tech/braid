@@ -10,6 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import treeKill from "tree-kill";
 import { childEnv } from "./child-env.js";
 import { createControlServer } from "./control-server.js";
@@ -17,6 +18,7 @@ import { CORE_PLUGINS } from "./core-plugins/index.js";
 import {
 	validateAutoStart,
 	validateDependsOn,
+	validateProcessNames,
 	validateReadyPattern,
 	validateStartAfter,
 	validateUniqueNames,
@@ -29,7 +31,7 @@ import {
 	safeEmit,
 	type WorkerSnapshot,
 } from "./plugin-runtime.js";
-import { braidTag, linePrefixer } from "./prefix.js";
+import { appLineText, braidTag, linePrefixer } from "./prefix.js";
 import {
 	currentStartId,
 	liveRecordedPids,
@@ -50,7 +52,8 @@ import type {
 
 const WORKER_PATH = siblingModulePath(import.meta.url, "worker");
 
-// How long shutdown() waits for daemonShutdown listeners before proceeding regardless.
+// How long shutdown() waits for daemonShutdown (and later daemonStopped) listeners before
+// proceeding regardless.
 const SHUTDOWN_EVENT_TIMEOUT_MS = 2000;
 
 const DEFAULT_HOOK_RETRIES = 5;
@@ -64,8 +67,11 @@ const DEFAULT_STOP_TIMEOUT_MS = 5000;
 // needs real margin above that inner budget, or it fires and does the real work first on every
 // call, defeating the point of the inner handler existing at all. See workerStopTimeoutMs.
 const WORKER_STOP_GRACE_MS = 2000;
-// Bounds the rolling buffer readyPattern is tested against, so a chatty process before it's
-// actually ready can't grow this without bound while still letting a match span two chunks.
+// How long shutdown() waits, once every worker has exited, for their last output to be read off
+// their pipes.
+const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
+// Bounds the partial line readyPattern carries between chunks, so one enormous line can't grow it
+// without bound.
 const READY_PATTERN_BUFFER_BYTES = 8192;
 // Matches the dashboard's own existing poll cadence (frontend/src/app.tsx), per the roadmap's
 // preference to reuse it rather than add a second one.
@@ -400,6 +406,7 @@ export async function runManager(
 			"braid: options.configPath is required to resolve options.plugins",
 		);
 	}
+	validateProcessNames(configs);
 	validateUniqueNames(configs);
 	validateDependsOn(configs);
 	validateStartAfter(configs);
@@ -432,6 +439,14 @@ export async function runManager(
 	// stopWorker. A crash report or a non-zero exit from one of these is the expected fallout of
 	// that stop, not a crash of its own.
 	const stoppingChildren = new WeakSet<ChildProcess>();
+	// Workers whose stdout/stderr have been fully read ('close' has fired) - see whenOutputDrained.
+	const drainedChildren = new WeakSet<ChildProcess>();
+
+	/** Resolves once `child`'s output pipes have been read to the end. */
+	function whenOutputDrained(child: ChildProcess): Promise<void> {
+		if (drainedChildren.has(child)) return Promise.resolve();
+		return new Promise((resolve) => child.once("close", () => resolve()));
+	}
 	// Each worker's current app pid (from its "app" message) - also that app's process group id,
 	// since workers spawn their apps detached. Used to clean up an app whose worker died without
 	// stopping it first (SIGKILLed, OOM-killed), which would otherwise be left orphaned.
@@ -767,8 +782,8 @@ export async function runManager(
 		// whatever was still in flight (mid-tree-kill children, unflushed log/log-follow output)
 		// and reporting a signal-based failure to whatever launched it (e.g. pnpm).
 
-		// Logged before daemonShutdown (below) closes every log stream - writing to one after
-		// that point throws (SonicBoom destroyed).
+		// Into each process's own log, so the stop shows up there next to whatever the app itself
+		// prints on its way out.
 		for (const [name, child] of children) {
 			if (
 				name !== crashedName &&
@@ -803,8 +818,29 @@ export async function runManager(
 			...[...hookChildren].map((child) =>
 				stopChild(child, { label: "hook process" }),
 			),
-			controlServer.close(),
 		]);
+		// A worker's 'exit' can come before the last of its output has been read from its pipes -
+		// exactly the lines an app prints while shutting down. Its 'close' means they're drained.
+		// Bounded, in case something still holds a pipe open.
+		let drainTimer: NodeJS.Timeout | undefined;
+		await Promise.race([
+			Promise.all([...children.values()].map(whenOutputDrained)),
+			new Promise((resolve) => {
+				drainTimer = setTimeout(resolve, OUTPUT_DRAIN_TIMEOUT_MS);
+			}),
+		]);
+		clearTimeout(drainTimer);
+		// Only now that every process has stopped, and its last output has gone to the logs and to
+		// anyone following them, do the log streams and followers close (see the logger plugin).
+		let stoppedEventTimer: NodeJS.Timeout | undefined;
+		await Promise.race([
+			safeEmit(emitter, "daemonStopped", { type: "daemonStopped" }),
+			new Promise((resolve) => {
+				stoppedEventTimer = setTimeout(resolve, SHUTDOWN_EVENT_TIMEOUT_MS);
+			}),
+		]);
+		clearTimeout(stoppedEventTimer);
+		await controlServer.close();
 		removePidfileIfOwned();
 		releaseStartLock();
 		process.off("SIGINT", onSignal);
@@ -1070,6 +1106,7 @@ export async function runManager(
 				void shutdown(1, config.name);
 			}
 		});
+		child.once("close", () => drainedChildren.add(child));
 		child.on("exit", (code, signal) => {
 			void safeEmit(emitter, "processExit", {
 				type: "processExit",
@@ -1231,18 +1268,28 @@ export async function runManager(
 		timeoutMs: number,
 	): Promise<boolean> {
 		return new Promise((resolve) => {
-			let buffer = "";
+			// Matched line by line against the app's own text (see appLineText), so a pattern sees
+			// exactly what the app printed - an anchored `^ready` works, and braid's own notices
+			// ("braid: stopping ...") can't match by accident. Only whole lines arrive here: the
+			// worker holds a partial line back until its newline.
+			const decoder = new StringDecoder("utf8");
+			let pending = "";
 			let settled = false;
+			const matches = (line: string) => {
+				const text = appLineText(line, name);
+				return text !== undefined && pattern.test(text);
+			};
 			const onOutput = (event: {
 				type: string;
 				name: string;
 				chunk: Buffer;
 			}) => {
 				if (event.type !== "processOutput" || event.name !== name) return;
-				buffer = (buffer + event.chunk.toString()).slice(
-					-READY_PATTERN_BUFFER_BYTES,
-				);
-				if (pattern.test(buffer)) settle(true);
+				const lines = (pending + decoder.write(event.chunk)).split("\n");
+				// A chunk can still end mid-line (the pipe splits the worker's writes however it
+				// likes) - bounded, so one enormous line can't grow it forever.
+				pending = (lines.pop() as string).slice(-READY_PATTERN_BUFFER_BYTES);
+				if (lines.some(matches)) settle(true);
 			};
 			const settle = (ready: boolean) => {
 				// istanbul ignore if -- can't actually happen twice: the first call below both clears

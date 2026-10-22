@@ -5,9 +5,30 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR makes an in-progress run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # Let every combination finish, so one platform's failure doesn't hide another's.
+      fail-fast: false
+      matrix:
+        # Linux and macOS are where braid runs (macOS is also where most of its users develop),
+        # and the two differ in exactly the places that matter: signals, process stats (/proc vs
+        # ps + footprint), file watching (inotify vs FSEvents) and pid identity.
+        os: [ubuntu-latest, macos-latest]
+        # The engines floor's major and the current LTS.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -24,10 +45,15 @@ jobs:
       # so the build has to run before typecheck, not just before publish.
       - run: pnpm build
 
+      # The dashboard's own build (vite + tsc), which `pnpm build` doesn't cover - it's what
+      # ships in the package, so it has to build cleanly too.
+      - run: pnpm --filter ./packages/ui-plugin run build
+
       - run: pnpm typecheck
 
       # Read-only, unlike the root `check` script (which uses --write for local dev auto-fix) -
       # CI should fail on formatting/lint issues, not silently fix and pass them.
       - run: npx biome check .
 
-      - run: pnpm test
+      # Runs every test with coverage; each package's vitest config fails the run below 100%.
+      - run: pnpm coverage
