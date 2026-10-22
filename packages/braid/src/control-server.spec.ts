@@ -16,6 +16,7 @@ import {
 	isLoopbackHost,
 	isSameOriginRequest,
 	parseRequestUrl,
+	WS_TICKET_TTL_MS,
 } from "./control-server.js";
 
 /** Sends `raw` bytes straight down a TCP socket and resolves with everything the server sent back
@@ -36,20 +37,19 @@ function rawRequest(port: number, raw: string): Promise<string> {
 function upgradeRequest(
 	port: number,
 	path: string,
-	onSocketReady?: (req: ReturnType<typeof httpRequest>) => void,
+	headers: Record<string, string> = {},
 ): Promise<"upgraded" | "closed"> {
 	return new Promise((resolve) => {
 		const req = httpRequest({
 			port,
 			host: "127.0.0.1",
 			path,
-			headers: { Connection: "Upgrade", Upgrade: "websocket" },
+			headers: { Connection: "Upgrade", Upgrade: "websocket", ...headers },
 		});
 		req.on("upgrade", () => resolve("upgraded"));
 		req.on("error", () => resolve("closed"));
 		req.on("close", () => resolve("closed"));
 		req.end();
-		onSocketReady?.(req);
 	});
 }
 
@@ -315,69 +315,6 @@ describe("createControlServer", () => {
 		);
 	});
 
-	it("finds a cookie by name, skipping a malformed segment (no '=') and a non-matching one", async () => {
-		const server = createControlServer();
-		server.registerRoute("GET", "/hello", (_req, res) => {
-			res.end("hi");
-		});
-		const { port } = await server.listen();
-
-		// Establishes the real cookie name/value via the same query-token dance a browser goes
-		// through, then resends it alongside a leading segment with no "=" at all and one whose
-		// name doesn't match - both must be skipped over, not mistaken for (or thrown off by).
-		const redirected = await fetch(
-			`http://127.0.0.1:${port}/hello?token=${server.token}`,
-			{ redirect: "manual" },
-		);
-		const cookiePair = (redirected.headers.get("set-cookie") ?? "").split(
-			";",
-		)[0];
-
-		const status = await new Promise<number | undefined>((resolve) => {
-			const req = httpRequest({
-				port,
-				host: "127.0.0.1",
-				path: "/hello",
-				headers: {
-					Cookie: `not-a-cookie-pair; other=irrelevant; ${cookiePair}`,
-				},
-			});
-			req.on("response", (res) => {
-				resolve(res.statusCode);
-				res.resume();
-			});
-			req.end();
-		});
-		expect(status).toBe(200);
-
-		await server.close();
-	});
-
-	it("401s when a Cookie header is present but none of its entries match the expected name", async () => {
-		const server = createControlServer();
-		server.registerRoute("GET", "/hello", (_req, res) => {
-			res.end("hi");
-		});
-		const { port } = await server.listen();
-
-		const status = await new Promise<number | undefined>((resolve) => {
-			const req = httpRequest({
-				port,
-				host: "127.0.0.1",
-				path: "/hello",
-				headers: { Cookie: "unrelated=value; also_unrelated=other" },
-			});
-			req.on("response", (res) => {
-				resolve(res.statusCode);
-				res.resume();
-			});
-			req.end();
-		});
-		expect(status).toBe(401);
-
-		await server.close();
-	});
-
 	it("serves static files under a prefix and blocks path traversal", async () => {
 		tmpDir = mkdtempSync(join(tmpdir(), "braid-static-"));
 		const servedDir = join(tmpDir, "served");
@@ -475,88 +412,115 @@ describe("createControlServer", () => {
 		await server.close();
 	});
 
-	it("dispatches a raw HTTP upgrade to a registered path, guarded by a query-string token", async () => {
+	it("serves static files without the token, but keeps routes and unknown paths behind it", async () => {
+		tmpDir = mkdtempSync(join(tmpdir(), "braid-static-"));
+		writeFileSync(join(tmpDir, "index.html"), "public");
 		const server = createControlServer();
-		server.registerUpgrade("/ws", (_req, socket) => {
-			socket.end(
-				"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-			);
+		server.registerStatic("/ui/", tmpDir);
+		server.registerRoute("GET", "/api/secret", (_req, res) => {
+			res.writeHead(200).end("secret");
 		});
 		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
 
-		const upgraded = await new Promise<boolean>((resolve) => {
-			const req = httpRequest({
-				port,
-				host: "127.0.0.1",
-				path: `/ws?token=${server.token}`,
-				headers: { Connection: "Upgrade", Upgrade: "websocket" },
-			});
-			req.on("upgrade", () => resolve(true));
-			req.on("error", () => resolve(false));
-			req.on("close", () => resolve(false));
-			req.end();
-		});
-		expect(upgraded).toBe(true);
+		const page = await fetch(`${base}/ui/`);
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe("public");
+		expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(page.headers.get("referrer-policy")).toBe("no-referrer");
 
-		const rejected = await new Promise<boolean>((resolve) => {
-			const req = httpRequest({
-				port,
-				host: "127.0.0.1",
-				path: "/ws?token=wrong",
-				headers: { Connection: "Upgrade", Upgrade: "websocket" },
-			});
-			// Both an error and a clean close count as "rejected" here.
-			req.on("upgrade", () => resolve(false));
-			req.on("error", () => resolve(true));
-			req.on("close", () => resolve(true));
-			req.end();
-		});
-		expect(rejected).toBe(true);
-
+		expect((await fetch(`${base}/api/secret`)).status).toBe(401);
+		// Unknown paths look the same as protected ones without the token: no probing for routes.
+		expect((await fetch(`${base}/api/nope`)).status).toBe(401);
+		const authed = { headers: { Authorization: `Bearer ${server.token}` } };
+		expect((await fetch(`${base}/api/nope`, authed)).status).toBe(404);
+		expect((await fetch(`${base}/api/secret`, authed)).status).toBe(200);
+		// Neither a query-string token nor a cookie authenticates any more.
+		expect(
+			(await fetch(`${base}/api/secret?token=${server.token}`)).status,
+		).toBe(401);
+		expect(
+			(
+				await fetch(`${base}/api/secret`, {
+					headers: { Cookie: `braid_token_${port}=${server.token}` },
+				})
+			).status,
+		).toBe(401);
 		await server.close();
 	});
 
-	it("dispatches a raw HTTP upgrade authenticated by the session cookie alone, no query token needed", async () => {
+	it("authenticates an upgrade by bearer header, or by a single-use ticket from POST /api/ws-ticket", async () => {
 		const server = createControlServer();
-		server.registerRoute("GET", "/hello", (_req, res) => {
-			res.end("hi");
-		});
 		server.registerUpgrade("/ws", (_req, socket) => {
 			socket.end(
 				"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
 			);
 		});
 		const { port } = await server.listen();
+		const auth = { Authorization: `Bearer ${server.token}` };
 
-		// The same GET ?token= -> Set-Cookie dance a browser navigation goes through.
-		const redirected = await fetch(
-			`http://127.0.0.1:${port}/hello?token=${server.token}`,
-			{ redirect: "manual" },
+		expect(await upgradeRequest(port, "/ws", auth)).toBe("upgraded");
+		expect(await upgradeRequest(port, "/ws")).toBe("closed");
+		expect(
+			await upgradeRequest(port, "/ws", { Authorization: "Bearer wrong" }),
+		).toBe("closed");
+		// The token itself is no longer accepted in the query string.
+		expect(await upgradeRequest(port, `/ws?token=${server.token}`)).toBe(
+			"closed",
 		);
-		const cookie = (redirected.headers.get("set-cookie") ?? "").split(";")[0];
-		expect(cookie).toContain(`braid_token_${port}=`);
 
-		const upgraded = await new Promise<boolean>((resolve) => {
-			const req = httpRequest({
-				port,
-				host: "127.0.0.1",
-				path: "/ws",
-				headers: {
-					Connection: "Upgrade",
-					Upgrade: "websocket",
-					Cookie: cookie,
-				},
-			});
-			req.on("upgrade", () => resolve(true));
-			req.on("error", () => resolve(false));
-			req.on("close", () => resolve(false));
-			req.end();
+		const ticketResponse = await fetch(
+			`http://127.0.0.1:${port}/api/ws-ticket`,
+			{ method: "POST", headers: auth },
+		);
+		const { ticket } = (await ticketResponse.json()) as { ticket: string };
+		expect(await upgradeRequest(port, `/ws?ticket=${ticket}`)).toBe("upgraded");
+		// Single use.
+		expect(await upgradeRequest(port, `/ws?ticket=${ticket}`)).toBe("closed");
+		expect(await upgradeRequest(port, "/ws?ticket=made-up")).toBe("closed");
+
+		// Issuing a ticket needs the token too.
+		const noAuth = await fetch(`http://127.0.0.1:${port}/api/ws-ticket`, {
+			method: "POST",
 		});
-		expect(upgraded).toBe(true);
-
+		expect(noAuth.status).toBe(401);
 		await server.close();
 	});
 
+	it("expires a WebSocket ticket after WS_TICKET_TTL_MS, and prunes expired ones when issuing", async () => {
+		const server = createControlServer();
+		server.registerUpgrade("/ws", (_req, socket) => {
+			socket.end(
+				"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+			);
+		});
+		const { port } = await server.listen();
+		const issue = async () =>
+			(
+				(await (
+					await fetch(`http://127.0.0.1:${port}/api/ws-ticket`, {
+						method: "POST",
+						headers: { Authorization: `Bearer ${server.token}` },
+					})
+				).json()) as { ticket: string }
+			).ticket;
+
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const stale = await issue();
+			const alsoStale = await issue();
+			vi.setSystemTime(Date.now() + WS_TICKET_TTL_MS);
+			expect(await upgradeRequest(port, `/ws?ticket=${stale}`)).toBe("closed");
+			// Issuing again sweeps out the other expired one too.
+			await issue();
+			expect(await upgradeRequest(port, `/ws?ticket=${alsoStale}`)).toBe(
+				"closed",
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+		await server.close();
+	});
 	it("close() resolves promptly even after keep-alive fetch() connections", async () => {
 		const server = createControlServer();
 		server.registerRoute("GET", "/ping", (_req, res) => {
@@ -568,85 +532,6 @@ describe("createControlServer", () => {
 		await fetch(`http://127.0.0.1:${port}/ping`, { headers });
 		await server.close();
 	}, 5000);
-
-	it("authenticates a GET via ?token=, sets a port-scoped cookie, and redirects stripping it", async () => {
-		const server = createControlServer();
-		server.registerRoute("GET", "/hello", (_req, res) => {
-			res.writeHead(200, { "content-type": "text/plain" }).end("hi");
-		});
-		const { port } = await server.listen();
-		const base = `http://127.0.0.1:${port}`;
-
-		const redirected = await fetch(`${base}/hello?token=${server.token}`, {
-			redirect: "manual",
-		});
-		expect(redirected.status).toBe(302);
-		expect(redirected.headers.get("location")).toBe("/hello");
-		const cookie = redirected.headers.get("set-cookie") ?? "";
-		expect(cookie).toContain(`braid_token_${port}=${server.token}`);
-		expect(cookie).toContain("HttpOnly");
-
-		// The cookie alone (no Authorization header, no query token) now authenticates.
-		const cookieValue = cookie.split(";")[0];
-		const viaCookie = await fetch(`${base}/hello`, {
-			headers: { Cookie: cookieValue },
-		});
-		expect(viaCookie.status).toBe(200);
-		expect(await viaCookie.text()).toBe("hi");
-
-		await server.close();
-	});
-
-	it("rejects a bad ?token= the same as a missing one, and doesn't redirect a POST", async () => {
-		const server = createControlServer();
-		server.registerRoute("POST", "/action", (_req, res) => {
-			res.end("done");
-		});
-		const { port } = await server.listen();
-		const base = `http://127.0.0.1:${port}`;
-
-		const bad = await fetch(`${base}/action?token=wrong`, { method: "POST" });
-		expect(bad.status).toBe(401);
-
-		const good = await fetch(`${base}/action?token=${server.token}`, {
-			method: "POST",
-		});
-		expect(good.status).toBe(200);
-		expect(await good.text()).toBe("done");
-
-		await server.close();
-	});
-
-	it("scopes the auth cookie by port, so two servers don't collide", async () => {
-		const serverA = createControlServer();
-		const serverB = createControlServer();
-		serverA.registerRoute("GET", "/hello", (_req, res) => {
-			res.end("a");
-		});
-		serverB.registerRoute("GET", "/hello", (_req, res) => {
-			res.end("b");
-		});
-		const { port: portA } = await serverA.listen();
-		const { port: portB } = await serverB.listen();
-
-		const cookieA = (
-			await fetch(`http://127.0.0.1:${portA}/hello?token=${serverA.token}`, {
-				redirect: "manual",
-			})
-		).headers.get("set-cookie");
-		const cookieB = (
-			await fetch(`http://127.0.0.1:${portB}/hello?token=${serverB.token}`, {
-				redirect: "manual",
-			})
-		).headers.get("set-cookie");
-
-		expect(cookieA).toContain(`braid_token_${portA}=`);
-		expect(cookieB).toContain(`braid_token_${portB}=`);
-		expect(cookieA).not.toBe(cookieB);
-
-		await serverA.close();
-		await serverB.close();
-	});
 
 	it("rejects listen() if the underlying server's own address can't be determined", async () => {
 		// server.listen(0, "127.0.0.1", ...) always yields a real AddressInfo in practice - this
@@ -787,10 +672,14 @@ describe("createControlServer", () => {
 		);
 		expect(malformed).toBe("");
 		expect(
-			await upgradeRequest(port, `/sync-throw?token=${server.token}`),
+			await upgradeRequest(port, "/sync-throw", {
+				Authorization: `Bearer ${server.token}`,
+			}),
 		).toBe("closed");
 		expect(
-			await upgradeRequest(port, `/async-throw?token=${server.token}`),
+			await upgradeRequest(port, "/async-throw", {
+				Authorization: `Bearer ${server.token}`,
+			}),
 		).toBe("closed");
 		for (const message of ["sync boom", "async boom"]) {
 			expect(
@@ -820,7 +709,7 @@ describe("createControlServer", () => {
 
 		const socket = connect(port, "127.0.0.1", () => {
 			socket.write(
-				`GET /hold?token=${server.token} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+				`GET /hold HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${server.token}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
 			);
 			// Give the server a moment to dispatch the upgrade, then reset (RST, not FIN).
 			setTimeout(() => socket.resetAndDestroy(), 100);
@@ -944,10 +833,11 @@ describe("createControlServer", () => {
 					const req = httpRequest({
 						port,
 						host: "127.0.0.1",
-						path: `/ws?token=${server.token}`,
+						path: "/ws",
 						headers: {
 							Connection: "Upgrade",
 							Upgrade: "websocket",
+							Authorization: `Bearer ${server.token}`,
 							...headers,
 						},
 					});

@@ -226,7 +226,10 @@ importers:
         version: link:../ui-plugin
 
   packages/ui-plugin:
-    dependencies:
+    devDependencies:
+      '@aip-tech/braid':
+        specifier: workspace:*
+        version: link:../braid
       '@tanstack/virtual-core':
         specifier: ^3.17.8
         version: 3.17.8
@@ -236,10 +239,6 @@ importers:
       preact:
         specifier: ^10.29.8
         version: 10.29.8
-    devDependencies:
-      '@aip-tech/braid':
-        specifier: workspace:*
-        version: link:../braid
       vite:
         specifier: ^8.2.1
         version: 8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12)

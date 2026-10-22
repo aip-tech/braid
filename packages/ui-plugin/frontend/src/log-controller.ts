@@ -5,6 +5,7 @@ import {
 	Virtualizer,
 } from "@tanstack/virtual-core";
 import { AnsiUp } from "ansi_up";
+import { authFetch, TOKEN_REJECTED_MESSAGE } from "./auth.js";
 
 // Log lines are held as a plain array (`lines`) and rendered through a single
 // @tanstack/virtual-core Virtualizer instance - only the rows actually visible (plus a small
@@ -325,7 +326,7 @@ export class LogController {
 
 	private async loadInitialHistory(stream: ActiveStream): Promise<void> {
 		try {
-			const res = await fetch(
+			const res = await authFetch(
 				`/api/logs/history?name=${encodeURIComponent(stream.name)}&lines=${INITIAL_LOG_LINES}`,
 				{ signal: stream.controller.signal },
 			);
@@ -358,7 +359,7 @@ export class LogController {
 		try {
 			// istanbul ignore next -- the `?? ""` fallback is unreachable: loadOlder(), the only
 			// caller, already returns early when `stream.historyCursor === null`.
-			const res = await fetch(
+			const res = await authFetch(
 				`/api/logs/history?name=${encodeURIComponent(stream.name)}&lines=${HISTORY_PAGE_LINES}&before=${encodeURIComponent(stream.historyCursor ?? "")}`,
 				{ signal: stream.controller.signal },
 			);
@@ -449,16 +450,14 @@ export class LogController {
 
 	private async runLogStream(stream: ActiveStream): Promise<void> {
 		try {
-			const res = await fetch(
+			const res = await authFetch(
 				`/api/logs?name=${encodeURIComponent(stream.name)}&follow=true&lines=${RECONNECT_REPLAY_LINES}`,
 				{ signal: stream.controller.signal },
 			);
 			if (this.activeStream !== stream) return;
 
 			if (res.status === 401) {
-				this.callbacks.onStatusChange(
-					"Session expired (the daemon may have restarted) - reload this page.",
-				);
+				this.callbacks.onStatusChange(TOKEN_REJECTED_MESSAGE);
 				return;
 			}
 			if (res.status === 404) {

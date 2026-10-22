@@ -52,7 +52,9 @@ export const uiPlugin: BraidPlugin = {
 		// register() itself runs before controlServer.listen() resolves.
 		ctx.on("controlServerReady", ({ port, token }) => {
 			ctx.log(
-				`dashboard ready - open http://127.0.0.1:${port}${prefix}?token=${token} in your browser`,
+				// The token goes in the fragment, which the browser keeps to itself: the page reads it
+				// from there and sends it as a header (frontend/src/auth.ts).
+				`dashboard ready - open http://127.0.0.1:${port}${prefix}#token=${token} in your browser`,
 			);
 		});
 	},

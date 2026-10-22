@@ -100,7 +100,7 @@ describe("postAction", () => {
 
 		expect(fetchMock).toHaveBeenCalledWith(
 			"/api/processes/stop?name=my%20proc",
-			{ method: "POST" },
+			expect.objectContaining({ method: "POST" }),
 		);
 		expect(result).toEqual({
 			ok: true,

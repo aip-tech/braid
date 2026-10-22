@@ -116,10 +116,11 @@ export default helloPlugin;</code></pre>
 						devcontainer port forward. It also
 						requires a bearer token on every request (a per-run secret written to the
 						pidfile) &mdash; enforced automatically for every route, a plugin's own
-						handler doesn't need to check it. A plain browser navigation can't send a
-						bearer header, so a one-time <code>?token=</code> query param is also
-						accepted; see <a href="#browser-content">Serving browser content</a> if
-						you're building something a browser loads directly.
+						handler doesn't need to check it. The token is accepted only as an
+						<code>Authorization: Bearer</code> header: never as a cookie or a query
+						parameter. Static files are the exception, served without it; see
+						<a href="#browser-content">Serving browser content</a> if you're building
+						something a browser loads directly.
 					</p>
 				</section>
 
@@ -152,28 +153,31 @@ export default helloPlugin;</code></pre>
 				<section id="browser-content">
 					<h2>Serving browser content</h2>
 					<p>
-						The control server's bearer-token check runs on every request, including
-						static files &mdash; a plain browser navigation to
-						<code>http://127.0.0.1:&lt;port&gt;/</code> can't send an
-						<code>Authorization</code> header, so it needs a different entry point than
-						an API client gets.
+						Files registered with <code>registerStatic</code> are served
+						<em>without</em> the token, since a page can't put a header on its own
+						<code>&lt;script&gt;</code> and <code>&lt;link&gt;</code> loads. Treat a static
+						directory as public: put nothing secret in it. Routes and upgrades still
+						need the token.
 					</p>
 					<p>
-						A one-time <code>?token=&lt;token&gt;</code> query param is accepted as an
-						alternative to the header. The first request that authenticates this way
-						gets a session cookie (scoped to that control server's own port, since a
-						browser's cookie jar for <code>127.0.0.1</code> isn't itself port-scoped)
-						and, for a GET, a redirect that strips the token back off the visible URL.
-						From then on the browser's own <code>fetch()</code> calls authenticate via
-						that cookie automatically &mdash; no token needs to live in the page's own
-						JavaScript.
+						To give a page the token, log its URL with the token in the fragment,
+						<code>http://127.0.0.1:&lt;port&gt;/#token=&lt;token&gt;</code>, from a
+						<code>controlServerReady</code> listener. Browsers never send a fragment to
+						any server. The page reads it from <code>location.hash</code>, keeps it in
+						<code>sessionStorage</code>, strips it from the address bar with
+						<code>history.replaceState</code>, and sends
+						<code>Authorization: Bearer &lt;token&gt;</code> on its own
+						<code>fetch()</code> calls.
 					</p>
 					<p>
-						Putting this together, a plugin serving a browser-facing page typically
-						calls <code>registerStatic</code> during <code>register()</code>, then waits
-						for <code>controlServerReady</code> to log an open-this-URL line with the
-						token attached &mdash; see the
-						<a href="https://github.com/aip-tech/braid/blob/main/packages/ui-plugin/src/index.ts"><code>@aip-tech/braid-plugin-ui</code></a>
+						A browser can't set headers on a WebSocket, so for an upgrade the page
+						first calls <code>POST /api/ws-ticket</code> (with the header) to get a
+						single-use ticket, valid for 30 seconds, and connects with
+						<code>?ticket=&lt;ticket&gt;</code>.
+					</p>
+					<p>
+						See the
+						<a href="https://github.com/aip-tech/braid/blob/main/packages/ui-plugin/frontend/src/auth.ts"><code>@aip-tech/braid-plugin-ui</code></a>
 						source for a working example.
 					</p>
 				</section>

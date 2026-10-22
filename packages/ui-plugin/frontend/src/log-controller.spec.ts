@@ -300,7 +300,9 @@ describe("LogController: start/stop/destroy", () => {
 		const c = makeController();
 		c.start("web");
 		await flush();
-		expect(statusMessages.at(-1)).toContain("Session expired");
+		expect(statusMessages.at(-1)).toContain(
+			"didn't accept this page's access token",
+		);
 
 		fetchImpl = defaultRouter;
 		c.start("worker");
@@ -643,7 +645,9 @@ describe("LogController: live follow stream response handling", () => {
 		makeController().start("web");
 		await flush();
 
-		expect(statusMessages.at(-1)).toContain("Session expired");
+		expect(statusMessages.at(-1)).toContain(
+			"didn't accept this page's access token",
+		);
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(followCalls).toBe(1);
 	});

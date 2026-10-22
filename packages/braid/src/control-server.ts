@@ -12,7 +12,7 @@ import { braidTag } from "./prefix.js";
 import type { RouteHandler, UpgradeHandler } from "./types.js";
 
 /**
- * Constant-time string comparison - a bearer/cookie/query token check against `a === b` would
+ * Constant-time string comparison - a bearer token check against `a === b` would
  * short-circuit on the first mismatched byte, letting a local attacker who can send enough timed
  * requests recover the secret one byte at a time from response-timing differences.
  */
@@ -127,17 +127,16 @@ function describeError(error: unknown): string {
 		: String(error);
 }
 
-/** Reads `name`'s value out of a raw `Cookie` request header, if present. */
-function readCookie(req: IncomingMessage, name: string): string | undefined {
-	const header = req.headers.cookie;
-	if (!header) return undefined;
-	for (const part of header.split(";")) {
-		const eq = part.indexOf("=");
-		if (eq === -1) continue;
-		if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-	}
-	return undefined;
+/** The bearer token from a request's `Authorization` header, if it has one. */
+function bearerToken(req: IncomingMessage): string | undefined {
+	const header = req.headers.authorization;
+	return header?.startsWith("Bearer ")
+		? header.slice("Bearer ".length)
+		: undefined;
 }
+
+// How long a WebSocket ticket from POST /api/ws-ticket stays redeemable.
+export const WS_TICKET_TTL_MS = 30_000;
 
 export type ControlServer = {
 	registerRoute(method: string, path: string, handler: RouteHandler): void;
@@ -148,17 +147,54 @@ export type ControlServer = {
 	readonly token: string;
 };
 
-/** A loopback-only HTTP server, bearer-token-guarded on every request. */
+/**
+ * A loopback-only HTTP server. Every route and upgrade requires the per-run token, sent as
+ * `Authorization: Bearer <token>`; there is deliberately no cookie or query-string form. A cookie
+ * would be sent to every server on 127.0.0.1 whatever its port (cookies aren't port-scoped), so
+ * any other local dev server's request logs could capture it; a query string ends up in history
+ * and logs. A browser page gets the token from the URL fragment braid prints (`#token=...`), which
+ * browsers never send to any server, and attaches the header itself.
+ *
+ * Static files (`registerStatic`) are served without the token: a page has no way to put a header
+ * on its own `<script>`/`<link>` loads, and they're a plugin's public bundle anyway. Everything
+ * that reads or changes state stays behind the token.
+ *
+ * A browser can't set headers on a WebSocket either, so an upgrade also accepts a single-use
+ * `?ticket=`, issued to an already-authenticated page by `POST /api/ws-ticket` and valid for
+ * WS_TICKET_TTL_MS - short-lived and single-use, so one that ends up in a log is already spent.
+ */
 export function createControlServer(): ControlServer {
 	const token = randomBytes(24).toString("hex");
 	const routes = new Map<string, RouteHandler>();
 	const staticEntries: StaticEntry[] = [];
 	const upgrades = new Map<string, UpgradeHandler>();
-	// Set once listen() resolves and the real port is known. Scoped by port (not a bare name)
-	// because a browser's cookie jar for "127.0.0.1" isn't port-scoped (RFC 6265 has no port in its
-	// scoping) - two braid daemons for two different projects, each on their own ephemeral port,
-	// would otherwise silently overwrite each other's cookie.
-	let cookieName = "braid_token";
+	// WebSocket ticket -> expiry (epoch ms). Pruned whenever one is issued, so it can't grow.
+	const tickets = new Map<string, number>();
+
+	function issueTicket(): string {
+		const now = Date.now();
+		for (const [ticket, expiresAt] of tickets) {
+			if (expiresAt <= now) tickets.delete(ticket);
+		}
+		const ticket = randomBytes(24).toString("hex");
+		tickets.set(ticket, now + WS_TICKET_TTL_MS);
+		return ticket;
+	}
+
+	/** Spends `ticket`: true only the first time, and only before it expires. */
+	function redeemTicket(ticket: string | null): boolean {
+		if (ticket === null) return false;
+		const expiresAt = tickets.get(ticket);
+		if (expiresAt === undefined) return false;
+		tickets.delete(ticket);
+		return expiresAt > Date.now();
+	}
+
+	routes.set("POST /api/ws-ticket", (_req, res) => {
+		res
+			.writeHead(200, { "content-type": "application/json" })
+			.end(JSON.stringify({ ticket: issueTicket() }));
+	});
 
 	async function serveStatic(
 		entry: StaticEntry,
@@ -183,10 +219,14 @@ export function createControlServer(): ControlServer {
 		}
 		const contentType =
 			MIME_TYPES[extname(filePath)] ?? "application/octet-stream";
-		const headers: Record<string, string> = { "content-type": contentType };
-		// Belt-and-suspenders for the brief window (before the query-token redirect below fires)
-		// where a served HTML page's URL might still carry a `?token=` - an outbound request from
-		// that page (an <img>/beacon/external link) shouldn't leak it via Referer.
+		// nosniff: a file is only ever run as the type its extension says - static files are served
+		// without the token now, so they shouldn't be reinterpretable as something else.
+		const headers: Record<string, string> = {
+			"content-type": contentType,
+			"x-content-type-options": "nosniff",
+		};
+		// A served page shouldn't tell the sites it links to where it lives. (The token itself is in
+		// the URL fragment, which browsers never put in a Referer anyway.)
 		if (contentType.startsWith("text/html")) {
 			headers["referrer-policy"] = "no-referrer";
 		}
@@ -229,42 +269,16 @@ export function createControlServer(): ControlServer {
 			return;
 		}
 
-		const headerToken = req.headers.authorization?.startsWith("Bearer ")
-			? req.headers.authorization.slice("Bearer ".length)
-			: undefined;
-		const cookieToken = readCookie(req, cookieName);
-		const queryToken = url.searchParams.get("token") ?? undefined;
-		const authenticated =
-			safeEqual(headerToken ?? "", token) ||
-			safeEqual(cookieToken ?? "", token);
-		// Only treated as a *fresh* query-token auth if header/cookie didn't already cover it - a
-		// stale `?token=` alongside a valid cookie shouldn't re-trigger the redirect below.
-		const viaQueryOnly = !authenticated && safeEqual(queryToken ?? "", token);
-		if (!authenticated && !viaQueryOnly) {
-			res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
-			return;
-		}
-
-		if (viaQueryOnly) {
-			// A plain browser navigation can't send an Authorization header, so a one-time `?token=`
-			// (mirroring the upgrade handler's own query-token carve-out below) establishes a session
-			// cookie instead - the page's own subsequent fetch()es then authenticate via that cookie
-			// without the secret needing to live in every URL.
-			res.setHeader(
-				"Set-Cookie",
-				`${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict`,
-			);
-			if (method === "GET") {
-				// Strip the token from the visible URL/history now that the cookie carries it - the
-				// browser re-navigates, this time cookie-authenticated.
-				url.searchParams.delete("token");
-				res.writeHead(302, { location: `${url.pathname}${url.search}` }).end();
-				return;
-			}
-		}
+		const authenticated = safeEqual(bearerToken(req) ?? "", token);
 
 		const routeHandler = routes.get(`${method} ${url.pathname}`);
 		if (routeHandler) {
+			if (!authenticated) {
+				res
+					.writeHead(401, { "content-type": "text/plain" })
+					.end("Unauthorized");
+				return;
+			}
 			try {
 				await routeHandler(req, res);
 			} catch (error) {
@@ -291,6 +305,12 @@ export function createControlServer(): ControlServer {
 			return;
 		}
 
+		// Without the token, an unknown path looks the same as a protected one - no probing for
+		// which routes exist.
+		if (!authenticated) {
+			res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
+			return;
+		}
 		res.writeHead(404, { "content-type": "text/plain" }).end("Not found");
 	}
 
@@ -318,13 +338,11 @@ export function createControlServer(): ControlServer {
 			socket.destroy();
 			return;
 		}
-		// The cookie a prior GET's ?token= redirect already established authenticates an upgrade
-		// too, not just the raw query token - without this, a page that's otherwise never had to
-		// keep the secret in reach of its own JS would have no way to open a WebSocket without
-		// putting it in a URL (visible in devtools/history/a screen share) purely for this.
+		// A non-browser client sends the bearer header; a browser page, which can't, redeems a
+		// ticket it fetched with that header moments before (see this server's doc comment).
 		const authenticated =
-			safeEqual(url.searchParams.get("token") ?? "", token) ||
-			safeEqual(readCookie(req, cookieName) ?? "", token);
+			safeEqual(bearerToken(req) ?? "", token) ||
+			redeemTicket(url.searchParams.get("ticket"));
 		const handler = authenticated ? upgrades.get(url.pathname) : undefined;
 		if (!handler) {
 			socket.destroy();
@@ -380,7 +398,6 @@ export function createControlServer(): ControlServer {
 						reject(new Error("braid: control server failed to bind a port"));
 						return;
 					}
-					cookieName = `braid_token_${address.port}`;
 					resolve({ port: address.port });
 				});
 			});
