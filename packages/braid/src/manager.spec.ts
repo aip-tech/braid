@@ -31,6 +31,8 @@ import type { Pidfile, ProcessConfig } from "./types.js";
 const statsControl = vi.hoisted(() => ({
 	delayMs: 0,
 	dropPids: new Set<number>(),
+	// How many samples have actually had a pid dropped, so a test can wait for one.
+	dropsApplied: 0,
 	forceRejectWith: undefined as unknown,
 }));
 vi.mock("./process-stats.js", async (importOriginal) => {
@@ -50,7 +52,9 @@ vi.mock("./process-stats.js", async (importOriginal) => {
 					throw rejection;
 				}
 				const result = await sample(rootPids);
-				for (const pid of statsControl.dropPids) result.delete(pid);
+				for (const pid of statsControl.dropPids) {
+					if (result.delete(pid)) statsControl.dropsApplied++;
+				}
 				await pause();
 				return result;
 			};
@@ -918,9 +922,13 @@ describe("runManager plugin support", () => {
 				body.some((w) => w.name === "one" && typeof w.appPid === "number"),
 			)
 		).find((w) => w.name === "one")?.appPid as number;
+		statsControl.dropsApplied = 0;
 		statsControl.dropPids.add(oneAppPid);
 
 		try {
+			// "two" may already have stats from a poll before the drop, so wait for a poll that
+			// really left "one" out before checking.
+			await waitFor(() => statsControl.dropsApplied > 0);
 			// "two" still gets sampled normally even though "one"'s app never shows up in the sample
 			// (the shape an app that exited between being listed and being sampled produces).
 			const withStats = await waitForStatus(pidfile, (body) => {
