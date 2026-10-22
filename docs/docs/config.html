@@ -161,6 +161,24 @@ export default defineConfig({
 					<p>
 						Everything an app prints while shutting down still reaches its log.
 					</p>
+					<div class="callout callout-note" data-title="pnpm errors on stop">
+						<p>
+							A process started with <code>pnpm --filter ./api run dev</code> may print
+							<code>ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL</code> or
+							<code>ELIFECYCLE Command failed</code> whenever braid stops it. pnpm reports
+							its script ending on <code>SIGTERM</code> as a failure. braid knows it
+							stopped the process, so it's harmless. To avoid it, run the tool with
+							<code>pnpm exec</code> from the package's folder:
+						</p>
+						<pre><code class="language-typescript">{
+	name: "api",
+	command: "pnpm",
+	args: ["exec", "tsx", "index.ts"],
+	cwd: "api",
+	watch: ["src"],
+}</code></pre>
+						<p><code>watch</code> paths are relative to <code>cwd</code>.</p>
+					</div>
 
 					<h2 id="on-demand">Processes you start yourself</h2>
 					<p>
